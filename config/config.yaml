@@ -1,0 +1,89 @@
+# ERP Agent 系统配置文件
+# 敏感信息（API Key 等）通过环境变量注入，不在此文件中存储
+
+app:
+  name: "ERP Analysis Agent"
+  version: "0.1.0"
+  debug: false
+  language: "zh"  # 报告语言：zh=中文
+
+llm:
+  provider: "qwen"          # 模型提供商：zhipu / openai / deepseek / qwen
+  model: "qwen3-max"             # 默认模型
+  # api_base: "https://open.bigmodel.cn/api/paas/v4"  # API Base URL
+  api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  # api_key: 通过环境变量 LLM_API_KEY 注入
+  temperature: 0.1
+  max_tokens: 4096
+  timeout: 120               # 请求超时（秒）
+  max_retries: 3             # 最大重试次数
+
+neo4j:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  # password: 通过环境变量 NEO4J_PASSWORD 注入
+  database: "neo4j"
+  max_connection_pool_size: 10
+
+chroma:
+  persist_directory: "./data/chroma"
+  collection_name: "erp_ontology"
+  embedding_model: "text-embedding-3-small"
+
+postgresql:
+  host: "localhost"
+  port: 5432
+  database: "eragent"
+  username: "postgres"
+  # password: 通过环境变量 POSTGRES_PASSWORD 注入
+  pool_size: 5
+  max_overflow: 10
+
+analysis:
+  default_time_range_days: 30    # 默认分析时间范围（天）
+  max_time_range_days: 365       # 单次查询最大时间范围（天）
+  response_timeout_seconds: 5.0  # 单次分析响应超时（秒）
+
+p2p:
+  three_way_match:
+    default_tolerance_pct: 5.0   # 三路匹配默认容差（%）
+    max_tolerance_pct: 10.0      # 最大容差上限（%）
+    # 按供应商配置容差（示例）
+    supplier_tolerances: {}
+    # 按物料类别配置容差（示例）
+    category_tolerances:
+      RAW_MATERIAL: 10.0         # 大宗原材料放宽至10%
+    # 按金额区间配置容差（示例）
+    amount_thresholds:
+      - min_amount: 1000000      # 金额超过100万收紧
+        tolerance_pct: 2.0
+
+  payment_compliance:
+    early_payment_threshold_days: 5   # 提前超过N天预警
+    overdue_severity:
+      low_days: 7                     # 逾期<7天：LOW
+      medium_days: 30                 # 逾期7-30天：MEDIUM
+      high_days: 30                   # 逾期>30天：HIGH
+
+  supplier_performance:
+    benchmarks:
+      otif_rate: 95.0                 # OTIF 基准值（%）
+      invoice_accuracy_rate: 99.0     # 发票准确率基准值（%）
+      quality_pass_rate: 98.0         # 质量合格率基准值（%）
+      price_compliance_rate: 98.0     # 价格执行率基准值（%）
+
+  anomaly_severity:
+    high_amount_threshold: 500000     # 金额超过50万自动升为HIGH
+    variance_high_multiplier: 2.0     # 超容差2倍以上为HIGH
+
+memory:
+  short_term:
+    max_messages: 20            # 滑动窗口最大消息数
+    summary_threshold: 15       # 超过N条消息触发摘要压缩
+  long_term:
+    max_retrieved: 5            # 语义检索最多返回N条历史记忆
+
+logging:
+  level: "INFO"
+  format: "json"               # json | console
+  include_trace_id: true

@@ -1,0 +1,333 @@
+<?xml version="1.0"?>
+<!--
+  Oracle EBS P2P（Procure-to-Pay）领域本体
+  基于 OWL2 标准建模，涵盖采购订单、收货、发票、付款、供应商五大业务实体。
+  SWRL 规则定义核心合规规则（三路匹配、付款合规性）。
+-->
+<rdf:RDF
+    xmlns="http://eragent.io/ontology/p2p#"
+    xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    xmlns:owl="http://www.w3.org/2002/07/owl#"
+    xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema#"
+    xmlns:swrl="http://www.w3.org/2003/11/swrl#"
+    xmlns:swrlb="http://www.w3.org/2003/11/swrlb#"
+    xml:base="http://eragent.io/ontology/p2p#">
+
+  <owl:Ontology rdf:about="http://eragent.io/ontology/p2p">
+    <rdfs:label xml:lang="zh">采购到付款（P2P）领域本体</rdfs:label>
+    <rdfs:comment xml:lang="zh">
+      基于 Oracle EBS 标准表结构对 P2P 业务流程进行 OWL2 建模。
+      版本: 0.1.0 | 构建于 ERP Agent 项目
+    </rdfs:comment>
+    <owl:versionInfo>0.1.0</owl:versionInfo>
+  </owl:Ontology>
+
+  <!-- ============================================================
+       一、顶层业务实体类
+  ============================================================ -->
+
+  <!-- 业务文档基类 -->
+  <owl:Class rdf:about="#BusinessDocument">
+    <rdfs:label xml:lang="zh">业务单据</rdfs:label>
+    <rdfs:comment xml:lang="zh">所有 ERP 业务单据的抽象基类</rdfs:comment>
+  </owl:Class>
+
+  <!-- 财务凭证基类 -->
+  <owl:Class rdf:about="#FinancialDocument">
+    <rdfs:subClassOf rdf:resource="#BusinessDocument"/>
+    <rdfs:label xml:lang="zh">财务凭证</rdfs:label>
+  </owl:Class>
+
+  <!-- 采购单据基类 -->
+  <owl:Class rdf:about="#ProcurementDocument">
+    <rdfs:subClassOf rdf:resource="#BusinessDocument"/>
+    <rdfs:label xml:lang="zh">采购单据</rdfs:label>
+  </owl:Class>
+
+  <!-- ============================================================
+       二、P2P 核心业务实体
+  ============================================================ -->
+
+  <!-- 供应商 (AP_SUPPLIERS) -->
+  <owl:Class rdf:about="#Supplier">
+    <rdfs:label xml:lang="zh">供应商</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_SUPPLIERS 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 供应商地点 (AP_SUPPLIER_SITES_ALL) -->
+  <owl:Class rdf:about="#SupplierSite">
+    <rdfs:label xml:lang="zh">供应商地点</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_SUPPLIER_SITES_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 采购订单头 (PO_HEADERS_ALL) -->
+  <owl:Class rdf:about="#PurchaseOrder">
+    <rdfs:subClassOf rdf:resource="#ProcurementDocument"/>
+    <rdfs:label xml:lang="zh">采购订单</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS PO_HEADERS_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 采购订单行 (PO_LINES_ALL) -->
+  <owl:Class rdf:about="#PurchaseOrderLine">
+    <rdfs:subClassOf rdf:resource="#ProcurementDocument"/>
+    <rdfs:label xml:lang="zh">采购订单行</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS PO_LINES_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 交货计划行 (PO_LINE_LOCATIONS_ALL) -->
+  <owl:Class rdf:about="#PurchaseOrderLineLocation">
+    <rdfs:subClassOf rdf:resource="#ProcurementDocument"/>
+    <rdfs:label xml:lang="zh">采购订单交货计划行</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS PO_LINE_LOCATIONS_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 收货单头 (RCV_SHIPMENT_HEADERS) -->
+  <owl:Class rdf:about="#ReceiptHeader">
+    <rdfs:subClassOf rdf:resource="#ProcurementDocument"/>
+    <rdfs:label xml:lang="zh">收货单</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS RCV_SHIPMENT_HEADERS 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 收货事务 (RCV_TRANSACTIONS) -->
+  <owl:Class rdf:about="#ReceiptTransaction">
+    <rdfs:subClassOf rdf:resource="#ProcurementDocument"/>
+    <rdfs:label xml:lang="zh">收货事务</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS RCV_TRANSACTIONS 表，包含收货、退货、验收记录</rdfs:comment>
+  </owl:Class>
+
+  <!-- 应付发票头 (AP_INVOICES_ALL) -->
+  <owl:Class rdf:about="#Invoice">
+    <rdfs:subClassOf rdf:resource="#FinancialDocument"/>
+    <rdfs:label xml:lang="zh">应付发票</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_INVOICES_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 发票行 (AP_INVOICE_LINES_ALL) -->
+  <owl:Class rdf:about="#InvoiceLine">
+    <rdfs:subClassOf rdf:resource="#FinancialDocument"/>
+    <rdfs:label xml:lang="zh">发票行</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_INVOICE_LINES_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 发票会计分配 (AP_INVOICE_DISTRIBUTIONS_ALL) -->
+  <owl:Class rdf:about="#InvoiceDistribution">
+    <rdfs:subClassOf rdf:resource="#FinancialDocument"/>
+    <rdfs:label xml:lang="zh">发票会计分配</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_INVOICE_DISTRIBUTIONS_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 付款记录 (AP_PAYMENTS_ALL) -->
+  <owl:Class rdf:about="#Payment">
+    <rdfs:subClassOf rdf:resource="#FinancialDocument"/>
+    <rdfs:label xml:lang="zh">付款记录</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_PAYMENTS_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- 付款支票/银行转账 (AP_CHECKS_ALL) -->
+  <owl:Class rdf:about="#PaymentCheck">
+    <rdfs:subClassOf rdf:resource="#FinancialDocument"/>
+    <rdfs:label xml:lang="zh">付款支票/银行转账</rdfs:label>
+    <rdfs:comment xml:lang="zh">对应 Oracle EBS AP_CHECKS_ALL 表</rdfs:comment>
+  </owl:Class>
+
+  <!-- ============================================================
+       三、异常与 KPI 类
+  ============================================================ -->
+
+  <!-- 异常基类 -->
+  <owl:Class rdf:about="#Anomaly">
+    <rdfs:label xml:lang="zh">异常</rdfs:label>
+    <rdfs:comment xml:lang="zh">所有业务异常的基类</rdfs:comment>
+  </owl:Class>
+
+  <!-- 三路匹配异常 -->
+  <owl:Class rdf:about="#ThreeWayMatchAnomaly">
+    <rdfs:subClassOf rdf:resource="#Anomaly"/>
+    <rdfs:label xml:lang="zh">三路匹配异常</rdfs:label>
+  </owl:Class>
+
+  <!-- 价格差异异常 -->
+  <owl:Class rdf:about="#PriceVarianceAnomaly">
+    <rdfs:subClassOf rdf:resource="#Anomaly"/>
+    <rdfs:label xml:lang="zh">采购价格差异异常</rdfs:label>
+  </owl:Class>
+
+  <!-- 付款合规异常 -->
+  <owl:Class rdf:about="#PaymentComplianceAnomaly">
+    <rdfs:subClassOf rdf:resource="#Anomaly"/>
+    <rdfs:label xml:lang="zh">付款合规异常</rdfs:label>
+  </owl:Class>
+
+  <!-- 供应商绩效 KPI -->
+  <owl:Class rdf:about="#SupplierKPI">
+    <rdfs:label xml:lang="zh">供应商绩效 KPI</rdfs:label>
+  </owl:Class>
+
+  <!-- ============================================================
+       四、对象属性（关系）
+  ============================================================ -->
+
+  <!-- 供应商地点属于供应商 -->
+  <owl:ObjectProperty rdf:about="#belongsToSupplier">
+    <rdfs:domain rdf:resource="#SupplierSite"/>
+    <rdfs:range rdf:resource="#Supplier"/>
+    <rdfs:label xml:lang="zh">属于供应商</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 采购订单关联供应商 -->
+  <owl:ObjectProperty rdf:about="#placedWithSupplier">
+    <rdfs:domain rdf:resource="#PurchaseOrder"/>
+    <rdfs:range rdf:resource="#Supplier"/>
+    <rdfs:label xml:lang="zh">向供应商下单</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 采购订单行属于采购订单 -->
+  <owl:ObjectProperty rdf:about="#belongsToPO">
+    <rdfs:domain rdf:resource="#PurchaseOrderLine"/>
+    <rdfs:range rdf:resource="#PurchaseOrder"/>
+    <rdfs:label xml:lang="zh">属于采购订单</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 交货计划行属于采购订单行 -->
+  <owl:ObjectProperty rdf:about="#belongsToPOLine">
+    <rdfs:domain rdf:resource="#PurchaseOrderLineLocation"/>
+    <rdfs:range rdf:resource="#PurchaseOrderLine"/>
+    <rdfs:label xml:lang="zh">属于采购订单行</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 收货事务关联采购订单 -->
+  <owl:ObjectProperty rdf:about="#receivedAgainstPO">
+    <rdfs:domain rdf:resource="#ReceiptTransaction"/>
+    <rdfs:range rdf:resource="#PurchaseOrder"/>
+    <rdfs:label xml:lang="zh">收货针对采购订单</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 收货事务属于收货单 -->
+  <owl:ObjectProperty rdf:about="#belongsToReceipt">
+    <rdfs:domain rdf:resource="#ReceiptTransaction"/>
+    <rdfs:range rdf:resource="#ReceiptHeader"/>
+    <rdfs:label xml:lang="zh">属于收货单</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 发票引用采购订单 -->
+  <owl:ObjectProperty rdf:about="#referencedPO">
+    <rdfs:domain rdf:resource="#Invoice"/>
+    <rdfs:range rdf:resource="#PurchaseOrder"/>
+    <rdfs:label xml:lang="zh">引用采购订单</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 发票关联供应商 -->
+  <owl:ObjectProperty rdf:about="#invoicedBySupplier">
+    <rdfs:domain rdf:resource="#Invoice"/>
+    <rdfs:range rdf:resource="#Supplier"/>
+    <rdfs:label xml:lang="zh">发票来自供应商</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 付款核销发票 -->
+  <owl:ObjectProperty rdf:about="#appliedToInvoice">
+    <rdfs:domain rdf:resource="#Payment"/>
+    <rdfs:range rdf:resource="#Invoice"/>
+    <rdfs:label xml:lang="zh">付款核销发票</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- 异常关联业务单据 -->
+  <owl:ObjectProperty rdf:about="#anomalyOnDocument">
+    <rdfs:domain rdf:resource="#Anomaly"/>
+    <rdfs:range rdf:resource="#BusinessDocument"/>
+    <rdfs:label xml:lang="zh">异常发生在单据上</rdfs:label>
+  </owl:ObjectProperty>
+
+  <!-- ============================================================
+       五、数据属性
+  ============================================================ -->
+
+  <!-- 单据号 -->
+  <owl:DatatypeProperty rdf:about="#documentNumber">
+    <rdfs:domain rdf:resource="#BusinessDocument"/>
+    <rdfs:range rdf:resource="xsd:string"/>
+    <rdfs:label xml:lang="zh">单据号</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 金额 -->
+  <owl:DatatypeProperty rdf:about="#amount">
+    <rdfs:domain rdf:resource="#BusinessDocument"/>
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">金额</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 数量 -->
+  <owl:DatatypeProperty rdf:about="#quantity">
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">数量</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 单价 -->
+  <owl:DatatypeProperty rdf:about="#unitPrice">
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">单价</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 状态 -->
+  <owl:DatatypeProperty rdf:about="#status">
+    <rdfs:domain rdf:resource="#BusinessDocument"/>
+    <rdfs:range rdf:resource="xsd:string"/>
+    <rdfs:label xml:lang="zh">状态</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 创建日期 -->
+  <owl:DatatypeProperty rdf:about="#creationDate">
+    <rdfs:domain rdf:resource="#BusinessDocument"/>
+    <rdfs:range rdf:resource="xsd:dateTime"/>
+    <rdfs:label xml:lang="zh">创建日期</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 到期日 -->
+  <owl:DatatypeProperty rdf:about="#dueDate">
+    <rdfs:range rdf:resource="xsd:dateTime"/>
+    <rdfs:label xml:lang="zh">到期日</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 实际付款日 -->
+  <owl:DatatypeProperty rdf:about="#paymentDate">
+    <rdfs:domain rdf:resource="#Payment"/>
+    <rdfs:range rdf:resource="xsd:dateTime"/>
+    <rdfs:label xml:lang="zh">实际付款日</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 偏差百分比 -->
+  <owl:DatatypeProperty rdf:about="#variancePct">
+    <rdfs:domain rdf:resource="#Anomaly"/>
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">偏差百分比</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- 严重等级 -->
+  <owl:DatatypeProperty rdf:about="#severity">
+    <rdfs:domain rdf:resource="#Anomaly"/>
+    <rdfs:range rdf:resource="xsd:string"/>
+    <rdfs:label xml:lang="zh">严重等级</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- KPI 名称 -->
+  <owl:DatatypeProperty rdf:about="#kpiName">
+    <rdfs:domain rdf:resource="#SupplierKPI"/>
+    <rdfs:range rdf:resource="xsd:string"/>
+    <rdfs:label xml:lang="zh">KPI 名称</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- KPI 值 -->
+  <owl:DatatypeProperty rdf:about="#kpiValue">
+    <rdfs:domain rdf:resource="#SupplierKPI"/>
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">KPI 值</rdfs:label>
+  </owl:DatatypeProperty>
+
+  <!-- KPI 基准值 -->
+  <owl:DatatypeProperty rdf:about="#kpiBenchmark">
+    <rdfs:domain rdf:resource="#SupplierKPI"/>
+    <rdfs:range rdf:resource="xsd:decimal"/>
+    <rdfs:label xml:lang="zh">KPI 基准值</rdfs:label>
+  </owl:DatatypeProperty>
+
+</rdf:RDF>
