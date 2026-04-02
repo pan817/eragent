@@ -1,0 +1,184 @@
+### ============================================================
+### ERP Analysis Agent - HTTP 接口测试数据
+### 使用方式：VS Code 安装 REST Client 插件后可直接点击 Send Request
+### 启动服务：uvicorn api.main:app --reload
+### ============================================================
+
+### 变量定义
+@host = http://127.0.0.1:8000
+
+
+### ----- 健康检查 -----
+
+### 1. 健康检查
+GET {{host}}/health
+
+
+### ----- 三路匹配分析 -----
+
+### 2. 三路匹配异常分析（自动识别意图）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "请分析最近的三路匹配异常情况，看看哪些订单存在数量或金额偏差",
+    "user_id": "analyst-001"
+}
+
+### 3. 三路匹配 - 指定分析类型
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查采购订单 PO-2024-0035 的三路匹配情况",
+    "user_id": "analyst-001",
+    "analysis_type": "three_way_match"
+}
+
+
+### ----- 价格差异分析 -----
+
+### 4. 全量价格差异分析
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析所有供应商的采购价格差异，找出实际价格与合同价偏差较大的订单",
+    "user_id": "analyst-001"
+}
+
+### 5. 指定供应商的价格差异
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析供应商 SUP-001 华为科技的价格差异情况",
+    "user_id": "analyst-001",
+    "analysis_type": "price_variance"
+}
+
+
+### ----- 付款合规检查 -----
+
+### 6. 付款合规性检查（逾期、提前付款）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查付款合规性，是否存在逾期付款或提前付款的情况",
+    "user_id": "analyst-001"
+}
+
+### 7. 付款合规 - 自定义时间范围
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查最近90天的付款合规情况",
+    "user_id": "analyst-001",
+    "time_range_days": 90
+}
+
+
+### ----- 供应商绩效 KPI -----
+
+### 8. 华为科技绩效评估
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "评估供应商 SUP-001 华为科技的绩效 KPI，包括准时交付率和发票准确率",
+    "user_id": "analyst-001"
+}
+
+### 9. 中兴通讯绩效评估
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "评估供应商 SUP-002 中兴通讯的绩效表现",
+    "user_id": "analyst-001",
+    "analysis_type": "supplier_performance"
+}
+
+### 10. 比亚迪电子绩效评估
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "计算供应商 SUP-003 比亚迪电子的 KPI",
+    "user_id": "analyst-001"
+}
+
+
+### ----- 综合分析 -----
+
+### 11. 全面综合分析
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "帮我全面分析一下最近的采购数据，包括三路匹配、价格差异、付款合规和供应商绩效",
+    "user_id": "analyst-001"
+}
+
+### 12. 模糊查询（系统自动判断）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "最近采购有什么异常吗？",
+    "user_id": "analyst-001"
+}
+
+
+### ----- 参数组合测试 -----
+
+### 13. 完整参数请求
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析最近60天供应商 SUP-005 海尔智家的三路匹配情况",
+    "user_id": "manager-001",
+    "session_id": "session-test-001",
+    "time_range_days": 60,
+    "analysis_type": "three_way_match"
+}
+
+### 14. 仅必填字段
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析价格差异"
+}
+
+
+### ----- 边界 & 异常测试 -----
+
+### 15. 空查询（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": ""
+}
+
+### 16. 非法时间范围（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配",
+    "time_range_days": 0
+}
+
+### 17. 超长时间范围（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配",
+    "time_range_days": 999
+}
