@@ -14,6 +14,12 @@
 GET {{host}}/health
 
 
+### ----- 数据初始化 -----
+
+### 1.5 初始化模拟数据（清空并重新生成，条数由 config.yaml mock_data.record_count 决定）
+POST {{host}}/api/v1/init-data
+
+
 ### ----- 三路匹配分析 -----
 
 ### 2. 三路匹配异常分析（自动识别意图）

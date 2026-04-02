@@ -248,15 +248,18 @@ class MockDataGenerator:
             })
         return payments
 
-    def generate_all(self) -> dict[str, list[dict[str, Any]]]:
+    def generate_all(self, count: int = 50) -> dict[str, list[dict[str, Any]]]:
         """
         一键生成完整 P2P 数据集。
+
+        Args:
+            count: 生成的采购订单数量（发票、付款等同步生成相同数量）。
 
         Returns:
             包含所有表数据的字典。
         """
         suppliers = self.generate_suppliers()
-        po_headers, po_lines, po_locations = self.generate_purchase_orders(suppliers)
+        po_headers, po_lines, po_locations = self.generate_purchase_orders(suppliers, count=count)
         # 补充 supplier_id 到 po_lines（收货生成需要）
         line_sup_map = {h["po_number"]: h["supplier_id"] for h in po_headers}
         for pl in po_lines:

@@ -89,6 +89,15 @@ class PostgreSQLSettings(BaseSettings):
         )
 
 
+class MockDataSettings(BaseSettings):
+    """模拟数据配置。"""
+
+    record_count: int = 500
+    seed: int = 42
+
+    model_config = {"env_prefix": "MOCK_DATA_"}
+
+
 class AnalysisSettings(BaseSettings):
     """分析任务配置。"""
 
@@ -200,6 +209,7 @@ class Settings(BaseSettings):
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     postgresql: PostgreSQLSettings = Field(default_factory=PostgreSQLSettings)
+    mock_data: MockDataSettings = Field(default_factory=MockDataSettings)
     analysis: AnalysisSettings = Field(default_factory=AnalysisSettings)
     p2p: P2PSettings = Field(default_factory=P2PSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
@@ -268,6 +278,7 @@ class Settings(BaseSettings):
             neo4j=Neo4jSettings(**neo4j_data),
             chroma=ChromaSettings(**raw.get("chroma", {})),
             postgresql=PostgreSQLSettings(**pg_data),
+            mock_data=MockDataSettings(**raw.get("mock_data", {})),
             analysis=AnalysisSettings(**raw.get("analysis", {})),
             p2p=p2p_data,
             memory=memory_data,

@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from modules.p2p.tools import (
-    query_purchase_orders,
-    query_receipts,
+    calculate_supplier_kpis,
     query_invoices,
     query_payments,
-    run_three_way_match,
+    query_purchase_orders,
+    query_receipts,
     run_payment_compliance_check,
     run_price_variance_analysis,
-    calculate_supplier_kpis,
+    run_three_way_match,
+    set_repository,
 )
+
+
+@pytest.fixture(autouse=True)
+def _inject_repository(repository):
+    """自动注入测试用 Repository（基于 SQLite 内存库）。"""
+    set_repository(repository)
 
 
 class TestQueryTools:

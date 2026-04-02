@@ -34,10 +34,14 @@ postgresql:
   host: "localhost"
   port: 5432
   database: "eragent"
-  username: "postgres"
+  username: "dev"
   # password: 通过环境变量 POSTGRES_PASSWORD 注入
   pool_size: 5
   max_overflow: 10
+
+mock_data:
+  record_count: 500              # 模拟数据生成条数（PO/发票/付款各 N 条）
+  seed: 42                       # 随机种子，确保数据可重复
 
 analysis:
   default_time_range_days: 30    # 默认分析时间范围（天）

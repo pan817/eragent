@@ -22,6 +22,13 @@ from config.settings import (  # noqa: E402
     P2PSettings,
     Settings,
 )
+from core.database import (  # noqa: E402
+    Base,
+    P2PRepository,
+    get_session_factory,
+    init_database,
+)
+from core.database.engine import create_engine_from_dsn  # noqa: E402
 
 
 # ============================================================
@@ -44,6 +51,32 @@ def settings() -> Settings:
 def p2p_settings(settings: Settings) -> P2PSettings:
     """提取 P2PSettings 子配置。"""
     return settings.p2p
+
+
+# ============================================================
+# 数据库 fixtures（SQLite 内存库）
+# ============================================================
+
+
+@pytest.fixture()
+def db_engine():
+    """创建 SQLite 内存数据库引擎，灌入种子数据。"""
+    engine = create_engine_from_dsn("sqlite:///:memory:")
+    init_database(engine, seed=0)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture()
+def db_session_factory(db_engine):
+    """返回绑定到测试引擎的 Session 工厂。"""
+    return get_session_factory(db_engine)
+
+
+@pytest.fixture()
+def repository(db_session_factory) -> P2PRepository:
+    """返回基于 SQLite 内存库的 P2PRepository 实例。"""
+    return P2PRepository(db_session_factory)
 
 
 # ============================================================

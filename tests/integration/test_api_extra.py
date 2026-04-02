@@ -12,14 +12,32 @@ from api.schemas.analysis import AnalysisResult, AnalysisStatus, AnalysisType
 
 @pytest.fixture()
 def client() -> TestClient:
-    """创建 FastAPI 测试客户端。"""
-    with patch("api.main.get_settings") as mock_settings:
+    """创建 FastAPI 测试客户端，使用 SQLite 内存库替代 PostgreSQL。"""
+    from core.database.engine import create_engine_from_dsn
+    from core.database import get_session_factory, init_database, P2PRepository
+    from modules.p2p.tools import set_repository
+
+    engine = create_engine_from_dsn("sqlite:///:memory:")
+    init_database(engine, seed=0)
+    session_factory = get_session_factory(engine)
+    set_repository(P2PRepository(session_factory))
+
+    with (
+        patch("api.main.get_settings") as mock_settings,
+        patch("api.main.get_engine", return_value=engine),
+        patch("api.main.create_tables"),
+        patch("api.main.get_session_factory", return_value=session_factory),
+    ):
         mock_cfg = MagicMock()
         mock_cfg.app_name = "ERP Agent Test"
         mock_cfg.app_version = "0.1.0-test"
+        mock_cfg.postgresql = MagicMock()
         mock_settings.return_value = mock_cfg
         from api.main import app
-        yield TestClient(app)
+        with TestClient(app) as tc:
+            yield tc
+
+    engine.dispose()
 
 
 class TestAnalyzeEndpointExtra:

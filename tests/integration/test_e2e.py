@@ -36,20 +36,39 @@ def e2e_client(real_settings: Settings):
     """创建真实 LLM 的端到端测试客户端。
 
     所有组件真实运行：IntentParser、P2PAgent、LLM、Tools、Rules。
+    数据库使用 SQLite 内存库，避免依赖真实 PostgreSQL。
     scope=module 让整个测试模块共享同一客户端，避免重复初始化 Agent。
     """
     import api.routes.analyze as analyze_mod
     analyze_mod._orchestrator = None
     analyze_mod._long_term_memory = None
 
-    import modules.p2p.tools as tools_mod
-    tools_mod._MOCK_CACHE = None
+    from sqlalchemy.pool import StaticPool
+    from core.database.engine import create_engine_from_dsn
+    from core.database import get_session_factory, init_database, P2PRepository
+    from modules.p2p.tools import set_repository
+
+    engine = create_engine_from_dsn(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    init_database(engine, seed=0)
+    session_factory = get_session_factory(engine)
+    set_repository(P2PRepository(session_factory))
 
     from unittest.mock import patch
-    with patch("config.settings.get_settings", return_value=real_settings):
+    with (
+        patch("config.settings.get_settings", return_value=real_settings),
+        patch("api.main.get_engine", return_value=engine),
+        patch("api.main.create_tables"),
+        patch("api.main.get_session_factory", return_value=session_factory),
+    ):
         from api.main import app
         with TestClient(app) as client:
             yield client
+
+    engine.dispose()
 
 
 # ============================================================
