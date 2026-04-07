@@ -47,6 +47,8 @@ def e2e_client(real_settings: Settings):
     from core.database.engine import create_engine_from_dsn
     from core.database import get_session_factory, init_database, P2PRepository
     from modules.p2p.tools import set_repository
+    # 提前注册 trace 模型到 Base.metadata，确保 init_database 时一并建表
+    from core.observability import models as _trace_models  # noqa: F401
 
     engine = create_engine_from_dsn(
         "sqlite:///:memory:",
@@ -229,6 +231,95 @@ class TestE2EValidation:
             "time_range_days": 0,
         })
         assert resp.status_code == 422
+
+
+class TestE2EObservability:
+    """链路耗时监控端到端测试：验证 TimingMiddleware → TraceStore → /traces API 全链路。"""
+
+    def _wait_for_trace(self, client: TestClient, predicate, timeout: float = 5.0):
+        import time
+
+        deadline = time.monotonic() + timeout
+        last: list = []
+        while time.monotonic() < deadline:
+            resp = client.get("/api/v1/traces", params={"limit": 50})
+            assert resp.status_code == 200
+            last = resp.json()
+            match = next((r for r in last if predicate(r)), None)
+            if match is not None:
+                return match
+            time.sleep(0.1)
+        raise AssertionError(f"trace not found within {timeout}s; got: {last}")
+
+    def test_analyze_records_full_trace(self, e2e_client: TestClient) -> None:
+        """analyze 请求结束后，TraceStore 应记录完整的 agent/model/tool span 树。"""
+        # 先记录已有 trace_id 集合，便于精确定位本次请求新增的那一条
+        before_resp = e2e_client.get("/api/v1/traces", params={"limit": 200})
+        assert before_resp.status_code == 200
+        existing_ids = {r["trace_id"] for r in before_resp.json()}
+
+        resp = e2e_client.post(
+            "/api/v1/analyze",
+            json={
+                "query": "请分析最近的三路匹配异常情况",
+                "user_id": "obs-tester",
+            },
+        )
+        assert resp.status_code == 200
+        analyze = resp.json()
+        assert analyze["status"] == "success"
+
+        # 后台线程异步落库，轮询直到本次请求的新 trace 出现且 status=success
+        run = self._wait_for_trace(
+            e2e_client,
+            lambda r: r["trace_id"] not in existing_ids
+            and r["agent_name"] == "p2p_agent"
+            and r["status"] == "success",
+        )
+
+        assert run["duration_ms"] is not None and run["duration_ms"] > 0
+        assert run["model_call_count"] >= 1
+        assert run["tool_call_count"] >= 1
+        assert run["finished_at"] is not None
+        assert run["error"] is None
+
+        # 详情：应至少包含 1 个 agent + 1 个 model + 1 个 tool span
+        detail_resp = e2e_client.get(f"/api/v1/traces/{run['trace_id']}")
+        assert detail_resp.status_code == 200
+        detail = detail_resp.json()
+        spans = detail["spans"]
+        assert len(spans) >= 3
+
+        types = {s["span_type"] for s in spans}
+        assert {"agent", "model", "tool"}.issubset(types)
+
+        agent_spans = [s for s in spans if s["span_type"] == "agent"]
+        assert len(agent_spans) == 1
+        assert agent_spans[0]["parent_span_id"] is None
+        assert agent_spans[0]["name"] == "p2p_agent"
+        assert agent_spans[0]["duration_ms"] >= sum(
+            s["duration_ms"] for s in spans if s["span_type"] == "tool"
+        )
+
+        # 每个 model/tool span 都应有耗时与 ok 状态
+        for sp in spans:
+            if sp["span_type"] in ("model", "tool"):
+                assert sp["status"] == "ok"
+                assert sp["duration_ms"] is not None and sp["duration_ms"] >= 0
+
+        # tool span 必须保留 args 属性，便于审计
+        tool_spans = [s for s in spans if s["span_type"] == "tool"]
+        assert all("args" in (s["attributes"] or {}) for s in tool_spans)
+
+    def test_traces_filtering_and_404(self, e2e_client: TestClient) -> None:
+        """list 支持分页/过滤；未知 trace_id 返回 404。"""
+        resp = e2e_client.get("/api/v1/traces", params={"limit": 5})
+        assert resp.status_code == 200
+        runs = resp.json()
+        assert len(runs) <= 5
+
+        missing = e2e_client.get("/api/v1/traces/00000000-0000-0000-0000-000000000000")
+        assert missing.status_code == 404
 
 
 class TestE2EHealthCheck:

@@ -9,6 +9,7 @@ MVP 阶段采用粗粒度编排，后续可扩展为多 Agent 协作模式。
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import Any
@@ -50,6 +51,40 @@ class Orchestrator:
         重量级组件（如 P2PAgent）通过延迟属性按需创建。
         """
         self._intent_parser: IntentParser = IntentParser()
+
+    def clear_short_term_memory(self, session_id: str | None = None) -> int:
+        """清理 P2PAgent 的短期记忆。
+
+        若 Agent 尚未初始化，则没有任何记忆需要清理，直接返回 0；
+        不会触发 Agent 的重量级构建。
+        """
+        if self._agent is None:
+            return 0
+        return self._agent.clear_short_term_memory(session_id)
+
+    def _persist_report(self, result: AnalysisResult) -> None:
+        """将成功的分析结果写入长期记忆。
+
+        失败时静默吞掉异常 —— 数据库不可用不应阻塞分析返回。
+        report_id 显式传入，确保 GET /reports/{id} 可命中同一份报告。
+        """
+        try:
+            from core.memory import get_long_term_memory
+
+            ltm = get_long_term_memory()
+            ltm.save_report(
+                user_id=result.user_id,
+                session_id=result.session_id,
+                query=result.query,
+                analysis_type=result.analysis_type.value,
+                result_json=result.model_dump_json(),
+                report_markdown=result.report_markdown or "",
+                anomaly_count=len(result.anomalies),
+                report_id=result.report_id,
+            )
+        except Exception:
+            # 长期记忆是旁路，写失败不影响主路径
+            pass
 
     @property
     def _lazy_agent(self) -> Any:
@@ -106,11 +141,13 @@ class Orchestrator:
                 query=request.query,
                 params=parsed_params,
                 time_range_days=time_range_days,
+                user_id=request.user_id,
+                session_id=session_id,
             )
 
             # 5. 封装结果
             duration_ms = (time.monotonic() - start_time) * 1000.0
-            return AnalysisResult(
+            result = AnalysisResult(
                 report_id=report_id,
                 status=AnalysisStatus.SUCCESS,
                 analysis_type=analysis_type,
@@ -126,6 +163,12 @@ class Orchestrator:
                 failed_tasks=agent_result.get("failed_tasks", []),
                 duration_ms=duration_ms,
             )
+
+            # 6. 持久化到长期记忆（线程池执行同步 DB I/O，避免阻塞 event loop；
+            #    数据库不可用时静默降级，不破坏主流程）
+            await asyncio.to_thread(self._persist_report, result)
+
+            return result
 
         except Exception as exc:
             duration_ms = (time.monotonic() - start_time) * 1000.0

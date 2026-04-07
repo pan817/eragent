@@ -294,6 +294,7 @@ class LongTermMemory:
         result_json: str,
         report_markdown: str,
         anomaly_count: int,
+        report_id: str | None = None,
     ) -> str:
         """保存一份分析报告。
 
@@ -309,7 +310,8 @@ class LongTermMemory:
         Returns:
             新创建报告的 UUID 字符串。
         """
-        report_id: str = str(uuid.uuid4())
+        if not report_id:
+            report_id = str(uuid.uuid4())
         stmt = reports_table.insert().values(
             id=report_id,
             user_id=user_id,
@@ -366,3 +368,75 @@ class LongTermMemory:
         with self.engine.connect() as conn:
             result = conn.execute(stmt)
             return [dict(row._mapping) for row in result]
+
+
+    def delete_user_data(
+        self,
+        user_id: str,
+        *,
+        delete_memories: bool = True,
+        delete_reports: bool = True,
+    ) -> dict[str, int]:
+        """删除某用户的长期记忆数据。
+
+        Args:
+            user_id: 用户唯一标识。
+            delete_memories: 是否删除 memories 表中的记录。
+            delete_reports: 是否删除 reports 表中的记录。
+
+        Returns:
+            ``{"memories": N, "reports": M}``，每张表实际删除的行数。
+        """
+        deleted = {"memories": 0, "reports": 0}
+        with self.engine.connect() as conn:
+            if delete_memories:
+                res = conn.execute(
+                    memories_table.delete().where(memories_table.c.user_id == user_id)
+                )
+                deleted["memories"] = res.rowcount or 0
+            if delete_reports:
+                res = conn.execute(
+                    reports_table.delete().where(reports_table.c.user_id == user_id)
+                )
+                deleted["reports"] = res.rowcount or 0
+            conn.commit()
+        return deleted
+
+    def delete_all(self) -> dict[str, int]:
+        """清空 memories 与 reports 全部记录。仅供管理端使用。"""
+        deleted = {"memories": 0, "reports": 0}
+        with self.engine.connect() as conn:
+            res = conn.execute(memories_table.delete())
+            deleted["memories"] = res.rowcount or 0
+            res = conn.execute(reports_table.delete())
+            deleted["reports"] = res.rowcount or 0
+            conn.commit()
+        return deleted
+
+
+# ---------------------------------------------------------------------------
+# 模块级懒单例
+# ---------------------------------------------------------------------------
+
+_long_term_memory_singleton: LongTermMemory | None = None
+
+
+def get_long_term_memory() -> LongTermMemory:
+    """获取进程级 LongTermMemory 单例（懒初始化 + 自动建表）。
+
+    路由层与 Orchestrator 共享同一份 PostgreSQL 连接池，避免重复初始化。
+    """
+    global _long_term_memory_singleton
+    if _long_term_memory_singleton is None:
+        from config.settings import get_settings
+
+        ltm = LongTermMemory(dsn=get_settings().postgresql.dsn)
+        ltm.init_tables()
+        _long_term_memory_singleton = ltm
+    return _long_term_memory_singleton
+
+
+def reset_long_term_memory() -> None:
+    """重置单例。仅供测试使用。"""
+    global _long_term_memory_singleton
+    _long_term_memory_singleton = None

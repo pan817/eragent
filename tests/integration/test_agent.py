@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.schemas.analysis import AnalysisRequest, AnalysisStatus, AnalysisType
 from config.settings import Settings
@@ -32,7 +32,7 @@ class TestP2PAgentInit:
 class TestP2PAgentAnalyze:
     """P2P Agent 分析执行测试（mock LLM）。"""
 
-    def test_analyze_returns_result(self) -> None:
+    async def test_analyze_returns_result(self) -> None:
         """analyze 应返回 AnalysisResult。"""
         with patch("modules.p2p.agent.get_settings", return_value=Settings()):
             from modules.p2p.agent import P2PAgent
@@ -41,14 +41,14 @@ class TestP2PAgentAnalyze:
         mock_agent = MagicMock()
         mock_message = MagicMock()
         mock_message.content = "# 测试分析报告\n\n无异常发现"
-        mock_agent.invoke.return_value = {"messages": [mock_message]}
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
         agent._agent = mock_agent
 
-        result = agent.analyze("分析三路匹配", user_id="test-user")
+        result = await agent.analyze("分析三路匹配", user_id="test-user")
         assert result.status == AnalysisStatus.SUCCESS
         assert "测试分析报告" in result.report_markdown
 
-    def test_analyze_failure_returns_failed(self) -> None:
+    async def test_analyze_failure_returns_failed(self) -> None:
         """LLM 调用失败时应返回 FAILED 状态。"""
         settings = Settings()
         settings.llm.max_retries = 1
@@ -57,10 +57,10 @@ class TestP2PAgentAnalyze:
             agent = P2PAgent(settings=settings)
 
         mock_agent = MagicMock()
-        mock_agent.invoke.side_effect = RuntimeError("API 连接失败")
+        mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("API 连接失败"))
         agent._agent = mock_agent
 
-        result = agent.analyze("测试查询")
+        result = await agent.analyze("测试查询")
         assert result.status == AnalysisStatus.FAILED
         assert result.error is not None
         assert "失败" in result.error.message

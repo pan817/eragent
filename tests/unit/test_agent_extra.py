@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,34 @@ class TestP2PAgentBuildMethods:
             mock_chat.return_value = MagicMock()
             model = agent._build_model()
             mock_chat.assert_called_once()
+
+    def test_build_model_default_disables_system_proxy(self) -> None:
+        """默认 use_system_proxy=False：应注入 trust_env=False 的 httpx 客户端。"""
+        settings = Settings()
+        assert settings.llm.use_system_proxy is False
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+        with patch("modules.p2p.agent.ChatOpenAI") as mock_chat:
+            agent._build_model()
+            kwargs = mock_chat.call_args.kwargs
+            # 全程走 async 路径，仅注入 AsyncClient，避免空闲的同步连接池
+            assert "http_client" not in kwargs
+            assert "http_async_client" in kwargs
+            assert kwargs["http_async_client"]._trust_env is False
+
+    def test_build_model_use_system_proxy(self) -> None:
+        """use_system_proxy=True：不应注入自定义 httpx 客户端，沿用默认行为。"""
+        settings = Settings()
+        settings.llm.use_system_proxy = True
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+        with patch("modules.p2p.agent.ChatOpenAI") as mock_chat:
+            agent._build_model()
+            kwargs = mock_chat.call_args.kwargs
+            assert "http_client" not in kwargs
+            assert "http_async_client" not in kwargs
 
     def test_build_tools(self) -> None:
         """_build_tools 应返回 8 个工具。"""
@@ -90,7 +118,7 @@ class TestP2PAgentBuildMethods:
 class TestP2PAgentAnalyzeExtra:
     """Agent 分析方法额外覆盖。"""
 
-    def test_analyze_with_json_content(self) -> None:
+    async def test_analyze_with_json_content(self) -> None:
         """Agent 返回 JSON 内容时应解析结构化数据。"""
         settings = Settings()
         with patch("modules.p2p.agent.get_settings", return_value=settings):
@@ -105,14 +133,14 @@ class TestP2PAgentAnalyzeExtra:
         })
         mock_message = MagicMock()
         mock_message.content = content
-        mock_agent.invoke.return_value = {"messages": [mock_message]}
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
         agent._agent = mock_agent
 
-        result = agent.analyze("分析三路匹配")
+        result = await agent.analyze("分析三路匹配")
         assert result.status == AnalysisStatus.SUCCESS
         assert result.analysis_type == AnalysisType.THREE_WAY_MATCH
 
-    def test_analyze_with_empty_messages(self) -> None:
+    async def test_analyze_with_empty_messages(self) -> None:
         """Agent 返回空消息列表时应正常处理。"""
         settings = Settings()
         with patch("modules.p2p.agent.get_settings", return_value=settings):
@@ -120,14 +148,14 @@ class TestP2PAgentAnalyzeExtra:
             agent = P2PAgent(settings=settings)
 
         mock_agent = MagicMock()
-        mock_agent.invoke.return_value = {"messages": []}
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
         agent._agent = mock_agent
 
-        result = agent.analyze("测试")
+        result = await agent.analyze("测试")
         assert result.status == AnalysisStatus.SUCCESS
         assert result.report_markdown == ""
 
-    def test_analyze_message_without_content_attr(self) -> None:
+    async def test_analyze_message_without_content_attr(self) -> None:
         """消息对象无 content 属性时应转为字符串。"""
         settings = Settings()
         with patch("modules.p2p.agent.get_settings", return_value=settings):
@@ -136,13 +164,13 @@ class TestP2PAgentAnalyzeExtra:
 
         mock_agent = MagicMock()
         # 使用字符串而非有 content 属性的对象
-        mock_agent.invoke.return_value = {"messages": ["plain text"]}
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": ["plain text"]})
         agent._agent = mock_agent
 
-        result = agent.analyze("测试")
+        result = await agent.analyze("测试")
         assert result.status == AnalysisStatus.SUCCESS
 
-    def test_analyze_retry_then_success(self) -> None:
+    async def test_analyze_retry_then_success(self) -> None:
         """首次失败后重试成功。"""
         settings = Settings()
         settings.llm.max_retries = 2
@@ -150,19 +178,20 @@ class TestP2PAgentAnalyzeExtra:
             from modules.p2p.agent import P2PAgent
             agent = P2PAgent(settings=settings)
 
-        mock_agent = MagicMock()
         mock_message = MagicMock()
         mock_message.content = "ok"
-        # 第一次失败，第二次成功
-        mock_agent.invoke.side_effect = [
-            RuntimeError("first fail"),
-            {"messages": [mock_message]},
-        ]
+        mock_agent = MagicMock()
+        mock_agent.ainvoke = AsyncMock(
+            side_effect=[
+                RuntimeError("first fail"),
+                {"messages": [mock_message]},
+            ]
+        )
 
         # 需要让 _get_or_build_agent 返回同一个 mock
         with (
             patch("modules.p2p.agent.ChatOpenAI"),
             patch("modules.p2p.agent.create_agent", return_value=mock_agent),
         ):
-            result = agent.analyze("测试")
+            result = await agent.analyze("测试")
         assert result.status == AnalysisStatus.SUCCESS

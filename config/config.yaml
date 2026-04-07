@@ -17,6 +17,7 @@ llm:
   max_tokens: 4096
   timeout: 120               # 请求超时（秒）
   max_retries: 3             # 最大重试次数
+  use_system_proxy: false    # 是否读取系统代理（HTTP_PROXY/HTTPS_PROXY）；false=强制直连
 
 neo4j:
   uri: "bolt://localhost:7687"

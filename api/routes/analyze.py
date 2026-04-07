@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, status
 
 from api.schemas.analysis import (
     AnalysisRequest,
@@ -20,8 +21,7 @@ from api.schemas.analysis import (
     AnalysisType,
     ErrorInfo,
 )
-from config.settings import get_settings
-from core.memory import LongTermMemory
+from core.memory import get_long_term_memory
 from core.orchestrator.orchestrator import Orchestrator
 
 router = APIRouter(tags=["analysis"])
@@ -31,38 +31,14 @@ router = APIRouter(tags=["analysis"])
 # ---------------------------------------------------------------------------
 
 _orchestrator: Orchestrator | None = None
-_long_term_memory: LongTermMemory | None = None
 
 
 def _get_orchestrator() -> Orchestrator:
-    """获取 Orchestrator 单例（延迟初始化）。
-
-    首次调用时创建 Orchestrator 实例，后续调用直接复用。
-
-    Returns:
-        Orchestrator 实例。
-    """
+    """获取 Orchestrator 单例（延迟初始化）。"""
     global _orchestrator
     if _orchestrator is None:
         _orchestrator = Orchestrator()
     return _orchestrator
-
-
-def _get_long_term_memory() -> LongTermMemory:
-    """获取 LongTermMemory 单例（延迟初始化）。
-
-    首次调用时根据配置创建 LongTermMemory 实例并初始化表结构，
-    后续调用直接复用。
-
-    Returns:
-        LongTermMemory 实例。
-    """
-    global _long_term_memory
-    if _long_term_memory is None:
-        settings = get_settings()
-        _long_term_memory = LongTermMemory(dsn=settings.postgresql.dsn)
-        _long_term_memory.init_tables()
-    return _long_term_memory
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +102,9 @@ async def get_report(report_id: str) -> dict[str, Any]:
     Raises:
         HTTPException: 当指定 report_id 的报告不存在时抛出 404。
     """
-    memory = _get_long_term_memory()
-    report: dict[str, Any] | None = memory.get_report(report_id)
+    memory = get_long_term_memory()
+    # 同步 SQLAlchemy 在 async 路由里必须走线程池，否则阻塞 event loop
+    report: dict[str, Any] | None = await asyncio.to_thread(memory.get_report, report_id)
     if report is None:
         raise HTTPException(
             status_code=404,
@@ -152,9 +129,78 @@ async def list_reports(
     Returns:
         报告记录列表，每条记录为字典格式。
     """
-    memory = _get_long_term_memory()
-    reports: list[dict[str, Any]] = memory.list_reports(
-        user_id=user_id,
-        limit=limit,
+    memory = get_long_term_memory()
+    reports: list[dict[str, Any]] = await asyncio.to_thread(
+        memory.list_reports, user_id, limit
     )
     return reports
+
+
+# ---------------------------------------------------------------------------
+# 记忆清理端点
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/memory/short-term", status_code=status.HTTP_200_OK)
+async def clear_short_term_memory(
+    session_id: str | None = Query(
+        default=None,
+        description="会话 ID；省略则清空所有会话的短期记忆",
+    ),
+) -> dict[str, Any]:
+    """清理 P2P Agent 的短期记忆（进程内对话上下文）。
+
+    - 指定 ``session_id``：仅清理该会话。
+    - 省略 ``session_id``：清空所有会话。
+    """
+    orchestrator = _get_orchestrator()
+    cleared = orchestrator.clear_short_term_memory(session_id)
+    return {
+        "scope": "session" if session_id else "all",
+        "session_id": session_id,
+        "cleared_sessions": cleared,
+    }
+
+
+@router.delete("/memory/long-term", status_code=status.HTTP_200_OK)
+async def clear_long_term_memory(
+    user_id: str | None = Query(
+        default=None,
+        description="用户 ID；省略且 all=true 时清空全部数据",
+    ),
+    delete_memories: bool = Query(default=True, description="是否删除 memories 表"),
+    delete_reports: bool = Query(default=True, description="是否删除 reports 表"),
+    all: bool = Query(
+        default=False,
+        description="为 true 且未提供 user_id 时，清空所有用户的数据",
+    ),
+) -> dict[str, Any]:
+    """清理长期记忆。
+
+    安全策略：必须显式提供 ``user_id`` 或显式设置 ``all=true``，
+    避免误调导致全表清空。
+    """
+    if not user_id and not all:
+        raise HTTPException(
+            status_code=400,
+            detail="必须提供 user_id，或显式设置 all=true 以清空全部数据",
+        )
+    if not delete_memories and not delete_reports:
+        raise HTTPException(
+            status_code=400,
+            detail="delete_memories 与 delete_reports 不能同时为 false",
+        )
+
+    memory = get_long_term_memory()
+    if user_id:
+        deleted = await asyncio.to_thread(
+            memory.delete_user_data,
+            user_id,
+            delete_memories=delete_memories,
+            delete_reports=delete_reports,
+        )
+        return {"scope": "user", "user_id": user_id, "deleted": deleted}
+
+    # all=true 且未提供 user_id
+    deleted = await asyncio.to_thread(memory.delete_all)
+    return {"scope": "all", "deleted": deleted}

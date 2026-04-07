@@ -11,8 +11,12 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any
+
+# 进程内并发缓存的最大 session 数。超过则按 LRU 淘汰，避免无界增长导致 OOM。
+_MAX_SHORT_TERM_SESSIONS = 1024
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
@@ -24,8 +28,26 @@ from api.schemas.analysis import (
     ErrorInfo,
 )
 from config.settings import Settings, get_settings
+from core.memory import ShortTermMemory
+from core.observability import TimingMiddleware
 from core.ontology.loader import OntologyLoader
 from core.ontology.reasoner import OntologyReasoner
+
+
+def _naive_summarize(messages: list[dict[str, str]]) -> str:
+    """轻量摘要：拼接早期消息的截断片段，避免再起一次 LLM 调用。
+
+    供 ShortTermMemory.compress 使用。专业的摘要可后续替换为 LLM 调用，
+    但 MVP 阶段足以保证多轮上下文不无限增长。
+    """
+    parts: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "?")
+        content = (msg.get("content") or "").replace("\n", " ").strip()
+        if len(content) > 120:
+            content = content[:120] + "…"
+        parts.append(f"[{role}] {content}")
+    return "\n".join(parts)
 
 
 class P2PAgent:
@@ -50,6 +72,50 @@ class P2PAgent:
         """
         self._settings: Settings = settings if settings is not None else get_settings()
         self._agent: Any | None = None
+        self._timing_middleware: TimingMiddleware | None = None
+        # 按 session_id 隔离的短期记忆，使用 OrderedDict 实现 LRU，
+        # 防止长时间运行下进程内 session 字典无界增长导致 OOM
+        self._short_term_memories: OrderedDict[str, ShortTermMemory] = OrderedDict()
+
+    def clear_short_term_memory(self, session_id: str | None = None) -> int:
+        """清理短期记忆。
+
+        Args:
+            session_id: 指定会话 ID 时仅清理该会话；为 None 时清空全部会话。
+
+        Returns:
+            实际被清理的会话数量。
+        """
+        if session_id is None:
+            count = len(self._short_term_memories)
+            self._short_term_memories.clear()
+            return count
+        if session_id in self._short_term_memories:
+            del self._short_term_memories[session_id]
+            return 1
+        return 0
+
+    def _get_short_term_memory(self, session_id: str) -> ShortTermMemory:
+        """获取或创建指定会话的短期记忆（LRU 行为）。
+
+        每次访问都把对应 session 移到末尾标记为最近使用；
+        当总数超过 ``_MAX_SHORT_TERM_SESSIONS`` 时淘汰最久未用的会话。
+        """
+        stm = self._short_term_memories.get(session_id)
+        if stm is not None:
+            self._short_term_memories.move_to_end(session_id)
+            return stm
+
+        mem_cfg = self._settings.memory
+        stm = ShortTermMemory(
+            max_messages=mem_cfg.short_term_max_messages,
+            summary_threshold=mem_cfg.short_term_summary_threshold,
+        )
+        self._short_term_memories[session_id] = stm
+        # LRU 淘汰
+        while len(self._short_term_memories) > _MAX_SHORT_TERM_SESSIONS:
+            self._short_term_memories.popitem(last=False)
+        return stm
 
     # ------------------------------------------------------------------
     # 构建方法
@@ -61,11 +127,18 @@ class P2PAgent:
         使用 ChatOpenAI 兼容接口连接 GLM-4 大模型，
         所有参数从 settings.llm 配置中读取。
 
+        当 ``settings.llm.use_system_proxy`` 为 False 时，显式构造
+        ``trust_env=False`` 的 httpx 客户端，强制直连，避免系统代理
+        （HTTP_PROXY/HTTPS_PROXY）干扰；为 True 时使用默认行为，
+        遵循系统代理环境变量。
+
         Returns:
             配置完成的 ChatOpenAI 实例。
         """
+        import httpx
+
         llm_cfg = self._settings.llm
-        return ChatOpenAI(
+        kwargs: dict[str, Any] = dict(
             model=llm_cfg.model,
             api_key=llm_cfg.api_key,
             base_url=llm_cfg.api_base,
@@ -73,6 +146,13 @@ class P2PAgent:
             max_tokens=llm_cfg.max_tokens,
             timeout=llm_cfg.timeout,
         )
+        if not llm_cfg.use_system_proxy:
+            # 关闭对环境变量代理的信任，确保直连 LLM 服务。
+            # 当前服务全程走 async 路径，仅创建 AsyncClient，避免空闲的同步连接池。
+            kwargs["http_async_client"] = httpx.AsyncClient(
+                trust_env=False, timeout=llm_cfg.timeout
+            )
+        return ChatOpenAI(**kwargs)
 
     def _build_tools(self) -> list:
         """导入并返回 P2P 工具集。
@@ -210,11 +290,13 @@ class P2PAgent:
             tools = self._build_tools()
             system_prompt = self._get_system_prompt()
 
+            self._timing_middleware = TimingMiddleware(agent_name="p2p_agent")
             self._agent = create_agent(
                 model=model,
                 tools=tools,
                 system_prompt=system_prompt,
                 name="p2p_agent",
+                middleware=[self._timing_middleware],
             )
 
         return self._agent
@@ -229,6 +311,8 @@ class P2PAgent:
         query: str,
         params: dict[str, Any] | None = None,
         time_range_days: int = 30,
+        user_id: str = "default",
+        session_id: str = "",
     ) -> dict[str, Any]:
         """供 Orchestrator 调用的异步入口。
 
@@ -245,8 +329,10 @@ class P2PAgent:
             包含 anomalies, supplier_kpis, summary, report_markdown,
             completed_tasks, failed_tasks 的字典。
         """
-        result = self.analyze(
+        result = await self.analyze(
             query=query,
+            user_id=user_id,
+            session_id=session_id,
             time_range_days=time_range_days,
         )
 
@@ -259,7 +345,7 @@ class P2PAgent:
             "failed_tasks": result.failed_tasks,
         }
 
-    def analyze(
+    async def analyze(
         self,
         query: str,
         user_id: str = "default",
@@ -298,9 +384,34 @@ class P2PAgent:
                     f"[分析参数] 时间范围: 最近 {time_range_days} 天"
                 )
 
-                result: dict[str, Any] = agent.invoke({
-                    "messages": [{"role": "user", "content": user_message}],
-                })
+                # 注入短期记忆：把同一 session 的历史拼到本轮 messages 之前
+                stm = self._get_short_term_memory(session_id)
+                history_messages: list[dict[str, str]] = stm.get_context()
+                invoke_messages: list[dict[str, str]] = [
+                    *history_messages,
+                    {"role": "user", "content": user_message},
+                ]
+
+                # 启动 trace（middleware 显式驱动，跨节点稳定）
+                if self._timing_middleware is not None:
+                    self._timing_middleware.start_run(
+                        session_id=session_id, user_id=user_id
+                    )
+                trace_status = "success"
+                trace_error: str | None = None
+                try:
+                    result: dict[str, Any] = await agent.ainvoke({
+                        "messages": invoke_messages,
+                    })
+                except Exception as invoke_exc:
+                    trace_status = "error"
+                    trace_error = f"{type(invoke_exc).__name__}: {invoke_exc}"
+                    raise
+                finally:
+                    if self._timing_middleware is not None:
+                        self._timing_middleware.finish_run(
+                            status=trace_status, error=trace_error
+                        )
 
                 # 提取最终回复
                 messages: list[Any] = result.get("messages", [])
@@ -312,6 +423,14 @@ class P2PAgent:
                         if hasattr(last_message, "content")
                         else str(last_message)
                     )
+
+                # 写回短期记忆：本轮 user query + assistant 回复
+                stm.add_message("user", user_message)
+                if content:
+                    stm.add_message("assistant", content)
+                # 达到阈值时压缩早期消息（使用简单截断式摘要，无需额外 LLM 调用）
+                if stm.needs_compression():
+                    stm.compress(_naive_summarize)
 
                 # 尝试从 content 中解析结构化 JSON
                 anomalies: list[dict[str, Any]] = []
@@ -346,8 +465,9 @@ class P2PAgent:
 
             except Exception as e:
                 last_error = e
-                # 重置 agent 以便下次重试时重新构建
-                self._agent = None
+                # 不重置 self._agent：LLM client、本体、工具集均可复用，
+                # 重建一次代价高达数秒。瞬时错误（网络抖动/限流）下次循环
+                # 直接复用已构建的 Agent 即可。
                 continue
 
         # 所有重试均失败

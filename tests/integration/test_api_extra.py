@@ -90,7 +90,7 @@ class TestReportEndpoints:
             "query": "分析",
             "analysis_type": "three_way_match",
         }
-        with patch("api.routes.analyze._get_long_term_memory") as mock_ltm:
+        with patch("api.routes.analyze.get_long_term_memory") as mock_ltm:
             mock_mem = MagicMock()
             mock_mem.get_report.return_value = mock_report
             mock_ltm.return_value = mock_mem
@@ -101,7 +101,7 @@ class TestReportEndpoints:
 
     def test_get_report_not_found(self, client: TestClient) -> None:
         """报告不存在时应返回 404。"""
-        with patch("api.routes.analyze._get_long_term_memory") as mock_ltm:
+        with patch("api.routes.analyze.get_long_term_memory") as mock_ltm:
             mock_mem = MagicMock()
             mock_mem.get_report.return_value = None
             mock_ltm.return_value = mock_mem
@@ -115,7 +115,7 @@ class TestReportEndpoints:
             {"id": "r1", "query": "q1"},
             {"id": "r2", "query": "q2"},
         ]
-        with patch("api.routes.analyze._get_long_term_memory") as mock_ltm:
+        with patch("api.routes.analyze.get_long_term_memory") as mock_ltm:
             mock_mem = MagicMock()
             mock_mem.list_reports.return_value = mock_reports
             mock_ltm.return_value = mock_mem
@@ -126,7 +126,7 @@ class TestReportEndpoints:
 
     def test_list_reports_default_params(self, client: TestClient) -> None:
         """使用默认参数列出报告。"""
-        with patch("api.routes.analyze._get_long_term_memory") as mock_ltm:
+        with patch("api.routes.analyze.get_long_term_memory") as mock_ltm:
             mock_mem = MagicMock()
             mock_mem.list_reports.return_value = []
             mock_ltm.return_value = mock_mem

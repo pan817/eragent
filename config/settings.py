@@ -41,6 +41,9 @@ class LLMSettings(BaseSettings):
     max_tokens: int = 4096
     timeout: int = 30
     max_retries: int = 3
+    # 是否让 LLM HTTP 客户端读取系统代理环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）。
+    # False 时强制直连，忽略系统代理；True 时遵循环境变量。
+    use_system_proxy: bool = False
 
     model_config = {"populate_by_name": True, "env_prefix": "LLM_"}
 

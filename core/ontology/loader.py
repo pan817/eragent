@@ -26,6 +26,16 @@ P2P_ONTOLOGY_IRI = "http://eragent.io/ontology/p2p"
 # P2P 本体命名空间前缀
 P2P_NAMESPACE = "http://eragent.io/ontology/p2p#"
 
+# 进程级本体缓存：键为 (绝对路径, mtime_ns)，值为已加载的 OntologyLoader 实例。
+# 加载 OWL 文件 + Owlready2 解析在大本体上可达数百毫秒至数秒，
+# 同一 OWL 文件未变化时直接复用同一份解析结果，避免重复 I/O 与解析。
+_LOADER_CACHE: dict[tuple[str, int], "OntologyLoader"] = {}
+
+
+def clear_ontology_cache() -> None:
+    """清空本体加载缓存。主要供测试使用。"""
+    _LOADER_CACHE.clear()
+
 
 class OntologyLoader:
     """
@@ -56,6 +66,10 @@ class OntologyLoader:
         """
         加载 OWL 本体文件。
 
+        基于 (绝对路径, mtime_ns) 进程级缓存：同一文件未变化时直接复用
+        已解析的 World/Ontology，避免重复 I/O 与 Owlready2 解析开销。
+        OWL 文件被外部修改后 mtime 变化，缓存自动失效并重新加载。
+
         Returns:
             self，支持链式调用。
 
@@ -70,6 +84,16 @@ class OntologyLoader:
 
         if not self._owl_path.exists():
             raise FileNotFoundError(f"OWL 本体文件不存在: {self._owl_path}")
+
+        cache_key = (str(self._owl_path.resolve()), self._owl_path.stat().st_mtime_ns)
+        cached = _LOADER_CACHE.get(cache_key)
+        if cached is not None and cached._loaded:
+            # 复用已解析的 World/Ontology，本实例与缓存共享底层对象
+            self._world = cached._world
+            self._ontology = cached._ontology
+            self._loaded = True
+            logger.debug("命中本体缓存", path=cache_key[0])
+            return self
 
         logger.info("加载 OWL 本体", path=str(self._owl_path))
 
@@ -94,6 +118,7 @@ class OntologyLoader:
             properties=prop_count,
             iri=str(self._ontology.base_iri),
         )
+        _LOADER_CACHE[cache_key] = self
         return self
 
     @property
