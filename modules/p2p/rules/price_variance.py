@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from api.schemas.analysis import (
@@ -17,6 +17,7 @@ from api.schemas.analysis import (
     Severity,
 )
 from config.settings import P2PSettings
+from modules.p2p.rules._utils import AnomalyIdGenerator, safe_float
 
 
 # 规则 ID 常量
@@ -42,7 +43,7 @@ class PriceVarianceAnalyzer:
             settings: P2P 模块配置对象，包含容差和严重等级阈值。
         """
         self._settings: P2PSettings = settings
-        self._seq: int = 0
+        self._id_gen = AnomalyIdGenerator(width=4)
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -72,7 +73,7 @@ class PriceVarianceAnalyzer:
         Returns:
             检测到的价格差异异常记录列表。
         """
-        self._seq = 0
+        self._id_gen.reset()
         anomalies: list[AnomalyRecord] = []
 
         # 复用三路匹配的默认容差
@@ -80,11 +81,15 @@ class PriceVarianceAnalyzer:
 
         for line in po_lines:
             material_code: str = line.get("material_code", "")
-            unit_price: float = float(line.get("unit_price", 0))
+            if not material_code:
+                continue
+            unit_price: float = safe_float(line.get("unit_price"))
+            if unit_price <= 0:
+                continue
 
             # 在合同价字典中查找标准价
             standard_price: float | None = contract_prices.get(material_code)
-            if standard_price is None or standard_price == 0:
+            if standard_price is None or standard_price <= 0:
                 continue
 
             variance_pct: float = abs(unit_price - standard_price) / standard_price * 100
@@ -170,7 +175,5 @@ class PriceVarianceAnalyzer:
         return Severity.LOW
 
     def _next_anomaly_id(self) -> str:
-        """生成下一个异常 ID，格式: ANO-{YYYYMMDD}-{序号}。"""
-        self._seq += 1
-        today: str = date.today().strftime("%Y%m%d")
-        return f"ANO-{today}-{self._seq:04d}"
+        """生成下一个异常 ID（委托给共享生成器）。"""
+        return self._id_gen.next_id()

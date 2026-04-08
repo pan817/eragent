@@ -174,3 +174,124 @@ class TestOntologyContext:
         initialized_vs._collection.upsert.assert_called_once()
         call_args = initialized_vs._collection.upsert.call_args
         assert "ontology_entity_SimpleEntity" in call_args.kwargs["ids"]
+
+
+class TestSearchWithWhere:
+    """带 where 过滤的检索测试。"""
+
+    def test_search_passes_where(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.query.return_value = {"ids": [[]]}
+        initialized_vs.search("q", top_k=3, where={"user_id": "u1"})
+        kwargs = initialized_vs._collection.query.call_args.kwargs
+        assert kwargs["where"] == {"user_id": "u1"}
+        assert kwargs["n_results"] == 3
+
+    def test_search_passes_where_document(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.query.return_value = {"ids": [[]]}
+        initialized_vs.search("q", where_document={"$contains": "abc"})
+        kwargs = initialized_vs._collection.query.call_args.kwargs
+        assert kwargs["where_document"] == {"$contains": "abc"}
+
+    def test_search_no_where_omitted(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.query.return_value = {"ids": [[]]}
+        initialized_vs.search("q")
+        kwargs = initialized_vs._collection.query.call_args.kwargs
+        assert "where" not in kwargs
+        assert "where_document" not in kwargs
+
+
+class TestDelete:
+    """delete 方法测试。"""
+
+    def test_delete_by_ids(self, initialized_vs: VectorStore) -> None:
+        initialized_vs.delete(ids=["a", "b"])
+        initialized_vs._collection.delete.assert_called_once_with(ids=["a", "b"])
+
+    def test_delete_by_where(self, initialized_vs: VectorStore) -> None:
+        initialized_vs.delete(where={"user_id": "u1"})
+        initialized_vs._collection.delete.assert_called_once_with(where={"user_id": "u1"})
+
+    def test_delete_both(self, initialized_vs: VectorStore) -> None:
+        initialized_vs.delete(ids=["a"], where={"k": "v"})
+        kwargs = initialized_vs._collection.delete.call_args.kwargs
+        assert kwargs == {"ids": ["a"], "where": {"k": "v"}}
+
+    def test_delete_requires_filter(self, initialized_vs: VectorStore) -> None:
+        with pytest.raises(DocumentError, match="ids 或 where"):
+            initialized_vs.delete()
+
+    def test_delete_propagates_error(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.delete.side_effect = RuntimeError("boom")
+        with pytest.raises(DocumentError, match="删除文档失败"):
+            initialized_vs.delete(ids=["a"])
+
+
+class TestCount:
+    """count 方法测试。"""
+
+    def test_count_all(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.count.return_value = 7
+        assert initialized_vs.count() == 7
+
+    def test_count_with_where(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.get.return_value = {"ids": ["x", "y"]}
+        assert initialized_vs.count(where={"user_id": "u1"}) == 2
+        kwargs = initialized_vs._collection.get.call_args.kwargs
+        assert kwargs["where"] == {"user_id": "u1"}
+
+    def test_count_propagates_error(self, initialized_vs: VectorStore) -> None:
+        initialized_vs._collection.count.side_effect = RuntimeError("boom")
+        with pytest.raises(SearchError, match="统计文档数量失败"):
+            initialized_vs.count()
+
+
+class TestFromSettings:
+    """from_settings / from_config 工厂测试。"""
+
+    def test_from_settings_uses_collection_for(self) -> None:
+        from config.settings import Settings
+
+        s = Settings()
+        # 默认 collections 中有 ontology_p2p
+        vs = VectorStore.from_settings(s, "ontology_p2p")
+        assert vs._collection_name == "ontology_p2p"
+        assert vs._embedding_provider is not None
+
+    def test_from_settings_unknown_key_falls_back(self) -> None:
+        from config.settings import Settings
+
+        s = Settings()
+        vs = VectorStore.from_settings(s, "unknown_key")
+        assert vs._collection_name == "unknown_key"
+
+    def test_from_config_with_fake_provider(self) -> None:
+        vs = VectorStore.from_config(
+            persist_directory="/tmp/x",
+            collection_name="t",
+            embedding_provider_name="fake",
+        )
+        from core.knowledge.embeddings import FakeEmbeddingProvider
+
+        assert isinstance(vs._embedding_provider, FakeEmbeddingProvider)
+
+
+class TestInitializeWithProvider:
+    """initialize() 在传入 provider 时应将 embedding_function 透传给 Chroma。"""
+
+    def test_initialize_passes_embedding_function(self) -> None:
+        from core.knowledge.embeddings import FakeEmbeddingProvider
+
+        mock_client = MagicMock()
+        mock_collection = MagicMock()
+        mock_client.get_or_create_collection.return_value = mock_collection
+        with patch(
+            "core.knowledge.vector_store.chromadb.PersistentClient",
+            return_value=mock_client,
+        ):
+            vs = VectorStore(
+                persist_directory="/tmp/t",
+                embedding_provider=FakeEmbeddingProvider(),
+            )
+            vs.initialize()
+        kwargs = mock_client.get_or_create_collection.call_args.kwargs
+        assert "embedding_function" in kwargs

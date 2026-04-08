@@ -16,7 +16,10 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from core.observability.models import TraceRun, TraceSpan
+from core.logging_utils import get_logger
+from core.observability.tables import TraceRun, TraceSpan
+
+_logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +74,8 @@ class TraceStore:
     后台线程批量消费并写入 PostgreSQL。
     """
 
-    _SENTINEL = object()
+    # 关闭信号：worker 收到此对象后 flush 并退出
+    _SHUTDOWN_SIGNAL = object()
 
     def __init__(
         self,
@@ -87,6 +91,8 @@ class TraceStore:
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_maxsize)
         self._worker: threading.Thread | None = None
         self._stopped = threading.Event()
+        self._dropped_count: int = 0
+        self._dropped_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -105,7 +111,7 @@ class TraceStore:
             return
         self._stopped.set()
         try:
-            self._queue.put_nowait(self._SENTINEL)
+            self._queue.put_nowait(self._SHUTDOWN_SIGNAL)
         except queue.Full:
             pass
         self._worker.join(timeout=timeout)
@@ -119,8 +125,20 @@ class TraceStore:
         try:
             self._queue.put_nowait(event)
         except queue.Full:
-            # 监控队列溢出属于非关键错误，降级为 stderr 提示，不阻塞主流程
-            print("[trace-store] queue full, dropping event", flush=True)
+            # 队列溢出降级丢弃，但累计计数 + 周期性告警，避免静默丢数据
+            with self._dropped_lock:
+                self._dropped_count += 1
+                dropped = self._dropped_count
+            if dropped == 1 or dropped % 100 == 0:
+                _logger.warning(
+                    "trace-store queue full, dropped %d events so far", dropped
+                )
+
+    @property
+    def dropped_count(self) -> int:
+        """累计丢弃事件数（监控用）。"""
+        with self._dropped_lock:
+            return self._dropped_count
 
     # ------------------------------------------------------------------
     # 后台消费
@@ -136,7 +154,7 @@ class TraceStore:
             except queue.Empty:
                 item = None
 
-            if item is self._SENTINEL:
+            if item is self._SHUTDOWN_SIGNAL:
                 if buffer:
                     self._flush(buffer)
                 # 继续消费直到 queue 空
@@ -145,7 +163,7 @@ class TraceStore:
                         rest = self._queue.get_nowait()
                     except queue.Empty:
                         break
-                    if rest is self._SENTINEL:
+                    if rest is self._SHUTDOWN_SIGNAL:
                         continue
                     buffer.append(rest)
                 if buffer:
@@ -171,7 +189,7 @@ class TraceStore:
                     self._apply(session, ev)
                 session.commit()
         except Exception as exc:  # noqa: BLE001
-            print(f"[trace-store] flush failed: {exc}", flush=True)
+            _logger.error("trace-store flush failed: %s", exc, exc_info=True)
 
     def _apply(self, session: Session, ev: RunEvent | SpanEvent) -> None:
         if isinstance(ev, RunEvent):

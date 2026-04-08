@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from api.schemas.analysis import (
@@ -18,6 +18,7 @@ from api.schemas.analysis import (
     Severity,
 )
 from config.settings import P2PSettings
+from modules.p2p.rules._utils import AnomalyIdGenerator, safe_float
 
 # 规则 ID 常量（对应 core.ontology.reasoner.P2P_RULES）
 _RULE_AMOUNT = "RULE_P2P_THREE_WAY_MATCH_AMOUNT"
@@ -49,7 +50,7 @@ class ThreeWayMatchChecker:
             settings: P2P 模块配置，包含容差和严重等级参数。
         """
         self._settings: P2PSettings = settings
-        self._seq: int = 0
+        self._id_gen = AnomalyIdGenerator(width=4)
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -86,7 +87,7 @@ class ThreeWayMatchChecker:
         Returns:
             检测到的异常记录列表。
         """
-        self._seq = 0
+        self._id_gen.reset()
         anomalies: list[AnomalyRecord] = []
 
         # 按 po_number 索引 GR 和 Invoice 数据
@@ -94,15 +95,21 @@ class ThreeWayMatchChecker:
         inv_by_po: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
         for gr in gr_lines:
-            gr_by_po[gr["po_number"]].append(gr)
+            key = gr.get("po_number")
+            if key:
+                gr_by_po[key].append(gr)
 
         for inv in invoice_lines:
-            inv_by_po[inv["po_number"]].append(inv)
+            key = inv.get("po_number")
+            if key:
+                inv_by_po[key].append(inv)
 
         for po in po_lines:
-            po_number: str = po["po_number"]
-            po_amount: float = float(po.get("po_amount", 0.0))
-            po_quantity: float = float(po.get("po_quantity", 0.0))
+            po_number: str = po.get("po_number", "")
+            if not po_number:
+                continue
+            po_amount: float = safe_float(po.get("po_amount"))
+            po_quantity: float = safe_float(po.get("po_quantity"))
             supplier_id: str = po.get("supplier_id", "")
             supplier_name: str = po.get("supplier_name", "")
             material_category: str = po.get("material_category", "")
@@ -115,8 +122,8 @@ class ThreeWayMatchChecker:
 
             # --- 金额偏差检测: PO vs Invoice ---
             for inv in inv_by_po.get(po_number, []):
-                invoice_amount: float = float(inv.get("invoice_amount", 0.0))
-                if po_amount == 0:
+                invoice_amount: float = safe_float(inv.get("invoice_amount"))
+                if po_amount <= 0:
                     continue
 
                 variance_pct = abs(invoice_amount - po_amount) / po_amount * 100
@@ -175,8 +182,8 @@ class ThreeWayMatchChecker:
 
             # --- 数量偏差检测: PO vs GR ---
             for gr in gr_by_po.get(po_number, []):
-                gr_quantity: float = float(gr.get("gr_quantity", 0.0))
-                if po_quantity == 0:
+                gr_quantity: float = safe_float(gr.get("gr_quantity"))
+                if po_quantity <= 0:
                     continue
 
                 qty_variance_pct = abs(gr_quantity - po_quantity) / po_quantity * 100
@@ -305,10 +312,8 @@ class ThreeWayMatchChecker:
         return Severity.LOW
 
     def _next_anomaly_id(self) -> str:
-        """生成下一个异常 ID，格式: ANO-{YYYYMMDD}-{序号}。"""
-        self._seq += 1
-        today_str: str = date.today().strftime("%Y%m%d")
-        return f"ANO-{today_str}-{self._seq:04d}"
+        """生成下一个异常 ID（委托给共享生成器）。"""
+        return self._id_gen.next_id()
 
     def _build_record(
         self,

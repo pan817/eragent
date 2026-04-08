@@ -48,7 +48,7 @@ def e2e_client(real_settings: Settings):
     from core.database import get_session_factory, init_database, P2PRepository
     from modules.p2p.tools import set_repository
     # 提前注册 trace 模型到 Base.metadata，确保 init_database 时一并建表
-    from core.observability import models as _trace_models  # noqa: F401
+    import core.observability  # noqa: F401
 
     engine = create_engine_from_dsn(
         "sqlite:///:memory:",

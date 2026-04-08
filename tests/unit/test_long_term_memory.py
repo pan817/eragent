@@ -114,6 +114,94 @@ class TestReportOperations:
         assert reports == []
 
 
+class TestLongTermMemoryWithVectorStore:
+    """LongTermMemory 接入向量库的旁路测试（使用 MagicMock vector store）。"""
+
+    @pytest.fixture()
+    def ltm_with_vs(self) -> tuple[LongTermMemory, MagicMock]:
+        vs = MagicMock()
+        memory = LongTermMemory.__new__(LongTermMemory)
+        memory.dsn = "sqlite://"
+        memory.engine = sa.create_engine("sqlite://")
+        memory._vector_store = vs
+        metadata_obj.create_all(memory.engine)
+        return memory, vs
+
+    def test_save_memory_mirrors_to_vector(self, ltm_with_vs: tuple[LongTermMemory, MagicMock]) -> None:
+        ltm, vs = ltm_with_vs
+        mid = ltm.save_memory("u1", "s1", "insight", "测试内容", {})
+        vs.add_documents.assert_called_once()
+        docs = vs.add_documents.call_args.args[0]
+        assert docs[0]["id"] == f"memory_{mid}"
+        assert docs[0]["metadata"]["user_id"] == "u1"
+        assert docs[0]["metadata"]["source"] == "memory"
+
+    def test_save_memory_vector_failure_swallowed(
+        self, ltm_with_vs: tuple[LongTermMemory, MagicMock]
+    ) -> None:
+        ltm, vs = ltm_with_vs
+        vs.add_documents.side_effect = RuntimeError("vector down")
+        # 不应抛异常
+        mid = ltm.save_memory("u1", "s1", "t", "c", {})
+        assert mid
+
+    def test_search_memories_semantic(self, ltm_with_vs: tuple[LongTermMemory, MagicMock]) -> None:
+        ltm, vs = ltm_with_vs
+        vs.search.return_value = [{"id": "memory_1", "text": "x", "metadata": {}, "distance": 0.1}]
+        results = ltm.search_memories_semantic("u1", "查询", limit=3)
+        assert len(results) == 1
+        kwargs = vs.search.call_args.kwargs
+        assert kwargs["where"] == {"user_id": "u1", "source": "memory"}
+        assert kwargs["top_k"] == 3
+
+    def test_search_memories_semantic_no_vector(self, ltm: LongTermMemory) -> None:
+        # 未注入向量库时返回空
+        assert ltm.search_memories_semantic("u1", "q") == []
+
+    def test_search_memories_semantic_swallows_error(
+        self, ltm_with_vs: tuple[LongTermMemory, MagicMock]
+    ) -> None:
+        ltm, vs = ltm_with_vs
+        vs.search.side_effect = RuntimeError("boom")
+        assert ltm.search_memories_semantic("u1", "q") == []
+
+    def test_save_report_mirrors_to_vector(self, ltm_with_vs: tuple[LongTermMemory, MagicMock]) -> None:
+        ltm, vs = ltm_with_vs
+        rid = ltm.save_report("u1", "s1", "q", "t", "{}", "# 报告内容", 2)
+        vs.add_documents.assert_called_once()
+        docs = vs.add_documents.call_args.args[0]
+        assert docs[0]["id"] == f"report_{rid}"
+        assert docs[0]["metadata"]["source"] == "report"
+        assert docs[0]["metadata"]["anomaly_count"] == 2
+
+    def test_search_reports_semantic(self, ltm_with_vs: tuple[LongTermMemory, MagicMock]) -> None:
+        ltm, vs = ltm_with_vs
+        vs.search.return_value = [{"id": "report_1", "text": "x", "metadata": {}, "distance": 0.1}]
+        results = ltm.search_reports_semantic("u1", "三路匹配")
+        assert len(results) == 1
+        kwargs = vs.search.call_args.kwargs
+        assert kwargs["where"] == {"user_id": "u1", "source": "report"}
+
+    def test_search_reports_semantic_no_vector(self, ltm: LongTermMemory) -> None:
+        assert ltm.search_reports_semantic("u1", "q") == []
+
+    def test_delete_user_data_clears_vector(
+        self, ltm_with_vs: tuple[LongTermMemory, MagicMock]
+    ) -> None:
+        ltm, vs = ltm_with_vs
+        ltm.save_memory("u1", "s1", "t", "c", {})
+        ltm.delete_user_data("u1")
+        vs.delete.assert_called_once_with(where={"user_id": "u1"})
+
+    def test_delete_user_data_swallows_vector_error(
+        self, ltm_with_vs: tuple[LongTermMemory, MagicMock]
+    ) -> None:
+        ltm, vs = ltm_with_vs
+        vs.delete.side_effect = RuntimeError("boom")
+        # 不应抛异常
+        ltm.delete_user_data("u1")
+
+
 class TestShortTermMemoryExtra:
     """ShortTermMemory 额外覆盖测试。"""
 

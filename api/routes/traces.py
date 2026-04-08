@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 
-from api.schemas.trace import RunDetailOut, RunOut, SpanOut, StatRow
+from api.schemas.trace import IoSpanOut, RunDetailOut, RunOut, SpanOut, StatRow
 from core.observability.store import get_trace_store
 
 router = APIRouter(prefix="/traces", tags=["traces"])
@@ -45,6 +45,44 @@ def trace_stats(
 ) -> list[StatRow]:
     store = _store_or_503()
     return [StatRow(**row) for row in store.stats(group_by=group_by, since=since)]
+
+
+@router.get("/{trace_id}/io", response_model=list[IoSpanOut])
+def get_trace_io(
+    trace_id: str,
+    span_type: str | None = Query(default=None, pattern="^(model|tool)$"),
+) -> list[IoSpanOut]:
+    """查询某次 trace 的 model / tool 输入输出记录。
+
+    可通过 `span_type` 过滤只看模型调用或工具调用。
+    """
+    store = _store_or_503()
+    found = store.get_run(trace_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
+    _, spans = found
+    out: list[IoSpanOut] = []
+    for s in spans:
+        if s.span_type not in ("model", "tool"):
+            continue
+        if span_type and s.span_type != span_type:
+            continue
+        attrs = s.attributes or {}
+        out.append(
+            IoSpanOut(
+                span_id=s.span_id,
+                trace_id=s.trace_id,
+                span_type=s.span_type,
+                name=s.name,
+                status=s.status,
+                started_at=s.started_at,
+                duration_ms=s.duration_ms,
+                input=attrs.get("input"),
+                output=attrs.get("output"),
+                error=s.error,
+            )
+        )
+    return out
 
 
 @router.get("/{trace_id}", response_model=RunDetailOut)

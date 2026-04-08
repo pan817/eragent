@@ -6,8 +6,7 @@ import time
 
 import pytest
 
-# 确保 trace 模型注册到 Base.metadata
-from core.observability import models as _trace_models  # noqa: F401
+import core.observability  # noqa: F401  触发 tables 注册到 Base.metadata
 from core.observability.middleware import TimingMiddleware
 from core.observability.store import RunEvent, SpanEvent, TraceStore
 from core.database import Base

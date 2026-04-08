@@ -11,6 +11,7 @@ P2P Agent 工具集。
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -54,7 +55,7 @@ def _get_repository() -> P2PRepository:
 
 
 @tool
-def query_purchase_orders(
+async def query_purchase_orders(
     supplier_id: str = "",
     status: str = "",
     days: int = 30,
@@ -72,12 +73,17 @@ def query_purchase_orders(
         JSON 格式的采购订单列表字符串。
     """
     repo = _get_repository()
-    pos = repo.query_purchase_orders(supplier_id=supplier_id, status=status, days=days)
+    pos = await asyncio.to_thread(
+        repo.query_purchase_orders,
+        supplier_id=supplier_id,
+        status=status,
+        days=days,
+    )
     return json.dumps(pos, ensure_ascii=False, indent=2)
 
 
 @tool
-def query_receipts(
+async def query_receipts(
     po_number: str = "",
     supplier_id: str = "",
     days: int = 30,
@@ -95,12 +101,17 @@ def query_receipts(
         JSON 格式的收货记录列表字符串。
     """
     repo = _get_repository()
-    receipts = repo.query_receipts(po_number=po_number, supplier_id=supplier_id, days=days)
+    receipts = await asyncio.to_thread(
+        repo.query_receipts,
+        po_number=po_number,
+        supplier_id=supplier_id,
+        days=days,
+    )
     return json.dumps(receipts, ensure_ascii=False, indent=2)
 
 
 @tool
-def query_invoices(
+async def query_invoices(
     po_number: str = "",
     supplier_id: str = "",
     status: str = "",
@@ -120,14 +131,18 @@ def query_invoices(
         JSON 格式的发票列表字符串。
     """
     repo = _get_repository()
-    invoices = repo.query_invoices(
-        po_number=po_number, supplier_id=supplier_id, status=status, days=days
+    invoices = await asyncio.to_thread(
+        repo.query_invoices,
+        po_number=po_number,
+        supplier_id=supplier_id,
+        status=status,
+        days=days,
     )
     return json.dumps(invoices, ensure_ascii=False, indent=2)
 
 
 @tool
-def query_payments(
+async def query_payments(
     invoice_number: str = "",
     supplier_id: str = "",
     days: int = 30,
@@ -145,8 +160,11 @@ def query_payments(
         JSON 格式的付款记录列表字符串。
     """
     repo = _get_repository()
-    payments = repo.query_payments(
-        invoice_number=invoice_number, supplier_id=supplier_id, days=days
+    payments = await asyncio.to_thread(
+        repo.query_payments,
+        invoice_number=invoice_number,
+        supplier_id=supplier_id,
+        days=days,
     )
     return json.dumps(payments, ensure_ascii=False, indent=2)
 
@@ -156,19 +174,8 @@ def query_payments(
 # ============================================================
 
 
-@tool
-def run_three_way_match(po_number: str = "") -> str:
-    """执行三路匹配检查，比对采购订单、收货单、发票的金额和数量。
-
-    当偏差超过配置容差时返回异常记录。若指定 po_number 则只检查该订单，
-    否则检查所有订单。
-
-    Args:
-        po_number: 采购订单号，为空则检查所有订单。
-
-    Returns:
-        JSON 格式的异常列表字符串，每条包含异常类型、严重等级、偏差详情。
-    """
+def _run_three_way_match_sync(po_number: str) -> str:
+    """同步执行三路匹配的真实实现，供 async tool 通过线程池调用。"""
     settings = get_settings()
     repo = _get_repository()
 
@@ -186,21 +193,23 @@ def run_three_way_match(po_number: str = "") -> str:
 
 
 @tool
-def run_price_variance_analysis(
-    supplier_id: str = "",
-    days: int = 30,
-) -> str:
-    """执行价格差异分析，比对实际采购单价与合同价/标准价。
+async def run_three_way_match(po_number: str = "") -> str:
+    """执行三路匹配检查，比对采购订单、收货单、发票的金额和数量。
 
-    偏差超出容差阈值时返回异常记录。
+    当偏差超过配置容差时返回异常记录。若指定 po_number 则只检查该订单，
+    否则检查所有订单。
 
     Args:
-        supplier_id: 供应商 ID，为空则分析所有供应商。
-        days: 分析最近 N 天内的采购订单，默认 30 天。
+        po_number: 采购订单号，为空则检查所有订单。
 
     Returns:
-        JSON 格式的价格差异异常列表字符串。
+        JSON 格式的异常列表字符串，每条包含异常类型、严重等级、偏差详情。
     """
+    return await asyncio.to_thread(_run_three_way_match_sync, po_number)
+
+
+def _run_price_variance_analysis_sync(supplier_id: str, days: int) -> str:
+    """同步执行价格差异分析的真实实现。"""
     settings = get_settings()
     repo = _get_repository()
 
@@ -217,21 +226,28 @@ def run_price_variance_analysis(
 
 
 @tool
-def run_payment_compliance_check(
+async def run_price_variance_analysis(
     supplier_id: str = "",
     days: int = 30,
 ) -> str:
-    """执行付款合规性检查，检测逾期付款、提前付款和折扣滥用。
+    """执行价格差异分析，比对实际采购单价与合同价/标准价。
 
-    将付款数据与发票数据关联，检查付款日期是否符合合同约定。
+    偏差超出容差阈值时返回异常记录。
 
     Args:
-        supplier_id: 供应商 ID，为空则检查所有供应商。
-        days: 检查最近 N 天内的付款，默认 30 天。
+        supplier_id: 供应商 ID，为空则分析所有供应商。
+        days: 分析最近 N 天内的采购订单，默认 30 天。
 
     Returns:
-        JSON 格式的付款合规性异常列表字符串。
+        JSON 格式的价格差异异常列表字符串。
     """
+    return await asyncio.to_thread(
+        _run_price_variance_analysis_sync, supplier_id, days
+    )
+
+
+def _run_payment_compliance_check_sync(supplier_id: str, days: int) -> str:
+    """同步执行付款合规检查的真实实现。"""
     settings = get_settings()
     repo = _get_repository()
 
@@ -248,22 +264,28 @@ def run_payment_compliance_check(
 
 
 @tool
-def calculate_supplier_kpis(
-    supplier_id: str,
-    period: str = "",
+async def run_payment_compliance_check(
+    supplier_id: str = "",
+    days: int = 30,
 ) -> str:
-    """计算供应商绩效 KPI，包括准时交付率、发票准确率、质检合格率、价格合规率。
+    """执行付款合规性检查，检测逾期付款、提前付款和折扣滥用。
 
-    基于采购订单、收货、发票数据综合计算四项核心 KPI 指标，
-    并与配置基准值比较生成状态评级。
+    将付款数据与发票数据关联，检查付款日期是否符合合同约定。
 
     Args:
-        supplier_id: 供应商 ID（必填）。
-        period: 评估周期描述，如 "2026-Q1"，为空则使用 "近30天"。
+        supplier_id: 供应商 ID，为空则检查所有供应商。
+        days: 检查最近 N 天内的付款，默认 30 天。
 
     Returns:
-        JSON 格式的供应商 KPI 报告字符串。
+        JSON 格式的付款合规性异常列表字符串。
     """
+    return await asyncio.to_thread(
+        _run_payment_compliance_check_sync, supplier_id, days
+    )
+
+
+def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
+    """同步计算供应商 KPI 的真实实现。"""
     settings = get_settings()
     repo = _get_repository()
 
@@ -290,3 +312,23 @@ def calculate_supplier_kpis(
     )
 
     return json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
+
+@tool
+async def calculate_supplier_kpis(
+    supplier_id: str,
+    period: str = "",
+) -> str:
+    """计算供应商绩效 KPI，包括准时交付率、发票准确率、质检合格率、价格合规率。
+
+    基于采购订单、收货、发票数据综合计算四项核心 KPI 指标，
+    并与配置基准值比较生成状态评级。
+
+    Args:
+        supplier_id: 供应商 ID（必填）。
+        period: 评估周期描述，如 "2026-Q1"，为空则使用 "近30天"。
+
+    Returns:
+        JSON 格式的供应商 KPI 报告字符串。
+    """
+    return await asyncio.to_thread(_calculate_supplier_kpis_sync, supplier_id, period)

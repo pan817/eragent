@@ -16,6 +16,12 @@ import chromadb  # type: ignore[import-untyped]
 from chromadb.api import ClientAPI  # type: ignore[import-untyped]
 from chromadb.api.models.Collection import Collection  # type: ignore[import-untyped]
 
+from core.knowledge.embeddings import (
+    EmbeddingProvider,
+    build_embedding_provider,
+    to_chroma_embedding_function,
+)
+
 
 class VectorStoreError(Exception):
     """向量存储操作异常基类。"""
@@ -47,6 +53,7 @@ class VectorStore:
         self,
         persist_directory: str,
         collection_name: str = "erp_ontology",
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         """
         初始化向量存储实例。
@@ -54,11 +61,69 @@ class VectorStore:
         Args:
             persist_directory: Chroma 持久化目录路径。
             collection_name: 集合名称，默认 ``erp_ontology``。
+            embedding_provider: 可选的 Embedding Provider；为 None 时使用
+                Chroma 内置默认 Embedding（all-MiniLM-L6-v2）。
         """
         self._persist_directory = persist_directory
         self._collection_name = collection_name
+        self._embedding_provider = embedding_provider
         self._client: ClientAPI | None = None
         self._collection: Collection | None = None
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Any,
+        collection_key: str,
+    ) -> "VectorStore":
+        """
+        基于全局 ``Settings`` 与业务 collection 键构造 VectorStore。
+
+        Args:
+            settings: ``config.settings.Settings`` 实例。
+            collection_key: 业务 collection 键，如 ``ontology_p2p`` /
+                ``analysis_reports`` / ``memory_long_term``。
+                若键不在 ``settings.chroma.collections`` 中，将原样作为
+                collection name 使用。
+
+        Returns:
+            已配置但尚未 ``initialize()`` 的 VectorStore 实例。
+        """
+        chroma = settings.chroma
+        collection_name = chroma.collection_for(collection_key)
+        return cls.from_config(
+            persist_directory=chroma.persist_directory,
+            collection_name=collection_name,
+            embedding_provider_name=chroma.embedding_provider,
+            embedding_model=chroma.embedding_model,
+            embedding_api_key=chroma.embedding_api_key or None,
+            embedding_api_base=chroma.embedding_api_base or None,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        persist_directory: str,
+        collection_name: str = "erp_ontology",
+        embedding_provider_name: str = "default",
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_api_base: str | None = None,
+    ) -> "VectorStore":
+        """
+        基于配置构造 VectorStore，自动构建 EmbeddingProvider。
+        """
+        provider = build_embedding_provider(
+            provider_name=embedding_provider_name,
+            model=embedding_model,
+            api_key=embedding_api_key,
+            api_base=embedding_api_base,
+        )
+        return cls(
+            persist_directory=persist_directory,
+            collection_name=collection_name,
+            embedding_provider=provider,
+        )
 
     def initialize(self) -> None:
         """
@@ -74,10 +139,15 @@ class VectorStore:
             self._client = chromadb.PersistentClient(
                 path=self._persist_directory,
             )
-            self._collection = self._client.get_or_create_collection(
-                name=self._collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
+            create_kwargs: dict[str, Any] = {
+                "name": self._collection_name,
+                "metadata": {"hnsw:space": "cosine"},
+            }
+            if self._embedding_provider is not None:
+                create_kwargs["embedding_function"] = to_chroma_embedding_function(
+                    self._embedding_provider
+                )
+            self._collection = self._client.get_or_create_collection(**create_kwargs)
         except Exception as exc:
             self._client = None
             self._collection = None
@@ -158,6 +228,8 @@ class VectorStore:
         self,
         query: str,
         top_k: int = 5,
+        where: dict[str, Any] | None = None,
+        where_document: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """
         语义检索文档。
@@ -181,11 +253,16 @@ class VectorStore:
         collection = self._ensure_collection()
 
         try:
-            results = collection.query(
-                query_texts=[query],
-                n_results=top_k,
-                include=["documents", "metadatas", "distances"],
-            )
+            query_kwargs: dict[str, Any] = {
+                "query_texts": [query],
+                "n_results": top_k,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                query_kwargs["where"] = where
+            if where_document:
+                query_kwargs["where_document"] = where_document
+            results = collection.query(**query_kwargs)
         except Exception as exc:
             raise SearchError(
                 f"语义检索失败 (query='{query[:50]}...'): {exc}"
@@ -212,6 +289,59 @@ class VectorStore:
             })
 
         return output
+
+    # ------------------------------------------------------------------
+    # 删除与统计
+    # ------------------------------------------------------------------
+
+    def delete(
+        self,
+        ids: list[str] | None = None,
+        where: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        按 ID 或 metadata 过滤条件删除文档。
+
+        Args:
+            ids: 待删除的文档 ID 列表。
+            where: metadata 过滤条件，例如 ``{"user_id": "u1"}``。
+                   ids 与 where 至少需提供一个。
+
+        Raises:
+            DocumentError: 参数缺失或删除失败时抛出。
+        """
+        collection = self._ensure_collection()
+        if not ids and not where:
+            raise DocumentError("delete 必须提供 ids 或 where 至少一项")
+        try:
+            kwargs: dict[str, Any] = {}
+            if ids:
+                kwargs["ids"] = ids
+            if where:
+                kwargs["where"] = where
+            collection.delete(**kwargs)
+        except Exception as exc:
+            raise DocumentError(f"删除文档失败: {exc}") from exc
+
+    def count(self, where: dict[str, Any] | None = None) -> int:
+        """
+        统计文档数量。
+
+        Args:
+            where: 可选 metadata 过滤；为 None 时返回 collection 总数。
+
+        Returns:
+            匹配的文档数量。
+        """
+        collection = self._ensure_collection()
+        try:
+            if where is None:
+                return int(collection.count())
+            # 通过 get(where=...) 取出后计数；适配 Chroma 无原生 count(where) 接口
+            result = collection.get(where=where, include=[])
+            return len(result.get("ids", []))
+        except Exception as exc:
+            raise SearchError(f"统计文档数量失败: {exc}") from exc
 
     # ------------------------------------------------------------------
     # 本体上下文注入

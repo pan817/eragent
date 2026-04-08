@@ -20,6 +20,7 @@ llm:
   use_system_proxy: false    # 是否读取系统代理（HTTP_PROXY/HTTPS_PROXY）；false=强制直连
 
 neo4j:
+  enabled: false              # 总开关：false 时服务不依赖 Neo4j，相关功能短路
   uri: "bolt://localhost:7687"
   username: "neo4j"
   # password: 通过环境变量 NEO4J_PASSWORD 注入
@@ -28,8 +29,19 @@ neo4j:
 
 chroma:
   persist_directory: "./data/chroma"
-  collection_name: "erp_ontology"
+  collection_name: "erp_ontology"      # 兼容字段（旧版默认 collection）
+  embedding_provider: "default"        # default | fake | openai | dashscope | zhipu
   embedding_model: "text-embedding-3-small"
+  embedding_api_base: ""               # 远端 provider 的 API Base
+  # embedding_api_key: 通过环境变量 CHROMA_EMBEDDING_API_KEY 注入
+  default_top_k: 5
+  min_score: 0.0
+  # 多 collection 划分：业务键 → 实际 collection 名称
+  collections:
+    ontology_p2p: "ontology_p2p"
+    business_docs_p2p: "business_docs_p2p"
+    analysis_reports: "analysis_reports"
+    memory_long_term: "memory_long_term"
 
 postgresql:
   host: "localhost"

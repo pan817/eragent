@@ -51,3 +51,47 @@ def format_summary(spans: list[SpanEvent], total_ms: float) -> str:
 def _truncate(value: object, length: int = 60) -> str:
     s = str(value) if value is not None else ""
     return s if len(s) <= length else s[: length - 3] + "..."
+
+
+def format_io_panel(span: SpanEvent, max_line: int = 200) -> str:
+    """对单次 model / tool 调用打印结构化 I/O 面板。
+
+    在调用结束时立即输出，便于实时观察 prompt / 工具参数 / 返回值。
+    输入和输出已在 middleware 阶段截断到 _MAX_IO_TEXT，此处再做行宽截断。
+    """
+    if span.span_type not in ("model", "tool"):
+        return ""
+    attrs = span.attributes or {}
+    status_tag = "" if span.status == "ok" else f" [{span.status}]"
+    header = (
+        f"┌─ [{span.span_type}] {span.name}  "
+        f"{span.duration_ms:.1f}ms{status_tag}  "
+        f"trace={span.trace_id[:8]} span={span.span_id[:8]}"
+    )
+    lines: list[str] = [header]
+
+    if span.span_type == "model":
+        msgs = attrs.get("input") or []
+        lines.append(f"│  input ({len(msgs)} msgs):")
+        for m in msgs:
+            role = m.get("role", "?")
+            content = _truncate(m.get("content", ""), max_line)
+            lines.append(f"│    [{role}] {content}")
+        out = attrs.get("output") or {}
+        if isinstance(out, dict):
+            content = _truncate(out.get("content", ""), max_line)
+            lines.append(f"│  output: {content}")
+            if out.get("tool_calls"):
+                lines.append(f"│  tool_calls: {_truncate(out['tool_calls'], max_line)}")
+            if out.get("usage"):
+                lines.append(f"│  usage: {_truncate(out['usage'], max_line)}")
+        else:
+            lines.append(f"│  output: {_truncate(out, max_line)}")
+    else:  # tool
+        lines.append(f"│  input: {_truncate(attrs.get('input'), max_line)}")
+        lines.append(f"│  output: {_truncate(attrs.get('output'), max_line)}")
+
+    if span.error:
+        lines.append(f"│  error: {_truncate(span.error, max_line)}")
+    lines.append("└─")
+    return "\n".join(lines)

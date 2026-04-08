@@ -152,6 +152,7 @@ class AnalysisResult(BaseModel):
     """分析结果（结构化 JSON + Markdown 报告混合输出）。"""
 
     report_id: str = Field(description="报告唯一 ID")
+    trace_id: str = Field(default="", description="全链路监控 trace ID，可用于查询 /traces/{trace_id}")
     status: AnalysisStatus = Field(description="执行状态")
     analysis_type: AnalysisType = Field(description="分析类型")
     query: str = Field(description="原始查询")

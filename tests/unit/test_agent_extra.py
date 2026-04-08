@@ -15,26 +15,23 @@ class TestP2PAgentBuildMethods:
     """Agent 构建方法测试。"""
 
     def test_build_model(self) -> None:
-        """_build_model 应返回 ChatOpenAI 实例。"""
+        """build_chat_model 应调用 ChatOpenAI 构造器。"""
         settings = Settings()
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
-
-        with patch("modules.p2p.agent.ChatOpenAI") as mock_chat:
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
             mock_chat.return_value = MagicMock()
-            model = agent._build_model()
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm)
             mock_chat.assert_called_once()
 
     def test_build_model_default_disables_system_proxy(self) -> None:
         """默认 use_system_proxy=False：应注入 trust_env=False 的 httpx 客户端。"""
         settings = Settings()
         assert settings.llm.use_system_proxy is False
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
-        with patch("modules.p2p.agent.ChatOpenAI") as mock_chat:
-            agent._build_model()
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm)
             kwargs = mock_chat.call_args.kwargs
             # 全程走 async 路径，仅注入 AsyncClient，避免空闲的同步连接池
             assert "http_client" not in kwargs
@@ -45,11 +42,10 @@ class TestP2PAgentBuildMethods:
         """use_system_proxy=True：不应注入自定义 httpx 客户端，沿用默认行为。"""
         settings = Settings()
         settings.llm.use_system_proxy = True
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
-        with patch("modules.p2p.agent.ChatOpenAI") as mock_chat:
-            agent._build_model()
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm)
             kwargs = mock_chat.call_args.kwargs
             assert "http_client" not in kwargs
             assert "http_async_client" not in kwargs
@@ -65,36 +61,27 @@ class TestP2PAgentBuildMethods:
         assert len(tools) == 8
 
     def test_get_system_prompt(self) -> None:
-        """_get_system_prompt 应返回包含角色定义的字符串。"""
-        settings = Settings()
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
+        """build_system_prompt 应返回包含角色定义的字符串。"""
+        from modules.p2p.prompts import build_system_prompt
 
-        prompt = agent._get_system_prompt()
+        prompt = build_system_prompt()
         assert "P2P" in prompt
         assert "角色定义" in prompt
 
     def test_get_ontology_context_success(self) -> None:
         """本体上下文获取成功时应返回格式化文本。"""
-        settings = Settings()
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
+        from modules.p2p.prompts import get_ontology_context
 
-        context = agent._get_ontology_context()
+        context = get_ontology_context()
         # 应包含业务背景文本（成功或降级都可以）
         assert "P2P" in context or "采购" in context
 
     def test_get_ontology_context_failure(self) -> None:
         """本体加载失败时应返回默认文本。"""
-        settings = Settings()
-        with patch("modules.p2p.agent.get_settings", return_value=settings):
-            from modules.p2p.agent import P2PAgent
-            agent = P2PAgent(settings=settings)
+        with patch("modules.p2p.prompts.OntologyLoader", side_effect=Exception("no owl")):
+            from modules.p2p.prompts import get_ontology_context
 
-        with patch("modules.p2p.agent.OntologyLoader", side_effect=Exception("no owl")):
-            context = agent._get_ontology_context()
+            context = get_ontology_context()
         assert "三路匹配" in context
 
     def test_get_or_build_agent(self) -> None:
@@ -106,7 +93,7 @@ class TestP2PAgentBuildMethods:
 
         mock_langchain_agent = MagicMock()
         with (
-            patch("modules.p2p.agent.ChatOpenAI"),
+            patch("modules.p2p.agent.build_chat_model"),
             patch("modules.p2p.agent.create_agent", return_value=mock_langchain_agent),
         ):
             result = agent._get_or_build_agent()
@@ -190,7 +177,7 @@ class TestP2PAgentAnalyzeExtra:
 
         # 需要让 _get_or_build_agent 返回同一个 mock
         with (
-            patch("modules.p2p.agent.ChatOpenAI"),
+            patch("modules.p2p.agent.build_chat_model"),
             patch("modules.p2p.agent.create_agent", return_value=mock_agent),
         ):
             result = await agent.analyze("测试")

@@ -21,8 +21,26 @@ from api.schemas.analysis import (
     AnalysisType,
     ErrorInfo,
 )
+from config.settings import get_settings
+from core.logging_utils import get_logger
 from core.memory import get_long_term_memory
 from core.orchestrator.orchestrator import Orchestrator
+
+_logger = get_logger(__name__)
+
+
+async def _run_db_io(func, /, *args, **kwargs):
+    """在线程池中执行同步 DB 调用，附带硬超时，避免阻塞 event loop。"""
+    timeout = get_settings().analysis.db_io_timeout_seconds
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs), timeout=timeout
+        )
+    except asyncio.TimeoutError as exc:
+        _logger.error("db io timeout after %.1fs: %s", timeout, func.__name__)
+        raise HTTPException(
+            status_code=504, detail=f"数据库操作超时: {func.__name__}"
+        ) from exc
 
 router = APIRouter(tags=["analysis"])
 
@@ -103,8 +121,8 @@ async def get_report(report_id: str) -> dict[str, Any]:
         HTTPException: 当指定 report_id 的报告不存在时抛出 404。
     """
     memory = get_long_term_memory()
-    # 同步 SQLAlchemy 在 async 路由里必须走线程池，否则阻塞 event loop
-    report: dict[str, Any] | None = await asyncio.to_thread(memory.get_report, report_id)
+    # 同步 SQLAlchemy 在 async 路由里走线程池 + 硬超时，避免阻塞 event loop
+    report: dict[str, Any] | None = await _run_db_io(memory.get_report, report_id)
     if report is None:
         raise HTTPException(
             status_code=404,
@@ -130,7 +148,7 @@ async def list_reports(
         报告记录列表，每条记录为字典格式。
     """
     memory = get_long_term_memory()
-    reports: list[dict[str, Any]] = await asyncio.to_thread(
+    reports: list[dict[str, Any]] = await _run_db_io(
         memory.list_reports, user_id, limit
     )
     return reports
@@ -193,7 +211,7 @@ async def clear_long_term_memory(
 
     memory = get_long_term_memory()
     if user_id:
-        deleted = await asyncio.to_thread(
+        deleted = await _run_db_io(
             memory.delete_user_data,
             user_id,
             delete_memories=delete_memories,
@@ -202,5 +220,5 @@ async def clear_long_term_memory(
         return {"scope": "user", "user_id": user_id, "deleted": deleted}
 
     # all=true 且未提供 user_id
-    deleted = await asyncio.to_thread(memory.delete_all)
+    deleted = await _run_db_io(memory.delete_all)
     return {"scope": "all", "deleted": deleted}

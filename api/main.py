@@ -23,9 +23,7 @@ from core.database import (
     get_session_factory,
     reset_and_seed,
 )
-from core.observability import init_trace_store
-from core.observability.store import shutdown_trace_store
-from core.observability import models as _trace_models  # noqa: F401  确保表注册到 Base.metadata
+from core.observability import init_trace_store, shutdown_trace_store
 from modules.p2p.tools import set_repository
 
 

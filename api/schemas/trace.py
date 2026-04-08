@@ -44,6 +44,23 @@ class RunDetailOut(RunOut):
     spans: list[SpanOut] = Field(default_factory=list)
 
 
+class IoSpanOut(BaseModel):
+    """单次 model / tool 调用的输入输出记录。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    span_id: str
+    trace_id: str
+    span_type: str  # model | tool
+    name: str
+    status: str
+    started_at: datetime
+    duration_ms: float | None
+    input: Any | None = None
+    output: Any | None = None
+    error: str | None = None
+
+
 class StatRow(BaseModel):
     key: str
     span_type: str

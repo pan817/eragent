@@ -60,8 +60,20 @@ def p2p_settings(settings: Settings) -> P2PSettings:
 
 @pytest.fixture()
 def db_engine():
-    """创建 SQLite 内存数据库引擎，灌入种子数据。"""
-    engine = create_engine_from_dsn("sqlite:///:memory:")
+    """创建 SQLite 内存数据库引擎，灌入种子数据。
+
+    使用 StaticPool + check_same_thread=False，确保同一份内存数据库可以
+    被多个线程共享。生产代码（PostgreSQL）不受影响；这里只是因为 SQLite
+    `:memory:` 默认每个连接独立，且禁止跨线程使用——而 P2P 工具已改为
+    async + asyncio.to_thread，repo 调用会落在 worker 线程上。
+    """
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine_from_dsn(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     init_database(engine, seed=0)
     yield engine
     engine.dispose()

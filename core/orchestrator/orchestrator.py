@@ -22,7 +22,11 @@ from api.schemas.analysis import (
     ErrorInfo,
 )
 from config.settings import Settings, get_settings
+from core.logging_utils import get_logger
+from core.observability import TimingMiddleware
 from core.orchestrator.intent import IntentParser
+
+_logger = get_logger(__name__)
 
 
 class Orchestrator:
@@ -47,10 +51,17 @@ class Orchestrator:
     def _init_components(self) -> None:
         """初始化轻量级组件。
 
-        仅初始化不涉及外部资源的组件（如 IntentParser），
+        仅初始化不涉及外部资源的组件（如 IntentParser、TimingMiddleware），
         重量级组件（如 P2PAgent）通过延迟属性按需创建。
+
+        TimingMiddleware 在此处直接创建（极轻量），让 trace 可以在
+        ``_lazy_agent`` 触发任何 langchain 重导入之前就开启计时，
+        从而把首次冷启动那段几十秒的 import + Agent 构建也纳入链路监控。
         """
         self._intent_parser: IntentParser = IntentParser()
+        self._timing_middleware: TimingMiddleware = TimingMiddleware(
+            agent_name="p2p_agent"
+        )
 
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
         """清理 P2PAgent 的短期记忆。
@@ -82,9 +93,14 @@ class Orchestrator:
                 anomaly_count=len(result.anomalies),
                 report_id=result.report_id,
             )
-        except Exception:
-            # 长期记忆是旁路，写失败不影响主路径
-            pass
+        except Exception as exc:
+            # 长期记忆是旁路，写失败不影响主路径，但必须留下可观测日志
+            _logger.warning(
+                "persist report to long-term memory failed: %s (report_id=%s)",
+                exc,
+                result.report_id,
+                exc_info=True,
+            )
 
     @property
     def _lazy_agent(self) -> Any:
@@ -99,7 +115,10 @@ class Orchestrator:
         if self._agent is None:
             from modules.p2p.agent import P2PAgent
 
-            self._agent = P2PAgent(settings=self._settings)
+            self._agent = P2PAgent(
+                settings=self._settings,
+                timing_middleware=self._timing_middleware,
+            )
         return self._agent
 
     async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
@@ -120,6 +139,16 @@ class Orchestrator:
         start_time = time.monotonic()
         report_id = str(uuid.uuid4())
         session_id = request.session_id or str(uuid.uuid4())
+
+        # ⏱ 在最外层启动 trace —— 关键：直接用 self._timing_middleware，
+        #    不要走 self._lazy_agent，否则首次访问会触发 langchain 模块导入和
+        #    P2PAgent 实例化（冷启动可达 10–20s），这部分会落在 trace 之外。
+        timing_middleware = self._timing_middleware
+        trace_id = timing_middleware.start_run(
+            session_id=session_id, user_id=request.user_id
+        )
+        trace_status: str = "success"
+        trace_error: str | None = None
 
         try:
             # 1. 意图解析
@@ -149,6 +178,7 @@ class Orchestrator:
             duration_ms = (time.monotonic() - start_time) * 1000.0
             result = AnalysisResult(
                 report_id=report_id,
+                trace_id=trace_id,
                 status=AnalysisStatus.SUCCESS,
                 analysis_type=analysis_type,
                 query=request.query,
@@ -171,9 +201,12 @@ class Orchestrator:
             return result
 
         except Exception as exc:
+            trace_status = "error"
+            trace_error = f"{type(exc).__name__}: {exc}"
             duration_ms = (time.monotonic() - start_time) * 1000.0
             return AnalysisResult(
                 report_id=report_id,
+                trace_id=trace_id,
                 status=AnalysisStatus.FAILED,
                 analysis_type=request.analysis_type or AnalysisType.COMPREHENSIVE,
                 query=request.query,
@@ -186,3 +219,6 @@ class Orchestrator:
                 ),
                 duration_ms=duration_ms,
             )
+        finally:
+            # ⏱ 关闭 trace —— 无论成功/失败，agent root span 一定落盘
+            timing_middleware.finish_run(status=trace_status, error=trace_error)

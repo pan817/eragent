@@ -2,6 +2,7 @@
 ### ERP Analysis Agent - HTTP 接口测试数据
 ### 使用方式：VS Code 安装 REST Client 插件后可直接点击 Send Request
 ### 启动服务：uvicorn api.main:app --reload
+### uvicorn api.main:app --workers 8
 ### ============================================================
 
 ### 变量定义
@@ -188,3 +189,127 @@ Content-Type: application/json
     "query": "分析三路匹配",
     "time_range_days": 999
 }
+
+
+### ============================================================
+### 全链路监控（Observability / Trace）
+### 说明：
+###   - 每次 /api/v1/analyze 调用都会生成一条 trace（agent root span +
+###     若干 model / tool 子 span），由 ObservabilityMiddleware 异步落盘。
+###   - 推荐先跑一次 #18 拿到 trace_id，再用 @trace_id 变量去查 #20 / #21 / #22。
+###   - REST Client 支持把上一次响应的 JSON 字段抽取为变量（@name = response.body.*）。
+### ============================================================
+
+### 18. 触发一次分析以生成 trace（捕获 trace_id / session_id 给后续用例复用）
+# @name analyzeForTrace
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析最近30天的三路匹配异常，并评估供应商绩效",
+    "user_id": "trace-user-001",
+    "session_id": "trace-session-001",
+    "analysis_type": "comprehensive"
+}
+
+###
+# @trace_id = {{analyzeForTrace.response.body.trace_id}}
+@trace_id = 192324ad-e736-413f-880f-e74926dc20e9
+@session_id = {{analyzeForTrace.response.body.session_id}}
+@user_id = {{analyzeForTrace.response.body.user_id}}
+
+
+### ----- Trace 列表查询 -----
+
+### 19. 列出最近 trace（默认 limit=50）
+GET {{host}}/api/v1/traces
+
+### 19.1 按 session_id 过滤
+GET {{host}}/api/v1/traces?session_id={{session_id}}
+
+### 19.2 按 user_id 过滤 + 分页
+GET {{host}}/api/v1/traces?user_id={{user_id}}&limit=10&offset=0
+
+### 19.3 按时间过滤（since，ISO8601）
+GET {{host}}/api/v1/traces?since=2026-01-01T00:00:00Z&limit=20
+
+### 19.4 组合过滤：用户 + 会话 + 时间窗口
+GET {{host}}/api/v1/traces?user_id={{user_id}}&session_id={{session_id}}&since=2026-01-01T00:00:00Z&limit=50
+
+### 19.5 limit 边界（应返回 422，limit 最大 500）
+GET {{host}}/api/v1/traces?limit=1000
+
+
+### ----- Trace 详情查询 -----
+
+### 20. 获取 trace 详情（包含全部 span 树）
+GET {{host}}/api/v1/traces/{{trace_id}}
+
+### 20.1 不存在的 trace（应返回 404）
+GET {{host}}/api/v1/traces/00000000-0000-0000-0000-000000000000
+
+
+### ----- Trace 输入输出查询 -----
+
+### 21. 查询某次 trace 的全部 model + tool 输入输出
+GET {{host}}/api/v1/traces/{{trace_id}}/io
+
+### 21.1 仅看 LLM model 调用的 IO
+GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=model
+
+### 21.2 仅看 tool 工具调用的 IO
+GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=tool
+
+### 21.3 非法 span_type（应返回 422）
+GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=invalid
+
+### 21.4 不存在的 trace IO（应返回 404）
+GET {{host}}/api/v1/traces/00000000-0000-0000-0000-000000000000/io
+
+
+### ----- Trace 聚合统计 -----
+
+### 22. 按工具名聚合统计（默认）
+GET {{host}}/api/v1/traces/stats
+
+### 22.1 按 tool_name 显式聚合
+GET {{host}}/api/v1/traces/stats?group_by=tool_name
+
+### 22.2 按 span_type 聚合（model / tool / agent / chain ...）
+GET {{host}}/api/v1/traces/stats?group_by=span_type
+
+### 22.3 仅统计某时间点之后的 span
+GET {{host}}/api/v1/traces/stats?group_by=tool_name&since=2026-01-01T00:00:00Z
+
+### 22.4 非法 group_by（应返回 422）
+GET {{host}}/api/v1/traces/stats?group_by=invalid
+
+
+### ----- 全链路联动场景 -----
+
+### 23. 分析 → 立刻按 session_id 拉 trace 列表 → 取 trace 详情
+###     人工流程：先 Send #23，再 Send #23.1 / #23.2
+# @name analyzeAndTrace
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查最近的付款合规情况",
+    "user_id": "ops-007",
+    "session_id": "ops-session-trace"
+}
+
+###
+@trace_id_2 = {{analyzeAndTrace.response.body.trace_id}}
+
+### 23.1 立即列出该 session 的 trace
+GET {{host}}/api/v1/traces?session_id=ops-session-trace&limit=5
+
+### 23.2 取最新 trace 详情
+GET {{host}}/api/v1/traces/{{trace_id_2}}
+
+### 23.3 看这次分析触发的 LLM 调用 IO
+GET {{host}}/api/v1/traces/{{trace_id_2}}/io?span_type=model
+
+### 23.4 看这次分析触发的工具调用 IO
+GET {{host}}/api/v1/traces/{{trace_id_2}}/io?span_type=tool

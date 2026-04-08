@@ -8,18 +8,16 @@ P2P Agent 定义。
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
-# 进程内并发缓存的最大 session 数。超过则按 LRU 淘汰，避免无界增长导致 OOM。
-_MAX_SHORT_TERM_SESSIONS = 1024
-
 from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
 
 from api.schemas.analysis import (
     AnalysisResult,
@@ -28,10 +26,13 @@ from api.schemas.analysis import (
     ErrorInfo,
 )
 from config.settings import Settings, get_settings
+from core.logging_utils import get_logger
 from core.memory import ShortTermMemory
 from core.observability import TimingMiddleware
-from core.ontology.loader import OntologyLoader
-from core.ontology.reasoner import OntologyReasoner
+from modules.p2p.model_factory import build_chat_model
+from modules.p2p.prompts import build_system_prompt
+
+_logger = get_logger(__name__)
 
 
 def _naive_summarize(messages: list[dict[str, str]]) -> str:
@@ -64,18 +65,40 @@ class P2PAgent:
         _agent: LangChain Agent 实例（延迟初始化）。
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        timing_middleware: TimingMiddleware | None = None,
+    ) -> None:
         """初始化 P2P Agent。
 
         Args:
             settings: 全局配置对象，为 None 时自动调用 get_settings() 获取。
+            timing_middleware: 链路监控中间件。允许调用方（如 Orchestrator）
+                在更外层创建并复用同一份 middleware，确保 trace 能覆盖
+                P2PAgent 的导入与构建阶段。为 None 时内部懒建一份。
         """
         self._settings: Settings = settings if settings is not None else get_settings()
         self._agent: Any | None = None
-        self._timing_middleware: TimingMiddleware | None = None
+        self._timing_middleware: TimingMiddleware | None = timing_middleware
         # 按 session_id 隔离的短期记忆，使用 OrderedDict 实现 LRU，
         # 防止长时间运行下进程内 session 字典无界增长导致 OOM
         self._short_term_memories: OrderedDict[str, ShortTermMemory] = OrderedDict()
+        # Agent 构建 + 短期记忆字典在多线程/多协程下都可能并发访问，
+        # 用 RLock 同步避免重复初始化和 OrderedDict 竞态
+        self._lock = threading.RLock()
+
+    @property
+    def timing_middleware(self) -> TimingMiddleware:
+        """获取 TimingMiddleware 实例（懒初始化）。
+
+        在 Agent 真正构建前，Orchestrator 也可以拿到 middleware 用于
+        包裹整条调用链 —— 这样首次构建 Agent 的耗时（LLM client、
+        本体加载、create_agent 组装）也能落入 trace。
+        """
+        if self._timing_middleware is None:
+            self._timing_middleware = TimingMiddleware(agent_name="p2p_agent")
+        return self._timing_middleware
 
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
         """清理短期记忆。
@@ -86,14 +109,15 @@ class P2PAgent:
         Returns:
             实际被清理的会话数量。
         """
-        if session_id is None:
-            count = len(self._short_term_memories)
-            self._short_term_memories.clear()
-            return count
-        if session_id in self._short_term_memories:
-            del self._short_term_memories[session_id]
-            return 1
-        return 0
+        with self._lock:
+            if session_id is None:
+                count = len(self._short_term_memories)
+                self._short_term_memories.clear()
+                return count
+            if session_id in self._short_term_memories:
+                del self._short_term_memories[session_id]
+                return 1
+            return 0
 
     def _get_short_term_memory(self, session_id: str) -> ShortTermMemory:
         """获取或创建指定会话的短期记忆（LRU 行为）。
@@ -101,58 +125,27 @@ class P2PAgent:
         每次访问都把对应 session 移到末尾标记为最近使用；
         当总数超过 ``_MAX_SHORT_TERM_SESSIONS`` 时淘汰最久未用的会话。
         """
-        stm = self._short_term_memories.get(session_id)
-        if stm is not None:
-            self._short_term_memories.move_to_end(session_id)
-            return stm
+        with self._lock:
+            stm = self._short_term_memories.get(session_id)
+            if stm is not None:
+                self._short_term_memories.move_to_end(session_id)
+                return stm
 
-        mem_cfg = self._settings.memory
-        stm = ShortTermMemory(
-            max_messages=mem_cfg.short_term_max_messages,
-            summary_threshold=mem_cfg.short_term_summary_threshold,
-        )
-        self._short_term_memories[session_id] = stm
-        # LRU 淘汰
-        while len(self._short_term_memories) > _MAX_SHORT_TERM_SESSIONS:
-            self._short_term_memories.popitem(last=False)
-        return stm
+            mem_cfg = self._settings.memory
+            stm = ShortTermMemory(
+                max_messages=mem_cfg.short_term_max_messages,
+                summary_threshold=mem_cfg.short_term_summary_threshold,
+            )
+            self._short_term_memories[session_id] = stm
+            # LRU 淘汰
+            max_sessions = self._settings.agent_runtime.max_short_term_sessions
+            while len(self._short_term_memories) > max_sessions:
+                self._short_term_memories.popitem(last=False)
+            return stm
 
     # ------------------------------------------------------------------
     # 构建方法
     # ------------------------------------------------------------------
-
-    def _build_model(self) -> ChatOpenAI:
-        """构建 ChatOpenAI 兼容模型实例。
-
-        使用 ChatOpenAI 兼容接口连接 GLM-4 大模型，
-        所有参数从 settings.llm 配置中读取。
-
-        当 ``settings.llm.use_system_proxy`` 为 False 时，显式构造
-        ``trust_env=False`` 的 httpx 客户端，强制直连，避免系统代理
-        （HTTP_PROXY/HTTPS_PROXY）干扰；为 True 时使用默认行为，
-        遵循系统代理环境变量。
-
-        Returns:
-            配置完成的 ChatOpenAI 实例。
-        """
-        import httpx
-
-        llm_cfg = self._settings.llm
-        kwargs: dict[str, Any] = dict(
-            model=llm_cfg.model,
-            api_key=llm_cfg.api_key,
-            base_url=llm_cfg.api_base,
-            temperature=llm_cfg.temperature,
-            max_tokens=llm_cfg.max_tokens,
-            timeout=llm_cfg.timeout,
-        )
-        if not llm_cfg.use_system_proxy:
-            # 关闭对环境变量代理的信任，确保直连 LLM 服务。
-            # 当前服务全程走 async 路径，仅创建 AsyncClient，避免空闲的同步连接池。
-            kwargs["http_async_client"] = httpx.AsyncClient(
-                trust_env=False, timeout=llm_cfg.timeout
-            )
-        return ChatOpenAI(**kwargs)
 
     def _build_tools(self) -> list:
         """导入并返回 P2P 工具集。
@@ -184,98 +177,6 @@ class P2PAgent:
             calculate_supplier_kpis,
         ]
 
-    def _get_system_prompt(self) -> str:
-        """构建 P2P Agent 的系统提示词。
-
-        包含角色定义、可用工具说明、输出格式要求和本体上下文。
-        本体上下文通过 OntologyReasoner 获取，获取失败时使用默认文本。
-
-        Returns:
-            中文系统提示词字符串。
-        """
-        # 获取本体上下文
-        ontology_context: str = self._get_ontology_context()
-
-        return f"""你是一位专业的 P2P（采购到付款）分析专家，负责分析企业采购流程中的异常和风险。
-
-## 角色定义
-你精通 Oracle EBS 采购模块的业务流程，能够从采购订单、收货、发票、付款等多维度数据中识别问题。
-你的分析应当专业、准确、可操作，为企业采购管理提供切实可行的改进建议。
-
-## 可用工具
-你可以使用以下工具获取数据和执行分析：
-
-### 数据查询工具
-1. **query_purchase_orders** - 查询采购订单数据（支持按供应商、状态筛选）
-2. **query_receipts** - 查询收货记录（支持按 PO 号、供应商筛选）
-3. **query_invoices** - 查询发票数据（支持按 PO 号、供应商、状态筛选）
-4. **query_payments** - 查询付款记录（支持按发票号、供应商筛选）
-
-### 分析检查工具
-5. **run_three_way_match** - 执行三路匹配检查（PO-收货-发票 金额/数量比对）
-6. **run_price_variance_analysis** - 执行价格差异分析（实际价 vs 合同价）
-7. **run_payment_compliance_check** - 执行付款合规性检查（逾期/提前付款/折扣滥用）
-8. **calculate_supplier_kpis** - 计算供应商绩效 KPI（准时交付率、发票准确率等）
-
-## 输出格式要求
-1. 使用中文回复
-2. 以 Markdown 格式组织报告，包含标题、摘要、详细发现和建议
-3. 对于异常发现，明确标注严重等级（HIGH/MEDIUM/LOW）
-4. 提供具体的数据支撑（单据号、金额、偏差百分比等）
-5. 给出可操作的改进建议
-
-## 分析流程
-1. 理解用户的分析需求，确定分析类型
-2. 调用相关查询工具获取基础数据
-3. 调用分析工具执行规则检查
-4. 综合分析结果，生成结构化报告
-
-## 本体知识上下文
-{ontology_context}
-"""
-
-    def _get_ontology_context(self) -> str:
-        """获取本体上下文信息。
-
-        尝试从 OntologyReasoner 获取结构化本体上下文，
-        失败时返回默认业务背景文本。
-
-        Returns:
-            本体上下文字符串，供注入系统提示词。
-        """
-        try:
-            loader = OntologyLoader()
-            reasoner = OntologyReasoner(loader)
-            context: dict[str, Any] = reasoner.get_ontology_context_for_agent()
-
-            structured: dict[str, Any] = context.get("structured", {})
-            narrative: str = context.get("narrative", "")
-
-            # 格式化规则信息
-            rules_text: str = ""
-            compliance_rules: dict[str, Any] = structured.get("compliance_rules", {})
-            for rule_id, rule_meta in compliance_rules.items():
-                rules_text += f"- **{rule_meta.get('name', rule_id)}** ({rule_id}): {rule_meta.get('description', '')}\n"
-
-            # 格式化核心实体
-            entities_text: str = ""
-            for entity in structured.get("core_entities", []):
-                entities_text += f"- {entity}\n"
-
-            return (
-                f"### 业务背景\n{narrative}\n\n"
-                f"### 核心业务实体\n{entities_text}\n"
-                f"### 合规规则\n{rules_text}"
-            )
-        except Exception:
-            return (
-                "采购到付款（P2P）流程是企业采购管理的核心流程，"
-                "从采购申请开始，经过采购订单审批、供应商发货、收货验收、"
-                "发票核销，到最终付款结算。三路匹配是 P2P 合规控制的核心机制，"
-                "要求采购订单（PO）、收货单（GR）、供应商发票（Invoice）"
-                "在数量和金额上保持一致，偏差超过配置容差时需人工审核。"
-            )
-
     def _get_or_build_agent(self) -> Any:
         """获取或延迟构建 LangChain Agent。
 
@@ -285,21 +186,23 @@ class P2PAgent:
         Returns:
             LangChain Agent 实例。
         """
-        if self._agent is None:
-            model = self._build_model()
+        if self._agent is not None:
+            return self._agent
+        with self._lock:
+            if self._agent is not None:
+                return self._agent
+            model = build_chat_model(self._settings.llm)
             tools = self._build_tools()
-            system_prompt = self._get_system_prompt()
-
-            self._timing_middleware = TimingMiddleware(agent_name="p2p_agent")
+            system_prompt = build_system_prompt()
+            middleware = self.timing_middleware
             self._agent = create_agent(
                 model=model,
                 tools=tools,
                 system_prompt=system_prompt,
                 name="p2p_agent",
-                middleware=[self._timing_middleware],
+                middleware=[middleware],
             )
-
-        return self._agent
+            return self._agent
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -392,26 +295,11 @@ class P2PAgent:
                     {"role": "user", "content": user_message},
                 ]
 
-                # 启动 trace（middleware 显式驱动，跨节点稳定）
-                if self._timing_middleware is not None:
-                    self._timing_middleware.start_run(
-                        session_id=session_id, user_id=user_id
-                    )
-                trace_status = "success"
-                trace_error: str | None = None
-                try:
-                    result: dict[str, Any] = await agent.ainvoke({
-                        "messages": invoke_messages,
-                    })
-                except Exception as invoke_exc:
-                    trace_status = "error"
-                    trace_error = f"{type(invoke_exc).__name__}: {invoke_exc}"
-                    raise
-                finally:
-                    if self._timing_middleware is not None:
-                        self._timing_middleware.finish_run(
-                            status=trace_status, error=trace_error
-                        )
+                # trace 生命周期由 Orchestrator 在最外层驱动，
+                # 此处仅触发 ainvoke，让 middleware 的 model/tool span 自然落入当前 trace
+                result: dict[str, Any] = await agent.ainvoke({
+                    "messages": invoke_messages,
+                })
 
                 # 提取最终回复
                 messages: list[Any] = result.get("messages", [])
@@ -465,9 +353,22 @@ class P2PAgent:
 
             except Exception as e:
                 last_error = e
+                _logger.warning(
+                    "p2p agent invoke failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                )
+                # 指数退避：base * 2**attempt，封顶 max。最后一次不再 sleep
+                if attempt < max_retries - 1:
+                    runtime_cfg = self._settings.agent_runtime
+                    backoff = min(
+                        runtime_cfg.retry_backoff_base_seconds * (2 ** attempt),
+                        runtime_cfg.retry_backoff_max_seconds,
+                    )
+                    await asyncio.sleep(backoff)
                 # 不重置 self._agent：LLM client、本体、工具集均可复用，
-                # 重建一次代价高达数秒。瞬时错误（网络抖动/限流）下次循环
-                # 直接复用已构建的 Agent 即可。
+                # 重建一次代价高达数秒。
                 continue
 
         # 所有重试均失败

@@ -51,6 +51,8 @@ class LLMSettings(BaseSettings):
 class Neo4jSettings(BaseSettings):
     """Neo4j 图数据库配置。"""
 
+    # 总开关：关闭后服务启动不依赖 Neo4j，相关功能短路返回，不影响其他业务。
+    enabled: bool = False
     uri: str = "bolt://localhost:7687"
     username: str = "neo4j"
     password: str = Field(default="", alias="NEO4J_PASSWORD")
@@ -67,7 +69,34 @@ class ChromaSettings(BaseSettings):
     collection_name: str = "erp_ontology"
     embedding_model: str = "text-embedding-3-small"
 
-    model_config = {"env_prefix": "CHROMA_"}
+    # Embedding Provider 配置
+    embedding_provider: str = "default"  # default | fake | openai | dashscope | zhipu
+    embedding_api_key: str = Field(default="", alias="CHROMA_EMBEDDING_API_KEY")
+    embedding_api_base: str = ""
+
+    # 多 Collection 划分（按知识类型）。键为业务标识，值为 collection name。
+    collections: dict[str, str] = Field(
+        default_factory=lambda: {
+            "ontology_p2p": "ontology_p2p",
+            "business_docs_p2p": "business_docs_p2p",
+            "analysis_reports": "analysis_reports",
+            "memory_long_term": "memory_long_term",
+        }
+    )
+
+    # 检索默认值
+    default_top_k: int = 5
+    min_score: float = 0.0  # 0 表示不过滤
+
+    # 是否在长期记忆 / 报告写入时同步索引到向量库（默认关闭，按需启用）
+    enable_long_term_indexing: bool = False
+    enable_report_indexing: bool = False
+
+    model_config = {"populate_by_name": True, "env_prefix": "CHROMA_"}
+
+    def collection_for(self, key: str) -> str:
+        """根据业务键获取实际 Chroma collection 名称，未配置时回退为键本身。"""
+        return self.collections.get(key, key)
 
 
 class PostgreSQLSettings(BaseSettings):
@@ -106,9 +135,35 @@ class AnalysisSettings(BaseSettings):
 
     default_time_range_days: int = 30
     max_time_range_days: int = 365
-    response_timeout_seconds: float = 5.0
+    # Agent + LLM 首次冷启动可能数十秒，5s 过短，调到 60s
+    response_timeout_seconds: float = 60.0
+    # 数据库 I/O 在线程池里执行，单次操作的硬超时
+    db_io_timeout_seconds: float = 30.0
 
     model_config = {"env_prefix": "ANALYSIS_"}
+
+
+class AgentRuntimeSettings(BaseSettings):
+    """Agent 运行期资源配置。"""
+
+    # 进程内最大并发 session 数（LRU 淘汰）
+    max_short_term_sessions: int = 1024
+    # 重试退避基数（秒），实际等待 base * 2**attempt
+    retry_backoff_base_seconds: float = 1.0
+    retry_backoff_max_seconds: float = 30.0
+
+    model_config = {"env_prefix": "AGENT_"}
+
+
+class ObservabilitySettings(BaseSettings):
+    """可观测性配置。"""
+
+    max_io_text: int = 2000
+    trace_queue_maxsize: int = 10000
+    trace_batch_size: int = 50
+    trace_flush_interval: float = 1.0
+
+    model_config = {"env_prefix": "OBS_"}
 
 
 class ThreeWayMatchSettings(BaseSettings):
@@ -214,6 +269,8 @@ class Settings(BaseSettings):
     postgresql: PostgreSQLSettings = Field(default_factory=PostgreSQLSettings)
     mock_data: MockDataSettings = Field(default_factory=MockDataSettings)
     analysis: AnalysisSettings = Field(default_factory=AnalysisSettings)
+    agent_runtime: AgentRuntimeSettings = Field(default_factory=AgentRuntimeSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     p2p: P2PSettings = Field(default_factory=P2PSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -222,71 +279,62 @@ class Settings(BaseSettings):
 
     @classmethod
     def from_yaml(cls, yaml_path: Path | None = None) -> "Settings":
-        """从 YAML 文件加载配置并与环境变量合并。"""
+        """从 YAML 文件加载配置并与环境变量合并。
+
+        逻辑：
+        1. 加载 ``.env`` 中的环境变量（不覆盖已有）。
+        2. 读取 YAML，做两处特化映射：
+           - ``app.*`` 的字段提升到顶层（``name`` → ``app_name`` 等）；
+           - ``p2p.supplier_performance.benchmarks`` / ``memory.short_term`` /
+             ``memory.long_term`` 这几个嵌套块需要扁平化。
+        3. 把敏感字段从环境变量注入到对应子配置。
+        4. 整体丢给 Pydantic 完成校验和子模型构造，避免逐字段手工 ``X(**raw)``。
+        """
         from dotenv import load_dotenv
 
-        # 加载 .env 文件中的环境变量（不覆盖已存在的）
-        _env_file = _CONFIG_DIR.parent / ".env"
-        load_dotenv(_env_file, override=False)
+        load_dotenv(_CONFIG_DIR.parent / ".env", override=False)
 
-        path = yaml_path or _DEFAULT_CONFIG
-        raw = _load_yaml(path)
+        raw = _load_yaml(yaml_path or _DEFAULT_CONFIG)
 
-        # 从 YAML 扁平化提取各子配置
-        llm_data = raw.get("llm", {})
-        llm_data["api_key"] = os.getenv("LLM_API_KEY", llm_data.get("api_key", ""))
+        # app.* → 顶层
+        app_data = raw.pop("app", {}) or {}
+        merged: dict[str, Any] = {
+            "app_name": app_data.get("name", "ERP Analysis Agent"),
+            "app_version": app_data.get("version", "0.1.0"),
+            "debug": app_data.get("debug", False),
+            "language": app_data.get("language", "zh"),
+            **raw,
+        }
 
-        neo4j_data = raw.get("neo4j", {})
-        neo4j_data["password"] = os.getenv(
-            "NEO4J_PASSWORD", neo4j_data.get("password", "")
-        )
+        # p2p.supplier_performance.benchmarks → p2p.supplier_performance
+        p2p_raw = merged.get("p2p") or {}
+        sp = (p2p_raw.get("supplier_performance") or {}).get("benchmarks")
+        if sp is not None:
+            p2p_raw["supplier_performance"] = sp
+            merged["p2p"] = p2p_raw
 
-        pg_data = raw.get("postgresql", {})
-        pg_data["password"] = os.getenv(
-            "POSTGRES_PASSWORD", pg_data.get("password", "")
-        )
+        # memory.{short_term,long_term} → MemorySettings 的扁平字段
+        mem_raw = merged.get("memory") or {}
+        if "short_term" in mem_raw or "long_term" in mem_raw:
+            short_term = mem_raw.get("short_term") or {}
+            long_term = mem_raw.get("long_term") or {}
+            merged["memory"] = {
+                "short_term_max_messages": short_term.get("max_messages", 20),
+                "short_term_summary_threshold": short_term.get("summary_threshold", 15),
+                "long_term_max_retrieved": long_term.get("max_retrieved", 5),
+            }
 
-        p2p_raw = raw.get("p2p", {})
-        p2p_data = P2PSettings(
-            three_way_match=ThreeWayMatchSettings(
-                **p2p_raw.get("three_way_match", {})
-            ),
-            payment_compliance=PaymentComplianceSettings(
-                **p2p_raw.get("payment_compliance", {})
-            ),
-            supplier_performance=SupplierPerformanceBenchmarks(
-                **p2p_raw.get("supplier_performance", {}).get("benchmarks", {})
-            ),
-            anomaly_severity=AnomalySeveritySettings(
-                **p2p_raw.get("anomaly_severity", {})
-            ),
-        )
+        # 环境变量注入敏感字段
+        for section, env_key, field in (
+            ("llm", "LLM_API_KEY", "api_key"),
+            ("neo4j", "NEO4J_PASSWORD", "password"),
+            ("postgresql", "POSTGRES_PASSWORD", "password"),
+        ):
+            sec = merged.setdefault(section, {}) or {}
+            sec[field] = os.getenv(env_key, sec.get(field, ""))
+            merged[section] = sec
 
-        memory_raw = raw.get("memory", {})
-        short_term = memory_raw.get("short_term", {})
-        long_term = memory_raw.get("long_term", {})
-        memory_data = MemorySettings(
-            short_term_max_messages=short_term.get("max_messages", 20),
-            short_term_summary_threshold=short_term.get("summary_threshold", 15),
-            long_term_max_retrieved=long_term.get("max_retrieved", 5),
-        )
-
-        app_data = raw.get("app", {})
-        return cls(
-            app_name=app_data.get("name", "ERP Analysis Agent"),
-            app_version=app_data.get("version", "0.1.0"),
-            debug=app_data.get("debug", False),
-            language=app_data.get("language", "zh"),
-            llm=LLMSettings(**llm_data),
-            neo4j=Neo4jSettings(**neo4j_data),
-            chroma=ChromaSettings(**raw.get("chroma", {})),
-            postgresql=PostgreSQLSettings(**pg_data),
-            mock_data=MockDataSettings(**raw.get("mock_data", {})),
-            analysis=AnalysisSettings(**raw.get("analysis", {})),
-            p2p=p2p_data,
-            memory=memory_data,
-            logging=LoggingSettings(**raw.get("logging", {})),
-        )
+        return cls(**merged)
 
 
 @lru_cache(maxsize=1)

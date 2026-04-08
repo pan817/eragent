@@ -11,9 +11,14 @@ Neo4j 知识图谱操作模块。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from neo4j import GraphDatabase, Driver, Session  # type: ignore[import-untyped]
+try:  # neo4j 为可选依赖：开关关闭或包未安装时不阻塞模块导入
+    from neo4j import GraphDatabase, Driver, Session  # type: ignore[import-untyped]
+except Exception:  # pragma: no cover - 包缺失场景
+    GraphDatabase = None  # type: ignore[assignment]
+    if TYPE_CHECKING:
+        from neo4j import Driver, Session  # type: ignore[import-untyped]
 
 
 class KnowledgeGraphError(Exception):
@@ -55,6 +60,7 @@ class KnowledgeGraph:
         username: str,
         password: str,
         database: str = "neo4j",
+        enabled: bool = True,
     ) -> None:
         """
         初始化知识图谱实例。
@@ -69,7 +75,13 @@ class KnowledgeGraph:
         self._username = username
         self._password = password
         self._database = database
-        self._driver: Driver | None = None
+        self._enabled = enabled
+        self._driver: "Driver | None" = None
+
+    @property
+    def enabled(self) -> bool:
+        """是否启用 Neo4j。关闭时所有方法变为安全空操作。"""
+        return self._enabled
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -82,6 +94,14 @@ class KnowledgeGraph:
         Raises:
             ConnectionError: 连接失败时抛出。
         """
+        if not self._enabled:
+            # 开关关闭：跳过驱动初始化，保持服务可用
+            self._driver = None
+            return
+        if GraphDatabase is None:
+            raise ConnectionError(
+                "neo4j 驱动包未安装，无法启用 Neo4j（请 pip install neo4j 或保持 neo4j.enabled=false）"
+            )
         try:
             self._driver = GraphDatabase.driver(
                 self._uri,
@@ -113,7 +133,7 @@ class KnowledgeGraph:
     # 内部辅助
     # ------------------------------------------------------------------
 
-    def _get_session(self) -> Session:
+    def _get_session(self) -> "Session":
         """
         获取数据库会话。
 
@@ -123,6 +143,8 @@ class KnowledgeGraph:
         Raises:
             ConnectionError: 驱动未初始化时抛出。
         """
+        if not self._enabled:
+            raise ConnectionError("Neo4j 已通过配置开关禁用 (neo4j.enabled=false)")
         if self._driver is None:
             raise ConnectionError("Neo4j 驱动未初始化，请先调用 connect()")
         return self._driver.session(database=self._database)

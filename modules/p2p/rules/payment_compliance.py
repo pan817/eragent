@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from api.schemas.analysis import (
@@ -20,6 +20,14 @@ from api.schemas.analysis import (
     Severity,
 )
 from config.settings import P2PSettings
+from core.logging_utils import get_logger
+from modules.p2p.rules._utils import (
+    AnomalyIdGenerator,
+    safe_date,
+    safe_float,
+)
+
+_logger = get_logger(__name__)
 
 
 # 规则 ID 常量
@@ -42,7 +50,7 @@ class PaymentComplianceChecker:
             settings: P2P 模块配置对象，包含付款合规参数。
         """
         self._settings: P2PSettings = settings
-        self._seq: int = 0
+        self._id_gen = AnomalyIdGenerator(width=3)
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -72,27 +80,34 @@ class PaymentComplianceChecker:
         Returns:
             检测到的合规性异常记录列表。
         """
-        self._seq = 0
+        self._id_gen.reset()
         anomalies: list[AnomalyRecord] = []
 
         # 按 invoice_number 索引发票
         inv_map: dict[str, dict[str, Any]] = {
-            inv["invoice_number"]: inv for inv in invoices
+            inv["invoice_number"]: inv for inv in invoices if inv.get("invoice_number")
         }
 
         compliance_cfg = self._settings.payment_compliance
         early_threshold_days: int = compliance_cfg.early_payment_threshold_days
 
         for payment in payments:
-            invoice_number: str = payment["invoice_number"]
+            invoice_number: str = payment.get("invoice_number", "")
+            if not invoice_number:
+                continue
             invoice: dict[str, Any] | None = inv_map.get(invoice_number)
             if invoice is None:
                 continue  # 找不到对应发票，跳过
 
-            payment_date: date = date.fromisoformat(payment["payment_date"])
-            due_date: date = date.fromisoformat(invoice["due_date"])
-            payment_amount: float = float(payment["payment_amount"])
-            invoice_amount: float = float(invoice["invoice_amount"])
+            payment_date = safe_date(payment.get("payment_date"))
+            due_date = safe_date(invoice.get("due_date"))
+            if payment_date is None or due_date is None:
+                _logger.debug(
+                    "skip payment %s: invalid date(s)", payment.get("payment_number")
+                )
+                continue
+            payment_amount: float = safe_float(payment.get("payment_amount"))
+            invoice_amount: float = safe_float(invoice.get("invoice_amount"))
             payment_number: str = payment.get("payment_number", "")
             po_number: str = invoice.get("po_number", "")
             supplier_name: str = invoice.get("supplier_name", "")
@@ -169,10 +184,9 @@ class PaymentComplianceChecker:
                     )
 
             # --- 3. 折扣异常检测 ---
-            discount_due_str: str | None = invoice.get("discount_due_date")
-            if discount_due_str:
-                discount_due_date: date = date.fromisoformat(discount_due_str)
-                discount_expected: float = float(invoice.get("discount_amount", 0))
+            discount_due_date = safe_date(invoice.get("discount_due_date"))
+            if discount_due_date is not None:
+                discount_expected: float = safe_float(invoice.get("discount_amount"))
 
                 # 3a. 折扣滥用：付款日超过折扣截止日但仍按折扣金额付款
                 if payment_date > discount_due_date and payment_amount < invoice_amount:
@@ -277,13 +291,5 @@ class PaymentComplianceChecker:
         return Severity.LOW
 
     def _next_anomaly_id(self) -> str:
-        """生成下一个异常 ID。
-
-        格式: ANO-{日期}-{序号}
-
-        Returns:
-            唯一异常 ID 字符串。
-        """
-        self._seq += 1
-        today: str = date.today().strftime("%Y%m%d")
-        return f"ANO-{today}-{self._seq:03d}"
+        """生成下一个异常 ID（委托给共享生成器）。"""
+        return self._id_gen.next_id()

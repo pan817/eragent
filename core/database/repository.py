@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import threading
+import time
+
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +25,10 @@ from core.database.models import (
     PoLineLocation,
     RcvTransaction,
 )
+from core.logging_utils import get_logger
+
+_logger = get_logger(__name__)
+_CONTRACT_PRICE_TTL_SECONDS = 3600.0
 
 
 class P2PRepository:
@@ -29,6 +36,9 @@ class P2PRepository:
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
+        self._contract_price_cache: dict[str, float] | None = None
+        self._contract_price_cache_at: float = 0.0
+        self._contract_price_lock = threading.Lock()
 
     # ================================================================
     # 查询工具用：直接返回业务对象列表
@@ -39,6 +49,7 @@ class P2PRepository:
         supplier_id: str = "",
         status: str = "",
         days: int = 30,
+        po_number: str = "",
     ) -> list[dict[str, Any]]:
         """查询采购订单（扁平化格式，供查询工具使用）。"""
         with self._session_factory() as session:
@@ -67,6 +78,8 @@ class P2PRepository:
                 stmt = stmt.where(PoHeader.supplier_id == supplier_id)
             if status:
                 stmt = stmt.where(PoHeader.status == status.upper())
+            if po_number:
+                stmt = stmt.where(PoHeader.po_number == po_number)
 
             rows = session.execute(stmt).all()
             return [
@@ -194,11 +207,11 @@ class P2PRepository:
         """获取扁平化的采购订单数据（供规则引擎使用）。
 
         等同于原 _get_mock_data()["purchase_orders"] 的格式。
+        ``po_number`` 已下推到 SQL WHERE，避免全表加载后内存过滤。
         """
-        result = self.query_purchase_orders(supplier_id=supplier_id)
-        if po_number:
-            result = [po for po in result if po["po_number"] == po_number]
-        return result
+        return self.query_purchase_orders(
+            supplier_id=supplier_id, po_number=po_number
+        )
 
     def get_flattened_receipts(
         self,
@@ -221,23 +234,67 @@ class P2PRepository:
         supplier_id: str = "",
         po_number: str = "",
     ) -> list[dict[str, Any]]:
-        """获取扁平化的付款数据（供规则引擎使用）。"""
-        result = self.query_payments(supplier_id=supplier_id)
-        if po_number:
-            # 需要通过发票关联 PO
-            with self._session_factory() as session:
-                inv_nums = session.scalars(
-                    select(ApInvoice.invoice_number).where(
-                        ApInvoice.po_number == po_number
-                    )
-                ).all()
-            result = [p for p in result if p["invoice_number"] in set(inv_nums)]
-        return result
+        """获取扁平化的付款数据（供规则引擎使用）。
+
+        若提供 ``po_number``，使用单次 JOIN (Payment ⋈ Invoice) 拉取，
+        避免「先查全部付款 + 再查发票号 + 内存过滤」的多轮 IO。
+        """
+        if not po_number:
+            return self.query_payments(supplier_id=supplier_id)
+
+        with self._session_factory() as session:
+            stmt = (
+                select(ApPayment)
+                .join(ApInvoice, ApPayment.invoice_number == ApInvoice.invoice_number)
+                .where(ApInvoice.po_number == po_number)
+            )
+            if supplier_id:
+                stmt = stmt.where(ApPayment.supplier_id == supplier_id)
+            rows = session.scalars(stmt).all()
+            return [
+                {
+                    "payment_id": r.payment_number,
+                    "payment_number": r.payment_number,
+                    "invoice_number": r.invoice_number,
+                    "supplier_id": r.supplier_id,
+                    "payment_amount": float(r.payment_amount),
+                    "payment_date": r.payment_date.isoformat(),
+                    "payment_method": r.payment_method.lower(),
+                }
+                for r in rows
+            ]
 
     def get_contract_prices(self) -> dict[str, float]:
-        """获取物料合同价格映射（item_code -> standard_price）。"""
-        with self._session_factory() as session:
-            rows = session.execute(
-                select(PoLine.item_code, PoLine.standard_price).distinct()
-            ).all()
-            return {r.item_code: float(r.standard_price) for r in rows}
+        """获取物料合同价格映射（item_code -> standard_price）。
+
+        进程内带 TTL 缓存（``_CONTRACT_PRICE_TTL_SECONDS``），
+        避免每次规则调用都全表 DISTINCT。
+        """
+        now = time.monotonic()
+        cache = self._contract_price_cache
+        if (
+            cache is not None
+            and (now - self._contract_price_cache_at) < _CONTRACT_PRICE_TTL_SECONDS
+        ):
+            return cache
+        with self._contract_price_lock:
+            now = time.monotonic()
+            if (
+                self._contract_price_cache is not None
+                and (now - self._contract_price_cache_at) < _CONTRACT_PRICE_TTL_SECONDS
+            ):
+                return self._contract_price_cache
+            with self._session_factory() as session:
+                rows = session.execute(
+                    select(PoLine.item_code, PoLine.standard_price).distinct()
+                ).all()
+                prices = {r.item_code: float(r.standard_price) for r in rows}
+            self._contract_price_cache = prices
+            self._contract_price_cache_at = now
+            return prices
+
+    def invalidate_contract_price_cache(self) -> None:
+        """显式失效合同价格缓存。"""
+        with self._contract_price_lock:
+            self._contract_price_cache = None
+            self._contract_price_cache_at = 0.0

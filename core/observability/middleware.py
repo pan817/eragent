@@ -24,8 +24,22 @@ from langchain.agents.middleware.types import (
     ToolCallRequest,
 )
 
-from core.observability.console import format_summary, format_tree
+from core.observability.console import format_io_panel, format_summary, format_tree
 from core.observability.store import RunEvent, SpanEvent, TraceStore, get_trace_store
+
+
+# 单条 input/output 文本的最大长度。超出截断，避免 attributes JSON 膨胀。
+# 默认 2000，可被 ObservabilitySettings.max_io_text 覆盖。
+_MAX_IO_TEXT_DEFAULT = 2000
+
+
+def _max_io_text() -> int:
+    try:
+        from config.settings import get_settings
+
+        return get_settings().observability.max_io_text
+    except Exception:
+        return _MAX_IO_TEXT_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +217,48 @@ class TimingMiddleware(AgentMiddleware):
             self._emit(sp)
 
     # ------------------------------------------------------------------
-    # model hooks
+    # 通用 span 记录（带 input / output 捕获）
+    # ------------------------------------------------------------------
+
+    def _record_span(
+        self,
+        *,
+        span_type: str,
+        name: str,
+        attributes: dict[str, Any],
+        started_at: datetime,
+        t0: float,
+        status: str,
+        error: str | None,
+    ) -> None:
+        ctx = _current_trace.get()
+        duration_ms = (time.monotonic() - t0) * 1000
+        sp = SpanEvent(
+            trace_id=ctx.trace_id if ctx is not None else "orphan",
+            span_id=str(uuid.uuid4()),
+            parent_span_id=None,
+            span_type=span_type,
+            name=name,
+            status=status,
+            started_at=started_at,
+            finished_at=datetime.utcnow(),
+            duration_ms=round(duration_ms, 3),
+            attributes=attributes,
+            error=error,
+        )
+        if ctx is not None:
+            ctx.spans.append(sp)
+            if span_type == "model":
+                ctx.model_count += 1
+            elif span_type == "tool":
+                ctx.tool_count += 1
+        self._emit(sp)
+        if self._print:
+            # 每次调用结束后立即打印结构化 I/O 面板，方便实时观察
+            print(format_io_panel(sp), flush=True)
+
+    # ------------------------------------------------------------------
+    # model hooks（before/after model：捕获 input + output）
     # ------------------------------------------------------------------
 
     def wrap_model_call(  # type: ignore[override]
@@ -212,8 +267,28 @@ class TimingMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
         attrs = self._model_attrs(request)
-        with self._span("model", attrs["model"], attrs):
-            return handler(request)
+        attrs["input"] = self._serialize_model_input(request)
+        started_at = datetime.utcnow()
+        t0 = time.monotonic()
+        status, error = "ok", None
+        try:
+            result = handler(request)
+            attrs["output"] = self._serialize_model_output(result)
+            return result
+        except BaseException as exc:
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            raise
+        finally:
+            self._record_span(
+                span_type="model",
+                name=attrs["model"],
+                attributes=attrs,
+                started_at=started_at,
+                t0=t0,
+                status=status,
+                error=error,
+            )
 
     async def awrap_model_call(  # type: ignore[override]
         self,
@@ -221,8 +296,28 @@ class TimingMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[Any]],
     ) -> Any:
         attrs = self._model_attrs(request)
-        with self._span("model", attrs["model"], attrs):
-            return await handler(request)
+        attrs["input"] = self._serialize_model_input(request)
+        started_at = datetime.utcnow()
+        t0 = time.monotonic()
+        status, error = "ok", None
+        try:
+            result = await handler(request)
+            attrs["output"] = self._serialize_model_output(result)
+            return result
+        except BaseException as exc:
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            raise
+        finally:
+            self._record_span(
+                span_type="model",
+                name=attrs["model"],
+                attributes=attrs,
+                started_at=started_at,
+                t0=t0,
+                status=status,
+                error=error,
+            )
 
     @staticmethod
     def _model_attrs(request: ModelRequest) -> dict[str, Any]:
@@ -237,8 +332,51 @@ class TimingMiddleware(AgentMiddleware):
             "tool_count": len(request.tools or []),
         }
 
+    @staticmethod
+    def _serialize_model_input(request: ModelRequest) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in request.messages or []:
+            role = (
+                getattr(m, "type", None)
+                or getattr(m, "role", None)
+                or type(m).__name__
+            )
+            content = getattr(m, "content", m)
+            out.append(
+                {
+                    "role": str(role),
+                    "content": _truncate_text(content),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _serialize_model_output(result: Any) -> dict[str, Any]:
+        # LangChain 1.2 模型节点返回 {"messages": [AIMessage(...)]} 或类似结构
+        msg: Any = result
+        if isinstance(result, dict):
+            msgs = result.get("messages") or result.get("result")
+            if isinstance(msgs, list) and msgs:
+                msg = msgs[-1]
+            elif msgs is not None:
+                msg = msgs
+        elif isinstance(result, list) and result:
+            msg = result[-1]
+
+        content = getattr(msg, "content", None)
+        tool_calls = getattr(msg, "tool_calls", None)
+        usage = (
+            getattr(msg, "usage_metadata", None)
+            or getattr(msg, "response_metadata", None)
+        )
+        return {
+            "content": _truncate_text(content if content is not None else str(msg)),
+            "tool_calls": _safe_jsonable(tool_calls) if tool_calls else None,
+            "usage": _safe_jsonable(usage) if usage else None,
+        }
+
     # ------------------------------------------------------------------
-    # tool hooks
+    # tool hooks（before/after tool：捕获 args + 返回值）
     # ------------------------------------------------------------------
 
     def wrap_tool_call(  # type: ignore[override]
@@ -247,8 +385,28 @@ class TimingMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Any],
     ) -> Any:
         attrs = self._tool_attrs(request)
-        with self._span("tool", attrs["tool"], attrs):
-            return handler(request)
+        attrs["input"] = attrs.get("args")
+        started_at = datetime.utcnow()
+        t0 = time.monotonic()
+        status, error = "ok", None
+        try:
+            result = handler(request)
+            attrs["output"] = self._serialize_tool_output(result)
+            return result
+        except BaseException as exc:
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            raise
+        finally:
+            self._record_span(
+                span_type="tool",
+                name=attrs["tool"],
+                attributes=attrs,
+                started_at=started_at,
+                t0=t0,
+                status=status,
+                error=error,
+            )
 
     async def awrap_tool_call(  # type: ignore[override]
         self,
@@ -256,8 +414,28 @@ class TimingMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
         attrs = self._tool_attrs(request)
-        with self._span("tool", attrs["tool"], attrs):
-            return await handler(request)
+        attrs["input"] = attrs.get("args")
+        started_at = datetime.utcnow()
+        t0 = time.monotonic()
+        status, error = "ok", None
+        try:
+            result = await handler(request)
+            attrs["output"] = self._serialize_tool_output(result)
+            return result
+        except BaseException as exc:
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            raise
+        finally:
+            self._record_span(
+                span_type="tool",
+                name=attrs["tool"],
+                attributes=attrs,
+                started_at=started_at,
+                t0=t0,
+                status=status,
+                error=error,
+            )
 
     @staticmethod
     def _tool_attrs(request: ToolCallRequest) -> dict[str, Any]:
@@ -265,5 +443,49 @@ class TimingMiddleware(AgentMiddleware):
         return {
             "tool": call.get("name", "unknown"),
             "tool_call_id": call.get("id"),
-            "args": call.get("args"),
+            "args": _safe_jsonable(call.get("args")),
         }
+
+    @staticmethod
+    def _serialize_tool_output(result: Any) -> str:
+        # tool handler 一般返回 ToolMessage；取其 content 字段
+        content = getattr(result, "content", None)
+        if content is None:
+            content = result
+        return _truncate_text(content)
+
+
+# ---------------------------------------------------------------------------
+# 序列化辅助
+# ---------------------------------------------------------------------------
+
+
+def _truncate_text(value: Any, max_len: int | None = None) -> str:
+    if max_len is None:
+        max_len = _max_io_text()
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        try:
+            import json
+
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            value = str(value)
+    if len(value) > max_len:
+        return value[: max_len - 3] + "..."
+    return value
+
+
+def _safe_jsonable(value: Any) -> Any:
+    """把任意对象转成 JSON 可序列化结构（用于 attributes JSON 列）。"""
+    import json
+
+    try:
+        json.dumps(value, ensure_ascii=False, default=str)
+        return value
+    except Exception:
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return str(value)

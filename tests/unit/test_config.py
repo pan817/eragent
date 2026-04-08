@@ -13,10 +13,34 @@ import pytest
 import yaml
 
 from config.settings import (
+    ChromaSettings,
     LoggingSettings,
     P2PSettings,
     Settings,
 )
+
+
+class TestChromaSettings:
+    """ChromaSettings 默认值与 collection_for 测试。"""
+
+    def test_default_collections_present(self) -> None:
+        c = ChromaSettings()
+        for key in ("ontology_p2p", "business_docs_p2p", "analysis_reports", "memory_long_term"):
+            assert key in c.collections
+
+    def test_collection_for_known(self) -> None:
+        c = ChromaSettings()
+        assert c.collection_for("ontology_p2p") == "ontology_p2p"
+
+    def test_collection_for_unknown_falls_back(self) -> None:
+        c = ChromaSettings()
+        assert c.collection_for("nonexistent") == "nonexistent"
+
+    def test_default_provider(self) -> None:
+        c = ChromaSettings()
+        assert c.embedding_provider == "default"
+        assert c.enable_long_term_indexing is False
+        assert c.enable_report_indexing is False
 
 
 class TestDefaultSettings:

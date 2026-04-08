@@ -11,7 +11,8 @@
 | 本体推理 | Owlready2（OWL2 + SWRL 规则） |
 | 图数据库 | Neo4j |
 | 向量数据库 | Chroma（MVP） |
-| 关系数据库 | PostgreSQL（长期记忆 + 报告存储） |
+| 关系数据库 | PostgreSQL（长期记忆 + 报告 + 可观测性 trace 存储） |
+| ORM | SQLAlchemy（统一 engine，多模块共用） |
 | Web 框架 | FastAPI |
 | 配置管理 | config.yaml + Pydantic Settings |
 | 测试 | pytest（覆盖率 ≥ 85%） |
@@ -22,42 +23,66 @@
 eragent/
 ├── api/                         # REST API 层
 │   ├── main.py                  # FastAPI 应用入口
-│   ├── routes/analyze.py        # 分析路由
-│   └── schemas/analysis.py      # Pydantic 请求/响应模型
+│   ├── routes/
+│   │   ├── analyze.py           # 分析路由
+│   │   └── traces.py            # 可观测性 trace 查询路由
+│   └── schemas/
+│       ├── analysis.py          # 分析请求/响应模型
+│       └── trace.py             # trace 响应模型
 ├── config/
 │   ├── config.yaml              # 结构化配置文件
 │   └── settings.py              # Pydantic Settings 配置管理
 ├── core/                        # 核心基础设施
+│   ├── database/                # 统一数据库层（SQLAlchemy）
+│   │   ├── engine.py            # engine / session 工厂
+│   │   ├── models.py            # Declarative Base
+│   │   ├── repository.py        # 通用 Repository
+│   │   └── init_db.py           # 建表入口
+│   ├── memory/                  # 短期/长期记忆（拆包）
+│   │   ├── short_term.py        # 会话内短期记忆
+│   │   ├── long_term.py         # 跨会话长期记忆（按 user_id 隔离）
+│   │   └── tables.py            # ORM 表定义
+│   ├── observability/           # 可观测性
+│   │   ├── middleware.py        # LangChain 中间件，采集 agent/tool 调用
+│   │   ├── store.py             # trace 持久化
+│   │   ├── console.py           # 控制台输出
+│   │   └── tables.py            # trace ORM 表
 │   ├── ontology/                # OWL 本体加载和推理
-│   │   ├── loader.py            # Owlready2 本体加载器
-│   │   └── reasoner.py          # 推理器 + SWRL 规则定义
-│   ├── knowledge/               # 知识存储
-│   │   ├── graph.py             # Neo4j 图数据库封装
-│   │   └── vector_store.py      # Chroma 向量存储封装
-│   ├── orchestrator/            # 编排控制层
-│   │   ├── intent.py            # 意图解析（关键词匹配）
+│   │   ├── loader.py
+│   │   └── reasoner.py          # 推理器 + SWRL 规则
+│   ├── knowledge/
+│   │   ├── graph.py             # Neo4j 封装
+│   │   └── vector_store.py      # Chroma 封装
+│   ├── orchestrator/
+│   │   ├── intent.py            # 意图解析
 │   │   └── orchestrator.py      # 分析任务编排器
-│   └── memory.py                # 短期/长期记忆管理
+│   └── logging_utils.py         # 轻量日志工具
 ├── modules/p2p/                 # P2P 业务模块
 │   ├── rules/                   # 业务规则引擎（__init__.py 提供统一导出）
-│   │   ├── three_way_match.py   # 三路匹配异常检测
-│   │   ├── price_variance.py    # 价格差异分析
-│   │   ├── payment_compliance.py # 付款合规检查
-│   │   └── supplier_performance.py # 供应商绩效 KPI
+│   │   ├── three_way_match.py
+│   │   ├── price_variance.py
+│   │   ├── payment_compliance.py
+│   │   ├── supplier_performance.py
+│   │   └── _utils.py            # 规则共享工具
 │   ├── ontology/p2p.owl         # P2P 领域 OWL 本体（非 Python 包）
-│   ├── tools.py                 # LangChain @tool 工具集（8个）
+│   ├── tools.py                 # LangChain @tool 工具集
+│   ├── prompts.py               # Agent 提示词模板
+│   ├── model_factory.py         # LLM 客户端工厂（配置化切换模型）
 │   ├── agent.py                 # P2P Agent（create_agent）
 │   └── mock_data/generator.py   # 模拟数据生成器
-├── docs/                        # 项目文档
+├── docs/
 │   ├── erp_agent_spec.md        # 系统设计规格
-│   └── erp_procurement_agent.pdf # 采购分析需求文档
+│   ├── erp_procurement_agent.pdf
+│   ├── thought.md
+│   └── execute.md
 ├── tests/                       # 测试（无 __init__.py）
-│   ├── conftest.py              # 共享 fixture
+│   ├── conftest.py
 │   ├── unit/                    # 单元测试
-│   └── integration/             # 集成测试（含 test_e2e.py 端到端）
+│   ├── integration/             # 集成测试（含 test_e2e.py）
+│   └── http/                    # .http 调试用例
 ├── .env                         # 环境变量（不提交）
-├── .env.example                 # 环境变量模板
-└── pyproject.toml               # 项目配置
+├── .env.example
+└── pyproject.toml
 ```
 
 ## Import 路径约定
@@ -65,17 +90,22 @@ eragent/
 ```python
 from config.settings import Settings, get_settings
 from api.schemas.analysis import AnalysisResult, Severity
-from core.ontology.reasoner import OntologyReasoner
+from core.database.engine import get_session
+from core.memory.long_term import LongTermMemory
+from core.observability.middleware import ObservabilityMiddleware
 from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 ```
 
 ## 关键设计决策
-- **编排粒度**：MVP 采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持后续细粒度 DAG 调度。
+- **统一数据库层**：长期记忆、可观测性 trace、分析报告共用 `core/database` 的 SQLAlchemy engine 与 session，各业务模块在自己的 `tables.py` 中声明表。
+- **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
+- **记忆模块拆包**：原 `core/memory.py` 拆为 `core/memory/` 包，区分 `short_term` / `long_term` / `tables`。
+- **编排粒度**：MVP 采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持细粒度 DAG 调度。
 - **本体上下文注入**：混合模式——关键规则用结构化 JSON，业务背景用自然语言。
 - **SWRL 规则 vs Python 代码**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体；KPI 计算用 Python 实现。
 - **MVP 纯分析只读**：不执行 ERP 写操作，写操作接口预留。
 - **记忆隔离**：长期记忆按 `user_id` 隔离，短期记忆按 `session_id` 隔离。
-- **上下文压缩**：摘要压缩 + 语义检索混合模式。
+- **模型工厂**：`modules/p2p/model_factory.py` 集中创建 LLM 客户端，便于切换模型 / 测试 mock。
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
@@ -94,10 +124,9 @@ pytest --cov=. --cov-report=term-missing --cov-fail-under=85
 - 仅在 setuptools 需要识别的 Python 包目录中保留 `__init__.py`
 - `tests/` 目录及其子目录不需要 `__init__.py`（pytest 自动发现）
 - `modules/p2p/ontology/` 仅存放 OWL 文件，不是 Python 包，无 `__init__.py`
-- `modules/p2p/rules/__init__.py` 提供四个规则类的统一导出，为唯一有实际内容的 `__init__.py`
+- `modules/p2p/rules/__init__.py` 提供四个规则类的统一导出
 
 ## 当前进度
-- 所有功能模块代码已完成
-- 单元测试 + 集成测试全部通过，覆盖率 ≥ 95%
+- 所有功能模块代码已完成，新增统一数据库层 + 可观测性 + 拆包后的 memory 模块
+- 单元测试 + 集成测试覆盖率 ≥ 95%
 - 端到端测试（真实 LLM）通过
-- 日志模块（structlog）已删除，等功能验证后补充
