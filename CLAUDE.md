@@ -17,7 +17,7 @@
 | 组件 | 选型 |
 |------|------|
 | Agent 框架 | LangChain 1.2.0（`create_agent` + 装饰器中间件） |
-| LLM | GLM-4（智谱，ChatOpenAI 兼容接口，配置化可切换） |
+| LLM | Qwen（阿里云 Dashscope，ChatOpenAI 兼容接口，默认 qwen3-max；可切换 zhipu/openai/deepseek） |
 | 本体推理 | Owlready2（OWL2 + SWRL 规则） |
 | 图数据库 | Neo4j |
 | 向量数据库 | Chroma |
@@ -90,11 +90,20 @@ eragent/
 │   ├── long_term_issue.md             # 长期记忆 12 个设计问题分析
 │   ├── long_term_memory_issue.md      # 长期记忆问题详细分析
 │   └── long_term_memory_refactor.md   # 长期记忆重构完成状态追踪
+├── migrations/                  # Alembic 数据库迁移
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions/
+│       ├── 0001_baseline.py
+│       ├── 0002_memories_content_hash.py
+│       ├── 0003_memories_rename_metadata_to_attrs.py
+│       └── 0004_reports_user_created_idx.py
 ├── tests/                       # 测试（无 __init__.py）
 │   ├── conftest.py
-│   ├── unit/                    # 单元测试
+│   ├── unit/                    # 单元测试（19 个文件）
 │   ├── integration/             # 集成测试（含 test_e2e.py）
 │   └── http/                    # .http 调试用例
+├── alembic.ini                  # Alembic 配置（script_location=migrations）
 ├── .env                         # 环境变量（不提交）
 ├── .env.example
 └── pyproject.toml
@@ -124,9 +133,12 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
-- 三路匹配容差支持按供应商/物料类别/金额区间配置
-- 默认分析时间范围 30 天，可配置
+- 三路匹配容差支持按供应商/物料类别/金额区间配置；默认 5%，最大 10%
+- 默认分析时间范围 30 天，可配置（最大 365 天）
 - 异常严重等级：超容差 2 倍以上或金额 > 50 万为 HIGH
+- 长期记忆：最多检索 5 条，RRF 融合（k=60），每用户上限 200 条，去重窗口 900s，内容最短 50 字符
+- Neo4j 默认禁用（`neo4j.enabled: false`），可按需开启
+- Embedding provider 可选：default / fake / openai / dashscope / zhipu
 
 ## 运行测试
 ```bash
@@ -135,6 +147,19 @@ pip install -e ".[dev]"
 pytest --cov=. --cov-report=term-missing --cov-fail-under=85
 ```
 
+## 数据库迁移
+```bash
+# 执行迁移（升到最新版本）
+alembic upgrade head
+
+# 查看当前版本
+alembic current
+
+# 生成新迁移（修改模型后）
+alembic revision --autogenerate -m "描述"
+```
+迁移文件位于 `migrations/versions/`，已应用 4 个版本（0001–0004）。
+
 ## __init__.py 约定
 - 仅在 setuptools 需要识别的 Python 包目录中保留 `__init__.py`
 - `tests/` 目录及其子目录不需要 `__init__.py`（pytest 自动发现）
@@ -142,6 +167,8 @@ pytest --cov=. --cov-report=term-missing --cov-fail-under=85
 - `modules/p2p/rules/__init__.py` 提供四个规则类的统一导出
 
 ## 当前进度
-- 所有功能模块代码已完成，新增统一数据库层 + 可观测性 + 拆包后的 memory 模块
-- 单元测试 + 集成测试覆盖率 ≥ 95%
+- 所有功能模块代码已完成，包含统一数据库层、可观测性、拆包后的 memory 模块
+- Alembic 迁移体系建立，已落地 4 个版本（baseline → content_hash → rename_attrs → reports_idx）
+- 单元测试（19 个文件）+ 集成测试覆盖率 ≥ 95%
 - 端到端测试（真实 LLM）通过
+- 近期优化重点：长期记忆检索质量（RRF 融合、去重、内容长度过滤）
