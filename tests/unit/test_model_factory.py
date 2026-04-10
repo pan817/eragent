@@ -1,4 +1,4 @@
-"""P2P Agent 额外覆盖测试。"""
+"""P2P model_factory 及 Agent 内部方法单元测试。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from api.schemas.analysis import AnalysisStatus, AnalysisType
 from config.settings import Settings
 
 
-class TestP2PAgentBuildMethods:
-    """Agent 构建方法测试。"""
+class TestModelFactory:
+    """build_chat_model 单元测试。"""
 
     def test_build_model(self) -> None:
         """build_chat_model 应调用 ChatOpenAI 构造器。"""
@@ -49,6 +49,10 @@ class TestP2PAgentBuildMethods:
             kwargs = mock_chat.call_args.kwargs
             assert "http_client" not in kwargs
             assert "http_async_client" not in kwargs
+
+
+class TestP2PAgentBuild:
+    """P2P Agent 构建方法测试。"""
 
     def test_build_tools(self) -> None:
         """_build_tools 应返回 8 个工具。"""
@@ -102,8 +106,8 @@ class TestP2PAgentBuildMethods:
         assert agent._get_or_build_agent() is mock_langchain_agent
 
 
-class TestP2PAgentAnalyzeExtra:
-    """Agent 分析方法额外覆盖。"""
+class TestP2PAgentAnalyze:
+    """Agent analyze 方法单元测试。"""
 
     async def test_analyze_with_json_content(self) -> None:
         """Agent 返回 JSON 内容时应解析结构化数据。"""
@@ -158,7 +162,7 @@ class TestP2PAgentAnalyzeExtra:
         assert result.status == AnalysisStatus.SUCCESS
 
     async def test_analyze_long_term_memory_disabled(self) -> None:
-        """long_term_enabled=False 时,不应触达 get_long_term_memory。"""
+        """long_term_enabled=False 时，不应触达 get_long_term_memory。"""
         settings = Settings()
         settings.memory.long_term_enabled = False
         with patch("modules.p2p.agent.get_settings", return_value=settings):
@@ -178,7 +182,7 @@ class TestP2PAgentAnalyzeExtra:
         mock_get_ltm.assert_not_called()
 
     async def test_analyze_long_term_memory_enabled(self) -> None:
-        """long_term_enabled=True 时,应调用 search_memories 与 save_memory。"""
+        """long_term_enabled=True 时，应调用 search_memories 与 save_memory。"""
         settings = Settings()
         settings.memory.long_term_enabled = True
         with patch("modules.p2p.agent.get_settings", return_value=settings):

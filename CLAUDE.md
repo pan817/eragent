@@ -41,6 +41,7 @@ eragent/
 │       └── trace.py             # trace 响应模型
 ├── config/
 │   ├── config.yaml              # 结构化配置文件
+│   ├── crypto.py                # 敏感配置字段加密/解密工具
 │   └── settings.py              # Pydantic Settings 配置管理
 ├── core/                        # 核心基础设施
 │   ├── database/                # 统一数据库层（SQLAlchemy）
@@ -48,11 +49,11 @@ eragent/
 │   │   ├── models.py            # Declarative Base
 │   │   ├── repository.py        # 通用 Repository
 │   │   └── init_db.py           # 建表入口
-│   ├── memory/                  # 短期/长期记忆（拆包）
-│   │   ├── short_term.py        # 会话内短期记忆
-│   │   ├── long_term.py         # 跨会话长期记忆（按 user_id 隔离）
+│   ├── memory/                  # 长期记忆（拆包）
+│   │   ├── long_term.py         # 跨会话长期记忆（按 user_id 隔离，PostgreSQL）
 │   │   └── tables.py            # ORM 表定义
 │   ├── observability/           # 可观测性
+│   │   ├── checkpointer.py      # LangGraph PostgresSaver trace 补丁（幂等挂载）
 │   │   ├── middleware.py        # LangChain 中间件，采集 agent/tool 调用
 │   │   ├── store.py             # trace 持久化
 │   │   ├── console.py           # 控制台输出
@@ -61,6 +62,7 @@ eragent/
 │   │   ├── loader.py
 │   │   └── reasoner.py          # 推理器 + SWRL 规则
 │   ├── knowledge/
+│   │   ├── embeddings.py        # Embedding Provider 抽象（default/openai/fake）
 │   │   ├── graph.py             # Neo4j 封装
 │   │   └── vector_store.py      # Chroma 封装
 │   ├── orchestrator/
@@ -81,10 +83,13 @@ eragent/
 │   ├── agent.py                 # P2P Agent（create_agent）
 │   └── mock_data/generator.py   # 模拟数据生成器
 ├── docs/
-│   ├── erp_agent_spec.md        # 系统设计规格
+│   ├── erp_agent_spec.md              # 系统设计规格
 │   ├── erp_procurement_agent.pdf
 │   ├── thought.md
-│   └── execute.md
+│   ├── execute.md
+│   ├── long_term_issue.md             # 长期记忆 12 个设计问题分析
+│   ├── long_term_memory_issue.md      # 长期记忆问题详细分析
+│   └── long_term_memory_refactor.md   # 长期记忆重构完成状态追踪
 ├── tests/                       # 测试（无 __init__.py）
 │   ├── conftest.py
 │   ├── unit/                    # 单元测试
@@ -102,14 +107,14 @@ from config.settings import Settings, get_settings
 from api.schemas.analysis import AnalysisResult, Severity
 from core.database.engine import get_session
 from core.memory.long_term import LongTermMemory
-from core.observability.middleware import ObservabilityMiddleware
+from core.observability.middleware import TimingMiddleware
 from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 ```
 
 ## 关键设计决策
 - **统一数据库层**：长期记忆、可观测性 trace、分析报告共用 `core/database` 的 SQLAlchemy engine 与 session，各业务模块在自己的 `tables.py` 中声明表。
 - **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
-- **记忆模块拆包**：原 `core/memory.py` 拆为 `core/memory/` 包，区分 `short_term` / `long_term` / `tables`。
+- **记忆模块拆包**：原 `core/memory.py` 拆为 `core/memory/` 包，仅保留 `long_term` / `tables`。短期记忆由 LangGraph PostgresSaver checkpointer 承担（以 `session_id` 作为 `thread_id`），通过 `core/observability/checkpointer.py` 注入 trace 监控，无需独立 `short_term.py`。
 - **编排粒度**：当前采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持细粒度 DAG 调度。
 - **本体上下文注入**：混合模式——关键规则用结构化 JSON，业务背景用自然语言。
 - **SWRL 规则 vs Python 代码**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体；KPI 计算用 Python 实现。

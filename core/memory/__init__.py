@@ -1,4 +1,8 @@
-"""记忆管理模块：短期会话上下文 + 长期 PostgreSQL 持久化。"""
+"""长期记忆模块（PostgreSQL 持久化，按 user_id 隔离）。
+
+短期记忆由 LangGraph PostgresSaver checkpointer 承担（thread_id = session_id），
+通过 core.observability.checkpointer 注入 trace 监控，不在本包中管理。
+"""
 
 from core.memory.long_term import (
     LongTermMemory,
