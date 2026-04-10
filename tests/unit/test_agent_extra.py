@@ -157,6 +157,49 @@ class TestP2PAgentAnalyzeExtra:
         result = await agent.analyze("测试")
         assert result.status == AnalysisStatus.SUCCESS
 
+    async def test_analyze_long_term_memory_disabled(self) -> None:
+        """long_term_enabled=False 时,不应触达 get_long_term_memory。"""
+        settings = Settings()
+        settings.memory.long_term_enabled = False
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+
+        mock_message = MagicMock()
+        mock_message.content = "ok"
+        mock_agent = MagicMock()
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
+        agent._agent = mock_agent
+
+        with patch("core.memory.get_long_term_memory") as mock_get_ltm:
+            result = await agent.analyze("测试")
+
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_get_ltm.assert_not_called()
+
+    async def test_analyze_long_term_memory_enabled(self) -> None:
+        """long_term_enabled=True 时,应调用 search_memories 与 save_memory。"""
+        settings = Settings()
+        settings.memory.long_term_enabled = True
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+
+        mock_message = MagicMock()
+        mock_message.content = "ok"
+        mock_agent = MagicMock()
+        mock_agent.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
+        agent._agent = mock_agent
+
+        mock_ltm = MagicMock()
+        mock_ltm.search_memories.return_value = []
+        with patch("core.memory.get_long_term_memory", return_value=mock_ltm):
+            result = await agent.analyze("测试")
+
+        assert result.status == AnalysisStatus.SUCCESS
+        assert mock_ltm.search_memories.called
+        assert mock_ltm.save_memory.called
+
     async def test_analyze_retry_then_success(self) -> None:
         """首次失败后重试成功。"""
         settings = Settings()
@@ -182,3 +225,118 @@ class TestP2PAgentAnalyzeExtra:
         ):
             result = await agent.analyze("测试")
         assert result.status == AnalysisStatus.SUCCESS
+
+
+class TestBuildMemoryContent:
+    """_build_memory_content 单元测试。"""
+
+    def setup_method(self) -> None:
+        from modules.p2p.agent import _build_memory_content
+        self._fn = _build_memory_content
+
+    def test_basic_no_summary(self) -> None:
+        content = self._fn("查询三路匹配", "发现3个异常", {})
+        assert content.startswith("Q: 查询三路匹配")
+        assert "A: 发现3个异常" in content
+
+    def test_summary_anomaly_count_included(self) -> None:
+        content = self._fn("查询", "answer", {"anomaly_count": 5})
+        assert "异常数量: 5" in content
+
+    def test_summary_total_anomalies_fallback(self) -> None:
+        content = self._fn("查询", "answer", {"total_anomalies": 3})
+        assert "异常数量: 3" in content
+
+    def test_summary_text_included(self) -> None:
+        content = self._fn("查询", "answer", {"summary": "供应链正常"})
+        assert "摘要: 供应链正常" in content
+
+    def test_summary_description_fallback(self) -> None:
+        content = self._fn("查询", "answer", {"description": "整体良好"})
+        assert "摘要: 整体良好" in content
+
+    def test_response_truncated(self) -> None:
+        long_response = "x" * 2000
+        content = self._fn("q", long_response, {})
+        # 截断到 1500 字符
+        assert content.count("x") == 1500
+
+    def test_summary_text_truncated(self) -> None:
+        long_summary = "X" * 600
+        content = self._fn("q", "ans", {"summary": long_summary})
+        # summary 字段截断到 300 字符（300 个 X）
+        assert content.count("X") == 300
+
+    def test_order_q_summary_a(self) -> None:
+        content = self._fn("query", "answer", {"anomaly_count": 2, "summary": "摘要"})
+        q_pos = content.index("Q:")
+        sum_pos = content.index("摘要")
+        a_pos = content.index("A:")
+        assert q_pos < sum_pos < a_pos
+
+
+class TestBuildMemoryMetadata:
+    """_build_memory_metadata 单元测试。"""
+
+    def setup_method(self) -> None:
+        from modules.p2p.agent import _build_memory_metadata
+        self._fn = _build_memory_metadata
+
+    def _anomaly(self, supplier: str = "", po: str = "") -> dict:
+        return {"documents": {"supplier_name": supplier, "po_number": po}}
+
+    def test_basic_fields(self) -> None:
+        meta = self._fn("q", "three_way_match", [], {}, 30)
+        assert meta["query"] == "q"
+        assert meta["analysis_type"] == "three_way_match"
+        assert meta["anomaly_count"] == 0
+        assert meta["time_range_days"] == 30
+        assert meta["entities"]["suppliers"] == []
+        assert meta["entities"]["po_numbers"] == []
+
+    def test_anomaly_count_from_list(self) -> None:
+        anomalies = [self._anomaly(), self._anomaly()]
+        meta = self._fn("q", "t", anomalies, {}, 30)
+        assert meta["anomaly_count"] == 2
+
+    def test_entities_extracted(self) -> None:
+        anomalies = [
+            self._anomaly("Supplier A", "PO-001"),
+            self._anomaly("Supplier B", "PO-002"),
+            self._anomaly("Supplier A", "PO-001"),  # 重复
+        ]
+        meta = self._fn("q", "t", anomalies, {}, 30)
+        assert meta["entities"]["suppliers"] == ["Supplier A", "Supplier B"]
+        assert meta["entities"]["po_numbers"] == ["PO-001", "PO-002"]
+
+    def test_entities_capped(self) -> None:
+        from modules.p2p.agent import _MAX_ENTITIES_PER_TYPE
+        anomalies = [
+            self._anomaly(f"SUP-{i}", f"PO-{i}")
+            for i in range(_MAX_ENTITIES_PER_TYPE + 5)
+        ]
+        meta = self._fn("q", "t", anomalies, {}, 30)
+        assert len(meta["entities"]["suppliers"]) == _MAX_ENTITIES_PER_TYPE
+        assert len(meta["entities"]["po_numbers"]) == _MAX_ENTITIES_PER_TYPE
+
+    def test_summary_text_from_dict(self) -> None:
+        meta = self._fn("q", "t", [], {"summary": "一切正常"}, 30)
+        assert meta["summary"] == "一切正常"
+
+    def test_summary_description_fallback(self) -> None:
+        meta = self._fn("q", "t", [], {"description": "整体无异常"}, 30)
+        assert meta["summary"] == "整体无异常"
+
+    def test_summary_truncated(self) -> None:
+        meta = self._fn("q", "t", [], {"summary": "x" * 600}, 30)
+        assert len(meta["summary"]) == 500
+
+    def test_empty_anomaly_supplier_skipped(self) -> None:
+        anomalies = [self._anomaly("", "PO-001")]
+        meta = self._fn("q", "t", anomalies, {}, 30)
+        assert meta["entities"]["suppliers"] == []
+        assert "PO-001" in meta["entities"]["po_numbers"]
+
+    def test_none_anomalies(self) -> None:
+        meta = self._fn("q", "t", None, {}, 30)
+        assert meta["anomaly_count"] == 0

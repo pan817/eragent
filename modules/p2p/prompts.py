@@ -51,9 +51,41 @@ def get_ontology_context() -> str:
         return _DEFAULT_ONTOLOGY_NARRATIVE
 
 
-def build_system_prompt() -> str:
-    """构建 P2P Agent 的系统提示词。"""
+def format_long_term_memory(records: list[dict[str, Any]]) -> str:
+    """把长期记忆检索结果渲染为一段可直接拼入 prompt 的文本。
+
+    输入既可以是 ``LongTermMemory.search_memories`` 返回的 SQL 行字典,
+    也可以是 ``search_reports_semantic`` 返回的向量库命中结果。空列表返回
+    空字符串,调用方据此决定是否插入占位符。
+    """
+    if not records:
+        return ""
+    lines: list[str] = []
+    for idx, rec in enumerate(records, start=1):
+        # 兼容 SQL 行 (content/created_at) 与向量命中 (text/metadata)
+        content = rec.get("content") or rec.get("text") or ""
+        if not content:
+            continue
+        content = content.strip().replace("\n", " ")
+        if len(content) > 300:
+            content = content[:300] + "…"
+        lines.append(f"{idx}. {content}")
+    return "\n".join(lines)
+
+
+def build_system_prompt(long_term_context: str = "") -> str:
+    """构建 P2P Agent 的系统提示词。
+
+    Args:
+        long_term_context: 从 LongTermMemory 召回的历史相关记忆/报告摘要。
+            非空时会被渲染到系统提示词的"历史参考"段落,供 LLM 参考。
+    """
     ontology_context = get_ontology_context()
+    long_term_block = (
+        f"\n## 历史参考（来自长期记忆）\n以下是与本次查询相关的历史记忆或分析结论,可用于参考:\n{long_term_context}\n"
+        if long_term_context
+        else ""
+    )
 
     return f"""你是一位专业的 P2P（采购到付款）分析专家，负责分析企业采购流程中的异常和风险。
 
@@ -91,4 +123,4 @@ def build_system_prompt() -> str:
 
 ## 本体知识上下文
 {ontology_context}
-"""
+{long_term_block}"""

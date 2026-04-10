@@ -6,7 +6,7 @@ memories：通用记忆存储；reports：分析报告存储。
 from __future__ import annotations
 
 import sqlalchemy as sa
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text
+from sqlalchemy import Column, DateTime, Index, Integer, MetaData, String, Table, Text
 from sqlalchemy.dialects.postgresql import JSON
 
 
@@ -20,7 +20,8 @@ memories_table = Table(
     Column("session_id", String(128), nullable=False, index=True),
     Column("memory_type", String(64), nullable=False),
     Column("content", Text, nullable=False),
-    Column("metadata", JSON, nullable=True),
+    Column("content_hash", String(16), nullable=True, index=False),
+    Column("attrs", JSON, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -33,7 +34,7 @@ reports_table = Table(
     "reports",
     metadata_obj,
     Column("id", String(36), primary_key=True),
-    Column("user_id", String(128), nullable=False, index=True),
+    Column("user_id", String(128), nullable=False),
     Column("session_id", String(128), nullable=False, index=True),
     Column("query", Text, nullable=False),
     Column("analysis_type", String(64), nullable=False),
@@ -48,3 +49,7 @@ reports_table = Table(
         server_default=sa.func.now(),
     ),
 )
+
+# 复合索引：加速 list_reports(user_id, ORDER BY created_at DESC LIMIT N)
+# 单列 user_id 索引已被此复合索引取代，无需重复建立
+Index("reports_user_created", reports_table.c.user_id, reports_table.c.created_at.desc())

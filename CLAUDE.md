@@ -1,7 +1,17 @@
 # ERP Analysis Agent (eragent)
 
 ## 项目概述
-基于 LangChain 1.2.0 + OWL 本体论的 ERP 采购分析智能体。MVP 聚焦 P2P（Procure-to-Pay）模块，覆盖三路匹配、价格差异、付款合规、供应商绩效四大分析场景。
+基于 LangChain 1.2.0 + OWL 本体论的 ERP 采购分析智能体。**当前为正式生产版本**（非 MVP），首发聚焦 P2P（Procure-to-Pay）模块，覆盖三路匹配、价格差异、付款合规、供应商绩效四大分析场景。
+
+## 版本定位（生产标准）
+- **正式生产版本**：所有改动必须以生产标准评估，不接受"先粗放再优化"的 MVP 心态。
+- 工程要求：
+  - 配置项要齐全、有合理生产默认值；关键行为可观测、可关闭、可调参。
+  - 失败必须有日志/metric，不接受 `except: pass` 静默吞异常。任何降级必须有 WARNING 以上日志。
+  - 关键路径(写入、检索、淘汰、迁移)必须有单元 + 集成测试覆盖。
+  - 不引入"临时方案"或"待重构标记"，要么做完，要么不做。
+  - 数据库变更走 alembic 迁移，不依赖 `create_all` 兜底。
+  - 不写"调试用"分支或注释掉的代码。
 
 ## 技术栈
 | 组件 | 选型 |
@@ -10,7 +20,7 @@
 | LLM | GLM-4（智谱，ChatOpenAI 兼容接口，配置化可切换） |
 | 本体推理 | Owlready2（OWL2 + SWRL 规则） |
 | 图数据库 | Neo4j |
-| 向量数据库 | Chroma（MVP） |
+| 向量数据库 | Chroma |
 | 关系数据库 | PostgreSQL（长期记忆 + 报告 + 可观测性 trace 存储） |
 | ORM | SQLAlchemy（统一 engine，多模块共用） |
 | Web 框架 | FastAPI |
@@ -100,10 +110,10 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **统一数据库层**：长期记忆、可观测性 trace、分析报告共用 `core/database` 的 SQLAlchemy engine 与 session，各业务模块在自己的 `tables.py` 中声明表。
 - **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
 - **记忆模块拆包**：原 `core/memory.py` 拆为 `core/memory/` 包，区分 `short_term` / `long_term` / `tables`。
-- **编排粒度**：MVP 采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持细粒度 DAG 调度。
+- **编排粒度**：当前采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持细粒度 DAG 调度。
 - **本体上下文注入**：混合模式——关键规则用结构化 JSON，业务背景用自然语言。
 - **SWRL 规则 vs Python 代码**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体；KPI 计算用 Python 实现。
-- **MVP 纯分析只读**：不执行 ERP 写操作，写操作接口预留。
+- **纯分析只读**：当前版本不执行 ERP 写操作，写操作接口预留。
 - **记忆隔离**：长期记忆按 `user_id` 隔离，短期记忆按 `session_id` 隔离。
 - **模型工厂**：`modules/p2p/model_factory.py` 集中创建 LLM 客户端，便于切换模型 / 测试 mock。
 

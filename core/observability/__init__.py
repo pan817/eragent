@@ -1,5 +1,6 @@
 """可观测性模块：Agent / Model / Tool 调用链路监控与持久化。"""
 
+from core.observability.checkpointer import attach_tracing as attach_checkpointer_tracing
 from core.observability.middleware import TimingMiddleware
 from core.observability.store import (
     TraceStore,
@@ -14,6 +15,7 @@ from core.observability import tables as _tables  # noqa: F401
 
 __all__ = [
     "TimingMiddleware",
+    "attach_checkpointer_tracing",
     "TraceStore",
     "get_trace_store",
     "init_trace_store",

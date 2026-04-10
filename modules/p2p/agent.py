@@ -9,11 +9,11 @@ P2P Agent 定义。
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
@@ -27,28 +27,92 @@ from api.schemas.analysis import (
 )
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
-from core.memory import ShortTermMemory
-from core.observability import TimingMiddleware
+from core.observability import TimingMiddleware, attach_checkpointer_tracing
 from modules.p2p.model_factory import build_chat_model
-from modules.p2p.prompts import build_system_prompt
+from modules.p2p.prompts import build_system_prompt, format_long_term_memory
 
 _logger = get_logger(__name__)
 
+# 从 anomalies 中聚合的实体类型上限（供应商/PO 号各最多保留这么多个，避免 metadata 过大）
+_MAX_ENTITIES_PER_TYPE = 10
+# 写入长期记忆的 response 截断长度
+_MEMORY_RESPONSE_MAX_LEN = 1500
 
-def _naive_summarize(messages: list[dict[str, str]]) -> str:
-    """轻量摘要：拼接早期消息的截断片段，避免再起一次 LLM 调用。
 
-    供 ShortTermMemory.compress 使用。专业的摘要可后续替换为 LLM 调用，
-    但 MVP 阶段足以保证多轮上下文不无限增长。
+def _build_memory_content(
+    query: str,
+    response: str,
+    summary: dict[str, Any],
+) -> str:
+    """构建写入长期记忆的 content 字段。
+
+    格式：Q / Summary（若有）/ A 三段，使得 FTS 与向量召回都能命中
+    关键信息。
     """
-    parts: list[str] = []
-    for msg in messages:
-        role = msg.get("role", "?")
-        content = (msg.get("content") or "").replace("\n", " ").strip()
-        if len(content) > 120:
-            content = content[:120] + "…"
-        parts.append(f"[{role}] {content}")
+    parts: list[str] = [f"Q: {query}"]
+    if summary:
+        # 取 summary 中几个有代表性的字段拼到 content 里，增强 FTS 命中率
+        anomaly_count = summary.get("anomaly_count") or summary.get("total_anomalies")
+        if anomaly_count is not None:
+            parts.append(f"异常数量: {anomaly_count}")
+        text_summary = summary.get("summary") or summary.get("description")
+        if text_summary:
+            parts.append(f"摘要: {str(text_summary)[:300]}")
+    parts.append(f"A: {response[:_MEMORY_RESPONSE_MAX_LEN]}")
     return "\n".join(parts)
+
+
+def _build_memory_metadata(
+    query: str,
+    analysis_type: str,
+    anomalies: list[dict[str, Any]],
+    summary: dict[str, Any],
+    time_range_days: int,
+) -> dict[str, Any]:
+    """从本轮分析结果中提取结构化字段，作为 memory metadata 写入。
+
+    包含：
+    - ``analysis_type``：分析类型（用于后续按类型检索/去重）
+    - ``anomaly_count``：本轮检出异常数（用于 L3 过滤判断）
+    - ``time_range_days``：分析时间范围
+    - ``summary``：文字摘要（从 summary dict 中取出）
+    - ``entities``：从 anomalies 中聚合的关键实体
+        - ``suppliers``：涉及的供应商列表（去重，最多 _MAX_ENTITIES_PER_TYPE 个）
+        - ``po_numbers``：涉及的 PO 号列表（去重，最多 _MAX_ENTITIES_PER_TYPE 个）
+    """
+    # 从 anomalies 中提取实体
+    suppliers: list[str] = []
+    po_numbers: list[str] = []
+    seen_sup: set[str] = set()
+    seen_po: set[str] = set()
+    for anomaly in anomalies or []:
+        docs = anomaly.get("documents") or {}
+        sup = docs.get("supplier_name") or ""
+        po = docs.get("po_number") or ""
+        if sup and sup not in seen_sup and len(suppliers) < _MAX_ENTITIES_PER_TYPE:
+            suppliers.append(sup)
+            seen_sup.add(sup)
+        if po and po not in seen_po and len(po_numbers) < _MAX_ENTITIES_PER_TYPE:
+            po_numbers.append(po)
+            seen_po.add(po)
+
+    text_summary = ""
+    if summary:
+        text_summary = str(
+            summary.get("summary") or summary.get("description") or ""
+        )[:500]
+
+    return {
+        "query": query,
+        "analysis_type": analysis_type,
+        "anomaly_count": len(anomalies) if anomalies else 0,
+        "time_range_days": time_range_days,
+        "summary": text_summary,
+        "entities": {
+            "suppliers": suppliers,
+            "po_numbers": po_numbers,
+        },
+    }
 
 
 class P2PAgent:
@@ -81,11 +145,12 @@ class P2PAgent:
         self._settings: Settings = settings if settings is not None else get_settings()
         self._agent: Any | None = None
         self._timing_middleware: TimingMiddleware | None = timing_middleware
-        # 按 session_id 隔离的短期记忆，使用 OrderedDict 实现 LRU，
-        # 防止长时间运行下进程内 session 字典无界增长导致 OOM
-        self._short_term_memories: OrderedDict[str, ShortTermMemory] = OrderedDict()
-        # Agent 构建 + 短期记忆字典在多线程/多协程下都可能并发访问，
-        # 用 RLock 同步避免重复初始化和 OrderedDict 竞态
+        # 短期记忆由 LangGraph PostgresSaver checkpointer 持久化,以 session_id 作为 thread_id,
+        # 每轮会话的历史 messages 由 checkpointer 自动加载/写回,无需进程内字典。
+        self._checkpointer: Any | None = None
+        self._checkpointer_cm: Any | None = None  # context manager 句柄,用于 atexit 清理
+        # Agent 构建 + checkpointer 初始化在多线程/多协程下都可能并发访问,
+        # 用 RLock 同步避免重复初始化
         self._lock = threading.RLock()
 
     @property
@@ -100,48 +165,72 @@ class P2PAgent:
             self._timing_middleware = TimingMiddleware(agent_name="p2p_agent")
         return self._timing_middleware
 
+    def _get_checkpointer(self) -> Any:
+        """延迟构建 LangGraph PostgresSaver checkpointer。
+
+        使用项目共用的 PostgreSQL(``settings.postgresql.conninfo``),首次调用时
+        进入 context manager 并触发 ``setup()`` 建表。进程退出时通过 atexit
+        关闭底层连接。初始化失败时抛出异常,由调用方捕获降级。
+        """
+        if self._checkpointer is not None:
+            return self._checkpointer
+        with self._lock:
+            if self._checkpointer is not None:
+                return self._checkpointer
+            from langgraph.checkpoint.postgres import PostgresSaver
+
+            conninfo = self._settings.postgresql.conninfo
+            cm = PostgresSaver.from_conn_string(conninfo)
+            saver = cm.__enter__()
+            try:
+                saver.setup()
+            except Exception:
+                cm.__exit__(None, None, None)
+                raise
+            # 给 saver 实例打上 checkpoint span 补丁,让 get_tuple / put /
+            # put_writes 的耗时与关键元信息(thread_id、n_messages、step、source 等)
+            # 落入当前 trace 的 checkpoint 类型 span。
+            attach_checkpointer_tracing(saver, self.timing_middleware)
+            self._checkpointer_cm = cm
+            self._checkpointer = saver
+            atexit.register(self._close_checkpointer)
+            return saver
+
+    def _close_checkpointer(self) -> None:
+        """关闭 checkpointer 的 context manager(atexit 回调,幂等)。"""
+        cm = self._checkpointer_cm
+        if cm is None:
+            return
+        self._checkpointer_cm = None
+        self._checkpointer = None
+        try:
+            cm.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
-        """清理短期记忆。
+        """清理短期记忆(checkpointer 中对应 thread_id 的历史)。
 
         Args:
-            session_id: 指定会话 ID 时仅清理该会话；为 None 时清空全部会话。
+            session_id: 指定会话 ID 时仅清理该会话(即 thread_id);
+                为 None 时目前不支持一次性清空所有 thread(PostgresSaver 无全量 API),
+                返回 0 表示未执行任何操作。
 
         Returns:
             实际被清理的会话数量。
         """
-        with self._lock:
-            if session_id is None:
-                count = len(self._short_term_memories)
-                self._short_term_memories.clear()
-                return count
-            if session_id in self._short_term_memories:
-                del self._short_term_memories[session_id]
-                return 1
+        if self._checkpointer is None:
             return 0
-
-    def _get_short_term_memory(self, session_id: str) -> ShortTermMemory:
-        """获取或创建指定会话的短期记忆（LRU 行为）。
-
-        每次访问都把对应 session 移到末尾标记为最近使用；
-        当总数超过 ``_MAX_SHORT_TERM_SESSIONS`` 时淘汰最久未用的会话。
-        """
-        with self._lock:
-            stm = self._short_term_memories.get(session_id)
-            if stm is not None:
-                self._short_term_memories.move_to_end(session_id)
-                return stm
-
-            mem_cfg = self._settings.memory
-            stm = ShortTermMemory(
-                max_messages=mem_cfg.short_term_max_messages,
-                summary_threshold=mem_cfg.short_term_summary_threshold,
-            )
-            self._short_term_memories[session_id] = stm
-            # LRU 淘汰
-            max_sessions = self._settings.agent_runtime.max_short_term_sessions
-            while len(self._short_term_memories) > max_sessions:
-                self._short_term_memories.popitem(last=False)
-            return stm
+        if session_id is None:
+            # PostgresSaver 未暴露"删除所有 thread"的 API,避免误伤其他表数据,
+            # 这里不执行任何操作。需要批量清空请直接 TRUNCATE checkpoint* 表。
+            return 0
+        try:
+            self._checkpointer.delete_thread(session_id)
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("clear short-term memory failed: %s", exc)
+            return 0
 
     # ------------------------------------------------------------------
     # 构建方法
@@ -195,13 +284,26 @@ class P2PAgent:
             tools = self._build_tools()
             system_prompt = build_system_prompt()
             middleware = self.timing_middleware
-            self._agent = create_agent(
+            # 尝试挂载 PostgresSaver checkpointer 作为短期记忆层。
+            # DB 不可用时降级为无 checkpointer 模式,不阻塞 agent 启动。
+            checkpointer: Any | None = None
+            try:
+                checkpointer = self._get_checkpointer()
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "postgres checkpointer init failed, short-term memory disabled: %s",
+                    exc,
+                )
+            agent_kwargs: dict[str, Any] = dict(
                 model=model,
                 tools=tools,
                 system_prompt=system_prompt,
                 name="p2p_agent",
                 middleware=[middleware],
             )
+            if checkpointer is not None:
+                agent_kwargs["checkpointer"] = checkpointer
+            self._agent = create_agent(**agent_kwargs)
             return self._agent
 
     # ------------------------------------------------------------------
@@ -287,19 +389,49 @@ class P2PAgent:
                     f"[分析参数] 时间范围: 最近 {time_range_days} 天"
                 )
 
-                # 注入短期记忆：把同一 session 的历史拼到本轮 messages 之前
-                stm = self._get_short_term_memory(session_id)
-                history_messages: list[dict[str, str]] = stm.get_context()
-                invoke_messages: list[dict[str, str]] = [
-                    *history_messages,
-                    {"role": "user", "content": user_message},
-                ]
+                # 短期记忆由 PostgresSaver checkpointer 按 thread_id(=session_id)
+                # 自动加载历史 messages,这里只需传入本轮新消息。
+                invoke_messages: list[tuple[str, str]] = []
 
-                # trace 生命周期由 Orchestrator 在最外层驱动，
-                # 此处仅触发 ainvoke，让 middleware 的 model/tool span 自然落入当前 trace
-                result: dict[str, Any] = await agent.ainvoke({
-                    "messages": invoke_messages,
-                })
+                # 注入长期记忆：按 user_id 隔离,按当前 query 做 LIKE 召回 + 可选向量召回。
+                # 召回失败(DB 未初始化/不可用)不应阻断主路径,静默降级。
+                long_term_snippets: list[dict[str, Any]] = []
+                if self._settings.memory.long_term_enabled:
+                    try:
+                        from core.memory import get_long_term_memory
+
+                        ltm = get_long_term_memory()
+                        max_retrieved = self._settings.memory.long_term_max_retrieved
+                        # search_memories 内部已做 hybrid 召回（稀疏 + 稠密 + RRF）
+                        long_term_snippets = ltm.search_memories(
+                            user_id=user_id, query=query, limit=max_retrieved
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.debug("long-term memory retrieval skipped: %s", exc)
+
+                long_term_text = format_long_term_memory(long_term_snippets)
+                if long_term_text:
+                    invoke_messages.insert(
+                        0,
+                        (
+                            "system",
+                            f"[长期记忆-历史参考]\n以下是该用户与本次查询相关的历史记忆,"
+                            f"可作为分析参考:\n{long_term_text}",
+                        ),
+                    )
+
+                invoke_messages.append(("user", user_message))
+
+                # trace 生命周期由 Orchestrator 在最外层驱动,
+                # 此处仅触发 ainvoke,让 middleware 的 model/tool span 自然落入当前 trace。
+                # thread_id 即 session_id,PostgresSaver 会据此加载/写回短期记忆历史。
+                invoke_config: dict[str, Any] = {
+                    "configurable": {"thread_id": session_id}
+                }
+                result: dict[str, Any] = await agent.ainvoke(
+                    {"messages": invoke_messages},
+                    config=invoke_config,
+                )
 
                 # 提取最终回复
                 messages: list[Any] = result.get("messages", [])
@@ -312,13 +444,7 @@ class P2PAgent:
                         else str(last_message)
                     )
 
-                # 写回短期记忆：本轮 user query + assistant 回复
-                stm.add_message("user", user_message)
-                if content:
-                    stm.add_message("assistant", content)
-                # 达到阈值时压缩早期消息（使用简单截断式摘要，无需额外 LLM 调用）
-                if stm.needs_compression():
-                    stm.compress(_naive_summarize)
+                # 短期记忆由 checkpointer 自动写回,无需手动 append。
 
                 # 尝试从 content 中解析结构化 JSON
                 anomalies: list[dict[str, Any]] = []
@@ -334,6 +460,33 @@ class P2PAgent:
                             analysis_type = AnalysisType(parsed["analysis_type"])
                 except (json.JSONDecodeError, ValueError):
                     pass  # content 是纯文本 Markdown 报告，无需解析
+
+                # 写回长期记忆：解析完结构化字段后写入，携带完整 metadata。
+                # 失败不阻塞主路径。
+                if content and self._settings.memory.long_term_enabled:
+                    try:
+                        from core.memory import get_long_term_memory
+
+                        ltm = get_long_term_memory()
+                        ltm.save_memory(
+                            user_id=user_id,
+                            session_id=session_id,
+                            memory_type="analysis_conclusion",
+                            content=_build_memory_content(
+                                query=query,
+                                response=content,
+                                summary=summary,
+                            ),
+                            metadata=_build_memory_metadata(
+                                query=query,
+                                analysis_type=analysis_type.value,
+                                anomalies=anomalies,
+                                summary=summary,
+                                time_range_days=time_range_days,
+                            ),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.debug("long-term memory save skipped: %s", exc)
 
                 elapsed_ms: float = (time.monotonic() - start_time) * 1000
 

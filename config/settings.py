@@ -114,9 +114,17 @@ class PostgreSQLSettings(BaseSettings):
 
     @property
     def dsn(self) -> str:
-        """生成 PostgreSQL DSN 连接字符串。"""
+        """生成 SQLAlchemy 使用的 PostgreSQL DSN(psycopg2 驱动)。"""
         return (
             f"postgresql+psycopg2://{self.username}:{self.password}"
+            f"@{self.host}:{self.port}/{self.database}"
+        )
+
+    @property
+    def conninfo(self) -> str:
+        """psycopg3 / langgraph PostgresSaver 使用的纯 libpq 连接串。"""
+        return (
+            f"postgresql://{self.username}:{self.password}"
             f"@{self.host}:{self.port}/{self.database}"
         )
 
@@ -231,7 +239,13 @@ class MemorySettings(BaseSettings):
 
     short_term_max_messages: int = 20
     short_term_summary_threshold: int = 15
+    long_term_enabled: bool = True
     long_term_max_retrieved: int = 5
+    long_term_fusion_k: int = 60
+    long_term_max_per_user: int = 0  # 0 表示不限制
+    long_term_min_content_len: int = 50           # 短内容过滤阈值（0 关闭）
+    long_term_dedupe_window_seconds: int = 900    # 内容指纹去重窗口（0 关闭）
+    long_term_skip_empty_conclusions: bool = False  # 跳过 anomaly_count=0 且 summary 空的结论
 
     model_config = {"env_prefix": "MEMORY_"}
 
@@ -321,7 +335,15 @@ class Settings(BaseSettings):
             merged["memory"] = {
                 "short_term_max_messages": short_term.get("max_messages", 20),
                 "short_term_summary_threshold": short_term.get("summary_threshold", 15),
+                "long_term_enabled": long_term.get("enabled", True),
                 "long_term_max_retrieved": long_term.get("max_retrieved", 5),
+                "long_term_fusion_k": long_term.get("fusion_k", 60),
+                "long_term_max_per_user": long_term.get("max_per_user", 0),
+                "long_term_min_content_len": long_term.get("min_content_len", 50),
+                "long_term_dedupe_window_seconds": long_term.get("dedupe_window_seconds", 900),
+                "long_term_skip_empty_conclusions": long_term.get(
+                    "skip_empty_conclusions", False
+                ),
             }
 
         # 环境变量注入敏感字段
