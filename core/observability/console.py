@@ -36,15 +36,18 @@ def format_tree(spans: list[SpanEvent], trace_id: str) -> str:
 
 
 def format_summary(spans: list[SpanEvent], total_ms: float) -> str:
-    """统计 model / tool 调用次数与累计耗时。"""
+    """统计 model / tool / memory 调用次数与累计耗时。"""
     model_count = sum(1 for s in spans if s.span_type == "model")
     tool_count = sum(1 for s in spans if s.span_type == "tool")
+    memory_count = sum(1 for s in spans if s.span_type == "memory")
     model_ms = sum(s.duration_ms for s in spans if s.span_type == "model")
     tool_ms = sum(s.duration_ms for s in spans if s.span_type == "tool")
+    memory_ms = sum(s.duration_ms for s in spans if s.span_type == "memory")
     return (
         f"--- summary: total={total_ms:.1f}ms  "
         f"model={model_count}({model_ms:.1f}ms)  "
-        f"tool={tool_count}({tool_ms:.1f}ms) ---"
+        f"tool={tool_count}({tool_ms:.1f}ms)  "
+        f"memory={memory_count}({memory_ms:.1f}ms) ---"
     )
 
 

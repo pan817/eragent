@@ -50,16 +50,24 @@ def _max_io_text() -> int:
 class _TraceContext:
     """单次 agent 调用的运行时上下文。"""
 
-    def __init__(self, agent_name: str, session_id: str | None, user_id: str | None) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        session_id: str | None,
+        user_id: str | None,
+        store: TraceStore | None = None,
+    ) -> None:
         self.trace_id: str = str(uuid.uuid4())
         self.agent_name: str = agent_name
         self.session_id: str | None = session_id
         self.user_id: str | None = user_id
+        self.store: TraceStore | None = store
         self.spans: list[SpanEvent] = []
         self.started_at: datetime = datetime.utcnow()
         self.started_monotonic: float = time.monotonic()
         self.model_count: int = 0
         self.tool_count: int = 0
+        self.memory_count: int = 0
 
 
 _current_trace: contextvars.ContextVar[_TraceContext | None] = contextvars.ContextVar(
@@ -104,6 +112,7 @@ class TimingMiddleware(AgentMiddleware):
             agent_name=self._agent_name,
             session_id=session_id,
             user_id=user_id,
+            store=self._store(),
         )
         _current_trace.set(ctx)
         self._emit(
@@ -138,6 +147,7 @@ class TimingMiddleware(AgentMiddleware):
             attributes={
                 "model_calls": ctx.model_count,
                 "tool_calls": ctx.tool_count,
+                "memory_calls": ctx.memory_count,
             },
             error=error,
         )
@@ -475,6 +485,61 @@ def _truncate_text(value: Any, max_len: int | None = None) -> str:
     if len(value) > max_len:
         return value[: max_len - 3] + "..."
     return value
+
+
+@contextmanager
+def record_memory_span(operation: str, **attributes: Any):
+    """在当前活跃 trace 中记录一次长期记忆操作 span（span_type="memory"）。
+
+    供 core/memory 等模块在不持有 TimingMiddleware 引用时直接使用。
+    若当前无活跃 trace，直接 yield 并跳过 span 记录，不影响业务逻辑。
+
+    Args:
+        operation: span 名称，建议用 "memory.read" / "memory.write" /
+                   "memory.report_write" 等有层次的命名。
+        **attributes: 写入 span attributes 的任意键值对（须为 JSON 可序列化类型）。
+
+    Example::
+
+        with record_memory_span("memory.write", user_id=uid, memory_type=mtype):
+            repo.save(...)
+    """
+    ctx = _current_trace.get()
+    if ctx is None:
+        yield
+        return
+
+    span_id = str(uuid.uuid4())
+    started_at = datetime.utcnow()
+    t0 = time.monotonic()
+    status = "ok"
+    error: str | None = None
+    try:
+        yield
+    except BaseException as exc:
+        status = "error"
+        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+        raise
+    finally:
+        duration_ms = (time.monotonic() - t0) * 1000
+        sp = SpanEvent(
+            trace_id=ctx.trace_id,
+            span_id=span_id,
+            parent_span_id=None,
+            span_type="memory",
+            name=operation,
+            status=status,
+            started_at=started_at,
+            finished_at=datetime.utcnow(),
+            duration_ms=round(duration_ms, 3),
+            attributes=attributes,
+            error=error,
+        )
+        ctx.spans.append(sp)
+        ctx.memory_count += 1
+        active_store = ctx.store or get_trace_store()
+        if active_store is not None:
+            active_store.enqueue(sp)
 
 
 def _safe_jsonable(value: Any) -> Any:

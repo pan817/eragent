@@ -7,7 +7,7 @@ import time
 import pytest
 
 import core.observability  # noqa: F401  触发 tables 注册到 Base.metadata
-from core.observability.middleware import TimingMiddleware
+from core.observability.middleware import TimingMiddleware, record_memory_span
 from core.observability.store import RunEvent, SpanEvent, TraceStore
 from core.database import Base
 from core.database.engine import create_engine_from_dsn, get_session_factory
@@ -126,6 +126,71 @@ def test_middleware_records_tool_error(store):
     tool_span = next(s for s in spans if s.span_type == "tool")
     assert tool_span.status == "error"
     assert "RuntimeError" in (tool_span.error or "")
+
+
+def test_record_memory_span_no_active_trace():
+    """record_memory_span 在无活跃 trace 时应静默 no-op，不抛异常。"""
+    with record_memory_span("memory.write", user_id="u1", memory_type="t"):
+        pass  # 无 trace 时不应有任何副作用
+
+
+def test_record_memory_span_emits_span(store):
+    """record_memory_span 在活跃 trace 中应写出 span_type='memory' 的 span。"""
+    mw = TimingMiddleware(agent_name="mem_agent", store=store, print_console=False)
+    mw.start_run(session_id="s1", user_id="u1")
+
+    with record_memory_span(
+        "memory.read",
+        user_id="u1",
+        mode="hybrid",
+        limit=5,
+    ):
+        time.sleep(0.01)
+
+    with record_memory_span(
+        "memory.write",
+        user_id="u1",
+        memory_type="analysis_conclusion",
+        filter_result="written",
+        has_vector=False,
+    ):
+        time.sleep(0.01)
+
+    mw.finish_run(status="success")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    run = store.list_runs(limit=1)[0]
+    assert run.status == "success"
+
+    _, spans = store.get_run(run.trace_id)
+    types = sorted(s.span_type for s in spans)
+    assert types == ["agent", "memory", "memory"]
+
+    memory_spans = [s for s in spans if s.span_type == "memory"]
+    names = {s.name for s in memory_spans}
+    assert names == {"memory.read", "memory.write"}
+
+    # agent span 应包含 memory_calls 汇总
+    agent_span = next(s for s in spans if s.span_type == "agent")
+    assert agent_span.attributes["memory_calls"] == 2
+
+
+def test_record_memory_span_captures_error(store):
+    """record_memory_span 应正确捕获并记录异常，同时重新抛出。"""
+    mw = TimingMiddleware(agent_name="err_agent", store=store, print_console=False)
+    mw.start_run()
+
+    with pytest.raises(ValueError, match="simulated"):
+        with record_memory_span("memory.write", user_id="u1"):
+            raise ValueError("simulated write failure")
+
+    mw.finish_run(status="error")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    mem_span = next(s for s in spans if s.span_type == "memory")
+    assert mem_span.status == "error"
+    assert "ValueError" in (mem_span.error or "")
 
 
 def test_store_enqueue_drops_on_full(tmp_path):

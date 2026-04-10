@@ -14,6 +14,7 @@ from typing import Any, Iterable
 import sqlalchemy as sa
 
 from core.memory.tables import memories_table, metadata_obj, reports_table
+from core.observability.middleware import record_memory_span
 
 _logger = logging.getLogger(__name__)
 
@@ -404,6 +405,14 @@ class MemoryRepository:
                 "content_len=%d threshold=%d",
                 user_id, memory_type, len(content.strip()), self._min_content_len,
             )
+            with record_memory_span(
+                "memory.write",
+                user_id=user_id,
+                memory_type=memory_type,
+                filter_result="skipped.too_short",
+                has_vector=False,
+            ):
+                pass
             return None
 
         # L2: 内容指纹去重
@@ -437,6 +446,14 @@ class MemoryRepository:
                     "content_hash=%s window_seconds=%d",
                     user_id, memory_type, chash, self._dedupe_window_seconds,
                 )
+                with record_memory_span(
+                    "memory.write",
+                    user_id=user_id,
+                    memory_type=memory_type,
+                    filter_result="skipped.duplicate",
+                    has_vector=False,
+                ):
+                    pass
                 return None
 
         # L3: 空结论过滤
@@ -447,6 +464,14 @@ class MemoryRepository:
                     "ltm.save.skipped reason=empty_conclusion user_id=%s memory_type=%s",
                     user_id, memory_type,
                 )
+                with record_memory_span(
+                    "memory.write",
+                    user_id=user_id,
+                    memory_type=memory_type,
+                    filter_result="skipped.empty_conclusion",
+                    has_vector=False,
+                ):
+                    pass
                 return None
 
         memory_id = str(uuid.uuid4())
@@ -460,53 +485,63 @@ class MemoryRepository:
             attrs=metadata,
             created_at=datetime.now(timezone.utc),
         )
-        try:
-            with self._engine.connect() as conn:
-                conn.execute(stmt)
-                conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            _inc("ltm.save.error")
-            _logger.error(
-                "ltm.save.error user_id=%s memory_type=%s error=%s",
-                user_id, memory_type, exc,
-            )
-            raise
 
-        _inc("ltm.save.written")
-        _logger.info(
-            "ltm.save.written user_id=%s memory_type=%s memory_id=%s",
-            user_id, memory_type, memory_id,
-        )
-
-        # 向量旁路（best-effort）
-        _vs = self._vector_store.get()
-        if _vs is not None:
+        has_vector = self._vector_store.get() is not None
+        with record_memory_span(
+            "memory.write",
+            user_id=user_id,
+            memory_type=memory_type,
+            filter_result="written",
+            has_vector=has_vector,
+            content_len=len(content),
+        ):
             try:
-                _vs.add_documents([{
-                    "id": f"memory_{memory_id}",
-                    "text": content,
-                    "metadata": {
-                        "source": "memory",
-                        "memory_id": memory_id,
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "memory_type": memory_type,
-                    },
-                }])
+                with self._engine.connect() as conn:
+                    conn.execute(stmt)
+                    conn.commit()
             except Exception as exc:  # noqa: BLE001
-                _inc("ltm.vector.write.error")
-                _logger.warning(
-                    "ltm.vector.write.error memory_id=%s user_id=%s error=%s",
-                    memory_id, user_id, exc,
+                _inc("ltm.save.error")
+                _logger.error(
+                    "ltm.save.error user_id=%s memory_type=%s error=%s",
+                    user_id, memory_type, exc,
                 )
+                raise
 
-        # 滚动 cap
-        if self._max_per_user > 0:
-            try:
-                self._enforce_user_cap(user_id)
-            except Exception as exc:  # noqa: BLE001
-                _inc("ltm.enforce_cap.error")
-                _logger.warning("ltm.enforce_cap.failed user_id=%s error=%s", user_id, exc)
+            _inc("ltm.save.written")
+            _logger.info(
+                "ltm.save.written user_id=%s memory_type=%s memory_id=%s",
+                user_id, memory_type, memory_id,
+            )
+
+            # 向量旁路（best-effort）
+            _vs = self._vector_store.get()
+            if _vs is not None:
+                try:
+                    _vs.add_documents([{
+                        "id": f"memory_{memory_id}",
+                        "text": content,
+                        "metadata": {
+                            "source": "memory",
+                            "memory_id": memory_id,
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "memory_type": memory_type,
+                        },
+                    }])
+                except Exception as exc:  # noqa: BLE001
+                    _inc("ltm.vector.write.error")
+                    _logger.warning(
+                        "ltm.vector.write.error memory_id=%s user_id=%s error=%s",
+                        memory_id, user_id, exc,
+                    )
+
+            # 滚动 cap
+            if self._max_per_user > 0:
+                try:
+                    self._enforce_user_cap(user_id)
+                except Exception as exc:  # noqa: BLE001
+                    _inc("ltm.enforce_cap.error")
+                    _logger.warning("ltm.enforce_cap.failed user_id=%s error=%s", user_id, exc)
 
         return memory_id
 
@@ -539,16 +574,23 @@ class MemoryRepository:
     def search(self, user_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Hybrid 召回（稀疏 + 稠密 + RRF 融合）。"""
         candidate_size = max(limit * 4, limit)
-        sparse_ids = self._sparse_search_ids(user_id, query, candidate_size)
-        dense_ids = self._dense_search_ids(user_id, query, candidate_size)
-        if not sparse_ids and not dense_ids:
-            return []
-        fused = _rrf_fuse([sparse_ids, dense_ids], k=self._fusion_k)
-        top_ids = [doc_id for doc_id, _ in fused[:limit]]
-        if not top_ids:
-            return []
-        rows_by_id = self._fetch_by_ids(user_id, top_ids)
-        return [rows_by_id[mid] for mid in top_ids if mid in rows_by_id]
+        with record_memory_span(
+            "memory.read",
+            user_id=user_id,
+            mode="hybrid",
+            limit=limit,
+        ):
+            sparse_ids = self._sparse_search_ids(user_id, query, candidate_size)
+            dense_ids = self._dense_search_ids(user_id, query, candidate_size)
+            if not sparse_ids and not dense_ids:
+                return []
+            fused = _rrf_fuse([sparse_ids, dense_ids], k=self._fusion_k)
+            top_ids = [doc_id for doc_id, _ in fused[:limit]]
+            if not top_ids:
+                return []
+            rows_by_id = self._fetch_by_ids(user_id, top_ids)
+            results = [rows_by_id[mid] for mid in top_ids if mid in rows_by_id]
+        return results
 
     def search_semantic(self, user_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """纯语义召回（需要 vector_store）。"""
@@ -697,43 +739,52 @@ class ReportRepository:
         """写入一份分析报告，返回 report_id。"""
         if not report_id:
             report_id = str(uuid.uuid4())
-        stmt = reports_table.insert().values(
-            id=report_id,
-            user_id=user_id,
-            session_id=session_id,
-            query=query,
-            analysis_type=analysis_type,
-            result_json=result_json,
-            report_markdown=report_markdown,
-            anomaly_count=anomaly_count,
-            created_at=datetime.now(timezone.utc),
-        )
-        with self._engine.connect() as conn:
-            conn.execute(stmt)
-            conn.commit()
 
-        _vs = self._vector_store.get()
-        if _vs is not None:
-            try:
-                summary_text = report_markdown or query
-                _vs.add_documents([{
-                    "id": f"report_{report_id}",
-                    "text": summary_text[:2000],
-                    "metadata": {
-                        "source": "report",
-                        "report_id": report_id,
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "analysis_type": analysis_type,
-                        "anomaly_count": anomaly_count,
-                    },
-                }])
-            except Exception as exc:  # noqa: BLE001
-                _inc("ltm.vector.write.error")
-                _logger.warning(
-                    "ltm.vector.write.error report_id=%s user_id=%s error=%s",
-                    report_id, user_id, exc,
-                )
+        has_vector = self._vector_store.get() is not None
+        with record_memory_span(
+            "memory.report_write",
+            user_id=user_id,
+            analysis_type=analysis_type,
+            anomaly_count=anomaly_count,
+            has_vector=has_vector,
+        ):
+            stmt = reports_table.insert().values(
+                id=report_id,
+                user_id=user_id,
+                session_id=session_id,
+                query=query,
+                analysis_type=analysis_type,
+                result_json=result_json,
+                report_markdown=report_markdown,
+                anomaly_count=anomaly_count,
+                created_at=datetime.now(timezone.utc),
+            )
+            with self._engine.connect() as conn:
+                conn.execute(stmt)
+                conn.commit()
+
+            _vs = self._vector_store.get()
+            if _vs is not None:
+                try:
+                    summary_text = report_markdown or query
+                    _vs.add_documents([{
+                        "id": f"report_{report_id}",
+                        "text": summary_text[:2000],
+                        "metadata": {
+                            "source": "report",
+                            "report_id": report_id,
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "analysis_type": analysis_type,
+                            "anomaly_count": anomaly_count,
+                        },
+                    }])
+                except Exception as exc:  # noqa: BLE001
+                    _inc("ltm.vector.write.error")
+                    _logger.warning(
+                        "ltm.vector.write.error report_id=%s user_id=%s error=%s",
+                        report_id, user_id, exc,
+                    )
 
         return report_id
 

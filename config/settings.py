@@ -346,14 +346,47 @@ class Settings(BaseSettings):
                 ),
             }
 
-        # 环境变量注入敏感字段
-        for section, env_key, field in (
-            ("llm", "LLM_API_KEY", "api_key"),
-            ("neo4j", "NEO4J_PASSWORD", "password"),
-            ("postgresql", "POSTGRES_PASSWORD", "password"),
+        # 环境变量注入敏感字段（支持明文和加密两种模式）
+        # 规则：
+        #   - 只设明文（FOO=bar）              → 直接使用
+        #   - 只设密文（FOO_ENCRYPTED=gAAAA…） → 解密后使用，需提供 ENCRYPTION_MASTER_KEY
+        #   - 两者同时设置                    → 启动时报错，配置冲突不允许静默降级
+        #   - 均未设置                        → 沿用 YAML 中的值或空字符串（现有行为）
+        _master_key: str | None = None  # 懒加载，有密文时才读取
+
+        for section, env_plain, env_enc, field in (
+            ("llm",        "LLM_API_KEY",        "LLM_API_KEY_ENCRYPTED",        "api_key"),
+            ("neo4j",      "NEO4J_PASSWORD",      "NEO4J_PASSWORD_ENCRYPTED",      "password"),
+            ("postgresql", "POSTGRES_PASSWORD",   "POSTGRES_PASSWORD_ENCRYPTED",   "password"),
         ):
             sec = merged.setdefault(section, {}) or {}
-            sec[field] = os.getenv(env_key, sec.get(field, ""))
+            plain_val = os.getenv(env_plain, "")
+            enc_val   = os.getenv(env_enc,   "")
+
+            if plain_val and enc_val:
+                raise ValueError(
+                    f"配置冲突：{env_plain} 和 {env_enc} 不能同时设置。"
+                    f"请保留加密版本并删除明文环境变量。"
+                )
+
+            if enc_val:
+                if _master_key is None:
+                    _master_key = os.getenv("ENCRYPTION_MASTER_KEY", "")
+                if not _master_key:
+                    raise ValueError(
+                        f"设置了 {env_enc} 但未提供主密钥 ENCRYPTION_MASTER_KEY。"
+                        f"请通过环境变量注入主密钥后重启服务。"
+                    )
+                from config.crypto import decrypt as _decrypt
+                try:
+                    sec[field] = _decrypt(enc_val, _master_key)
+                except Exception as exc:
+                    raise ValueError(
+                        f"{env_enc} 解密失败（密钥不匹配或密文损坏）: {exc}"
+                    ) from exc
+            else:
+                sec[field] = plain_val or sec.get(field, "")
+
             merged[section] = sec
 
         return cls(**merged)

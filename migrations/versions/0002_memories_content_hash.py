@@ -21,6 +21,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # alembic_version.version_num 默认 VARCHAR(32)，本项目 revision ID 最长 38 字符，
+    # 扩列避免后续迁移更新版本号时 StringDataRightTruncation。
+    # 已有数据库执行 ALTER COLUMN 是纯元数据操作（无重写），可安全幂等运行。
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"
+        )
+
     op.add_column(
         "memories",
         sa.Column("content_hash", sa.String(length=16), nullable=True),
