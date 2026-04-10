@@ -332,3 +332,202 @@ async def calculate_supplier_kpis(
         JSON 格式的供应商 KPI 报告字符串。
     """
     return await asyncio.to_thread(_calculate_supplier_kpis_sync, supplier_id, period)
+
+
+# ============================================================
+# 新增工具（Phase 2）
+# ============================================================
+
+_tool_logger: Any = None
+
+
+def _get_tool_logger() -> Any:
+    """延迟获取 logger，避免模块级循环导入。"""
+    global _tool_logger
+    if _tool_logger is None:
+        from core.logging_utils import get_logger
+        _tool_logger = get_logger(__name__)
+    return _tool_logger
+
+
+@tool
+async def query_vendor_master(vendor_ids: str = "") -> str:
+    """查询供应商主数据信息。
+
+    返回供应商基本信息，包括名称、站点、付款条款、状态等。
+
+    Args:
+        vendor_ids: 逗号分隔的供应商 ID 列表，为空则返回全部。
+
+    Returns:
+        JSON 格式的供应商主数据列表字符串。
+    """
+    repo = _get_repository()
+    ids = [v.strip() for v in vendor_ids.split(",") if v.strip()] if vendor_ids else []
+    suppliers = await asyncio.to_thread(_query_vendor_master_sync, repo, ids)
+    return json.dumps(suppliers, ensure_ascii=False, indent=2)
+
+
+def _query_vendor_master_sync(repo: P2PRepository, vendor_ids: list[str]) -> list[dict[str, Any]]:
+    """同步查询供应商主数据。"""
+    from sqlalchemy import select
+    from core.database.models import ApSupplier
+
+    with repo._session_factory() as session:
+        stmt = select(
+            ApSupplier.supplier_id,
+            ApSupplier.supplier_name,
+            ApSupplier.supplier_site_id,
+            ApSupplier.payment_terms,
+            ApSupplier.status,
+        )
+        if vendor_ids:
+            stmt = stmt.where(ApSupplier.supplier_id.in_(vendor_ids))
+
+        rows = session.execute(stmt).all()
+        return [
+            {
+                "supplier_id": r.supplier_id,
+                "supplier_name": r.supplier_name,
+                "supplier_site_id": r.supplier_site_id,
+                "payment_terms": r.payment_terms,
+                "status": r.status,
+            }
+            for r in rows
+        ]
+
+
+@tool
+async def calculate_spend_analysis(
+    group_by: str = "category",
+    days: int = 30,
+) -> str:
+    """按维度聚合采购支出分析。
+
+    对采购订单金额按指定维度（供应商或品类）进行汇总统计。
+
+    Args:
+        group_by: 聚合维度，"category"（按品类）或 "supplier"（按供应商），默认 category。
+        days: 分析最近 N 天内的数据，默认 30 天。
+
+    Returns:
+        JSON 格式的支出分析结果字符串。
+    """
+    repo = _get_repository()
+    result = await asyncio.to_thread(_calculate_spend_analysis_sync, repo, group_by, days)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _calculate_spend_analysis_sync(
+    repo: P2PRepository, group_by: str, days: int
+) -> list[dict[str, Any]]:
+    """同步执行采购支出聚合分析。"""
+    from datetime import date, timedelta
+    from sqlalchemy import func, select
+    from core.database.models import PoHeader, PoLine
+
+    cutoff = date.today() - timedelta(days=days)
+
+    with repo._session_factory() as session:
+        if group_by == "supplier":
+            group_col = PoHeader.supplier_name
+        else:
+            group_col = PoLine.category
+
+        stmt = (
+            select(
+                group_col.label("group_key"),
+                func.count(func.distinct(PoHeader.po_number)).label("order_count"),
+                func.sum(PoLine.amount).label("total_amount"),
+                func.avg(PoLine.unit_price).label("avg_unit_price"),
+            )
+            .join(PoLine, PoHeader.po_header_id == PoLine.po_header_id)
+            .where(PoHeader.creation_date >= cutoff)
+            .group_by(group_col)
+            .order_by(func.sum(PoLine.amount).desc())
+        )
+
+        rows = session.execute(stmt).all()
+        return [
+            {
+                "group_by": group_by,
+                "group_key": str(r.group_key),
+                "order_count": r.order_count,
+                "total_amount": float(r.total_amount) if r.total_amount else 0.0,
+                "avg_unit_price": round(float(r.avg_unit_price), 2) if r.avg_unit_price else 0.0,
+            }
+            for r in rows
+        ]
+
+
+# ── 存根工具（Phase 4 真实实现） ─────────────────────────────────────
+
+
+@tool
+async def query_material_master(material_ids: str = "") -> str:
+    """查询物料主数据信息（存根，Phase 4 实现）。
+
+    Args:
+        material_ids: 逗号分隔的物料 ID 列表。
+
+    Returns:
+        空列表 JSON。
+    """
+    _get_tool_logger().warning("query_material_master is a stub, returning empty result")
+    return "[]"
+
+
+@tool
+async def calculate_po_cycle_time(days: int = 30) -> str:
+    """计算采购订单周期时间（存根，Phase 4 实现）。
+
+    Args:
+        days: 分析最近 N 天内的数据。
+
+    Returns:
+        空列表 JSON。
+    """
+    _get_tool_logger().warning("calculate_po_cycle_time is a stub, returning empty result")
+    return "[]"
+
+
+@tool
+async def run_vendor_risk_scoring(vendor_ids: str = "") -> str:
+    """执行供应商风险评分（存根，Phase 4 实现）。
+
+    Args:
+        vendor_ids: 逗号分隔的供应商 ID 列表。
+
+    Returns:
+        空列表 JSON。
+    """
+    _get_tool_logger().warning("run_vendor_risk_scoring is a stub, returning empty result")
+    return "[]"
+
+
+@tool
+async def check_approval_limits(po_ids: str = "") -> str:
+    """检查采购审批限额合规性（存根，Phase 4 实现）。
+
+    Args:
+        po_ids: 逗号分隔的采购订单 ID 列表。
+
+    Returns:
+        空列表 JSON。
+    """
+    _get_tool_logger().warning("check_approval_limits is a stub, returning empty result")
+    return "[]"
+
+
+@tool
+async def check_blacklist(vendor_ids: str = "") -> str:
+    """检查供应商黑名单（存根，Phase 4 实现）。
+
+    Args:
+        vendor_ids: 逗号分隔的供应商 ID 列表。
+
+    Returns:
+        空列表 JSON。
+    """
+    _get_tool_logger().warning("check_blacklist is a stub, returning empty result")
+    return "[]"

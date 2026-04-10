@@ -242,12 +242,80 @@ Phase 1（意图路由）──┐
 
 ---
 
-## 七、需要确认的关键决策
+## 七、关键决策（已确认）
 
-| # | 决策项 | 选项 | 建议 |
+| # | 决策项 | 结论 | 理由 |
 |---|--------|------|------|
-| 1 | LLM 信号提取时机 | A: 所有请求都先 LLM 提取 / B: 仅 Level 3 调 LLM | B（减少延迟和成本） |
-| 2 | DAG 模式与 ReAct 模式关系 | A: 全面替换为 DAG / B: 共存（静态 DAG + ReAct 兜底） | B（渐进迁移，降低风险） |
-| 3 | 工具命名对齐 | A: 改为 execute.md 命名 / B: 保持现有 + 别名映射 | B（不破坏现有测试） |
-| 4 | 多 Agent 实现 | A: 真正独立 Agent / B: 单 Agent + 分组标签 | B（Phase 2/3 阶段，Phase 4 再真正拆分） |
-| 5 | 缺失工具优先级 | 全部补齐 / 按 Phase 依赖选择性补充 | 选择性：先补 query_vendor_master + calculate_spend_analysis，其余加存根 |
+| 1 | DAG vs ReAct 模式 | **共存**：Level 1/2 命中走 DAG Executor，Level 3 兜底走 P2PAgent ReAct | 渐进迁移，降低风险；确定性场景用确定性执行，开放性场景保留 LLM 灵活性 |
+| 2 | LLM 信号提取时机 | **方案 B（渐进式）**：Level 1/2 用正则+规则填充轻量 QuerySignal，仅 Level 3 调 LLM | 节省 60%+ 请求的 LLM 调用；Level 1/2 已命中确定性路由，ambiguity_score 无实际影响 |
+| 3 | Agent 数量 | **2 个 Agent + 1 个 Tool Registry** | P2PAgent（ReAct 兜底）+ ReportAgent（DAG 终点汇总报告）+ Tool Registry（DAG 节点直接调函数）；execute.md 的 5 个 agent 标签保留为元数据 |
+| 4 | 工具命名 | **保持现有命名 + Tool Registry 别名映射** | 不破坏现有 19 个测试；Registry 同时注册两个 key 指向同一 callable |
+| 5 | 缺失工具策略 | **真实实现 2 + 存根 5 + ReportAgent 1 + 延后 1** | 见下方详表 |
+| 6 | 种子库管理 | **方案 B（config/intent_seeds.yaml）** | 种子是业务数据非代码逻辑，YAML 语义清晰，符合项目 config.yaml 风格 |
+
+### 缺失工具详表
+
+| 工具 | 策略 | 说明 |
+|------|------|------|
+| `query_vendor_master` | ✅ 真实实现 | `ap_suppliers` 表已存在，只缺 Repository 方法 |
+| `calculate_spend_analysis` | ✅ 真实实现 | `po_headers` + `po_lines` 已存在，需聚合 SQL |
+| `query_material_master` | 🔲 存根 | 缺物料主数据表（MTL_SYSTEM_ITEMS），Phase 4 新建表 |
+| `calculate_po_cycle_time` | 🔲 存根 | 表已存在可做，但非四大核心场景，延后 |
+| `run_vendor_risk_scoring` | 🔲 存根 | 缺风险评分模型定义 |
+| `check_approval_limits` | 🔲 存根 | 缺审批限额配置表 |
+| `check_blacklist` | 🔲 存根 | 缺黑名单表 |
+| `generate_summary_report` | 📎 ReportAgent | 由 ReportAgent 承担，调 LLM 汇总 DAG 各节点结果生成 Markdown |
+| `generate_chart` | ⏸️ 延后 | 缺图表库依赖 + 图片存储方案，非核心能力 |
+
+---
+
+## 八、最终架构蓝图
+
+### 请求处理流程
+
+```
+用户 query
+  │
+  ▼
+[Level 1] 关键词命中率评分（正则填充轻量 QuerySignal）
+  命中 → 加载静态 DAG 模板 → DAG Executor 并行执行 → ReportAgent 汇总 → 返回
+  │
+  ▼ 未命中
+[Level 2] Chroma intent_seeds 语义匹配（config/intent_seeds.yaml 种子库）
+  相似度 > 0.80 → 加载对应 DAG 模板 → DAG Executor → ReportAgent → 返回
+  │
+  ▼ 未命中
+[Level 3] LLM 完整信号提取 → P2PAgent ReAct 自主执行 → 返回
+```
+
+### 组件架构
+
+```
+core/orchestrator/
+├── signal.py              # QuerySignal dataclass
+├── router.py              # IntentRouter（Level 1/2/3 三级路由）
+├── orchestrator.py        # 主编排器（改造）
+└── dag/
+    ├── executor.py        # asyncio DAGExecutor
+    ├── validator.py       # DAGValidator
+    ├── templates.py       # 4 个静态 DAG 模板
+    ├── generator.py       # Level 3 DynamicDAGGenerator（Phase 2 后期）
+    ├── case_store.py      # DAGCaseStore（Phase 3）
+    └── registry.py        # Tool Registry（含别名映射）
+
+config/
+└── intent_seeds.yaml      # Level 2 种子问题库
+
+modules/p2p/
+├── agent.py               # P2PAgent（保留，Level 3 兜底）
+├── report_agent.py        # ReportAgent（新增，DAG 终点）
+└── tools.py               # 现有 8 工具 + 新增 2 真实 + 5 存根
+```
+
+### 实施路径
+
+```
+Phase 1（意图路由）───┐
+                      ├──→ Phase 2（DAG 执行层）──→ Phase 3（自学习）──→ Phase 4（追问 + 补全工具）
+缺失工具（2真实+5存根）┘
+```
