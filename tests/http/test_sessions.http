@@ -1,0 +1,415 @@
+### ============================================================
+### 会话历史 API 测试
+### 覆盖：9 个接口 CRUD + 消息操作 + 搜索
+### 启动服务：uvicorn api.main:app --reload
+### ============================================================
+
+@host = http://127.0.0.1:8000
+@user = test-session-user
+
+
+### ============================================================
+### 一、创建会话（4.2）
+### ============================================================
+
+### 1.1 创建默认标题会话
+# @name createSession1
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "新对话"
+}
+
+###
+@session_id_1 = {{createSession1.response.body.session.id}}
+
+### 1.2 创建自定义标题会话
+# @name createSession2
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "三路匹配专项分析"
+}
+
+###
+@session_id_2 = {{createSession2.response.body.session.id}}
+
+### 1.3 不传 body 创建会话
+# @name createSession3
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+### 1.4 空会话去重：连续创建第 4 个空会话应返回已有的
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "新对话"
+}
+
+### 1.5 未登录创建（应返回 401）
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+
+{
+    "title": "新对话"
+}
+
+
+### ============================================================
+### 二、列出会话（4.1）
+### ============================================================
+
+### 2.1 列出全部会话
+GET {{host}}/api/v1/sessions?limit=20
+X-User-Id: {{user}}
+
+### 2.2 分页：取第一页（limit=1）
+# @name listPage1
+GET {{host}}/api/v1/sessions?limit=1
+X-User-Id: {{user}}
+
+###
+@next_cursor = {{listPage1.response.body.next_cursor}}
+
+### 2.3 分页：用 cursor 取第二页
+GET {{host}}/api/v1/sessions?limit=1&cursor={{next_cursor}}
+X-User-Id: {{user}}
+
+### 2.4 其他用户看不到（应返回空列表）
+GET {{host}}/api/v1/sessions?limit=20
+X-User-Id: other-user
+
+### 2.5 未登录（应返回 401）
+GET {{host}}/api/v1/sessions
+
+
+### ============================================================
+### 三、追加消息（4.7）
+### ============================================================
+
+### 3.1 向会话 1 追加一对消息
+# @name appendMsg1
+POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": "分析最近的三路匹配异常情况",
+            "client_id": "temp-user-001"
+        },
+        {
+            "role": "assistant",
+            "content": "## 三路匹配分析结果\n\n共发现 12 条匹配异常，其中 3 条为高风险...",
+            "client_id": "temp-asst-001",
+            "status": "success",
+            "duration_ms": 8432,
+            "trace_id": "trace-abc-123"
+        }
+    ]
+}
+
+###
+@message_id_user = {{appendMsg1.response.body.messages[0].id}}
+@message_id_asst = {{appendMsg1.response.body.messages[1].id}}
+
+### 3.2 追加后验证标题自动推导
+### 预期：title 变为首条 user 消息前 24 字
+GET {{host}}/api/v1/sessions/{{session_id_1}}
+X-User-Id: {{user}}
+
+### 3.3 向会话 2 追加消息（带 metadata）
+POST {{host}}/api/v1/sessions/{{session_id_2}}/messages
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": "分析供应商 SUP-001 的价格差异",
+            "metadata": {
+                "analyst_role": "procurement",
+                "use_memory": true
+            }
+        }
+    ]
+}
+
+### 3.4 向不存在的会话追加（应返回 404）
+POST {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000/messages
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": "test"
+        }
+    ]
+}
+
+### 3.5 无效 role（应返回 422）
+POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "messages": [
+        {
+            "role": "system",
+            "content": "invalid role"
+        }
+    ]
+}
+
+### 3.6 空 content（应返回 422）
+POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": ""
+        }
+    ]
+}
+
+### 3.7 其他用户追加（应返回 404）
+POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+Content-Type: application/json
+X-User-Id: other-user
+
+{
+    "messages": [
+        {
+            "role": "user",
+            "content": "hack attempt"
+        }
+    ]
+}
+
+
+### ============================================================
+### 四、获取会话详情（4.3）
+### ============================================================
+
+### 4.1 获取会话 1 详情（含消息）
+GET {{host}}/api/v1/sessions/{{session_id_1}}
+X-User-Id: {{user}}
+
+### 4.2 限制消息数
+GET {{host}}/api/v1/sessions/{{session_id_1}}?message_limit=1
+X-User-Id: {{user}}
+
+### 4.3 不存在的会话（应返回 404）
+GET {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+X-User-Id: {{user}}
+
+### 4.4 其他用户访问（应返回 404，不是 403）
+GET {{host}}/api/v1/sessions/{{session_id_1}}
+X-User-Id: other-user
+
+
+### ============================================================
+### 五、更新会话标题（4.4）
+### ============================================================
+
+### 5.1 手动更新标题
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "三路匹配异常专项"
+}
+
+### 5.2 验证 title_auto=false
+### 预期：title_auto 为 false
+GET {{host}}/api/v1/sessions/{{session_id_1}}
+X-User-Id: {{user}}
+
+### 5.3 不存在的会话（应返回 404）
+PATCH {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "x"
+}
+
+### 5.4 标题超长（应返回 422，max_length=80）
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "title": "这是一个非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常长的标题"
+}
+
+
+### ============================================================
+### 六、更新消息（4.8）
+### ============================================================
+
+### 6.1 更新 assistant 消息内容（模拟 regenerate）
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "content": "## 三路匹配分析结果（更新）\n\n重新分析后发现 15 条异常...",
+    "status": "success",
+    "duration_ms": 9120,
+    "trace_id": "trace-def-456"
+}
+
+### 6.2 只更新 status
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "status": "error"
+}
+
+### 6.3 更新 metadata
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "metadata": {
+        "regenerated_from": "m-old-001",
+        "version": 2
+    }
+}
+
+### 6.4 不存在的消息（应返回 404）
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/00000000-0000-0000-0000-000000000000
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "content": "x"
+}
+
+### 6.5 其他用户更新（应返回 404）
+PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+Content-Type: application/json
+X-User-Id: other-user
+
+{
+    "content": "hack"
+}
+
+
+### ============================================================
+### 七、搜索会话（4.9）
+### ============================================================
+
+### 7.1 搜索标题关键词
+GET {{host}}/api/v1/sessions/search?q=三路匹配
+X-User-Id: {{user}}
+
+### 7.2 搜索消息内容关键词
+GET {{host}}/api/v1/sessions/search?q=SUP-001
+X-User-Id: {{user}}
+
+### 7.3 仅搜标题
+GET {{host}}/api/v1/sessions/search?q=专项&scope=title
+X-User-Id: {{user}}
+
+### 7.4 仅搜内容
+GET {{host}}/api/v1/sessions/search?q=匹配异常&scope=content
+X-User-Id: {{user}}
+
+### 7.5 无匹配结果
+GET {{host}}/api/v1/sessions/search?q=不存在的关键词xyz
+X-User-Id: {{user}}
+
+### 7.6 空搜索词（应返回 422）
+GET {{host}}/api/v1/sessions/search?q=
+X-User-Id: {{user}}
+
+### 7.7 其他用户搜索（应返回空）
+GET {{host}}/api/v1/sessions/search?q=三路匹配
+X-User-Id: other-user
+
+
+### ============================================================
+### 八、删除会话（4.5）
+### ============================================================
+
+### 8.1 删除会话 2
+DELETE {{host}}/api/v1/sessions/{{session_id_2}}
+X-User-Id: {{user}}
+
+### 8.2 验证已删除（应返回 404）
+GET {{host}}/api/v1/sessions/{{session_id_2}}
+X-User-Id: {{user}}
+
+### 8.3 列表中不再出现
+GET {{host}}/api/v1/sessions
+X-User-Id: {{user}}
+
+### 8.4 删除不存在的会话（应返回 404）
+DELETE {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+X-User-Id: {{user}}
+
+### 8.5 其他用户删除（应返回 404）
+DELETE {{host}}/api/v1/sessions/{{session_id_1}}
+X-User-Id: other-user
+
+
+### ============================================================
+### 九、清空全部会话（4.6）
+### ============================================================
+
+### 9.1 缺少 confirm（应返回 400）
+DELETE {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "confirm": "wrong"
+}
+
+### 9.2 正确清空
+DELETE {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: {{user}}
+
+{
+    "confirm": "DELETE_ALL"
+}
+
+### 9.3 验证已清空
+GET {{host}}/api/v1/sessions
+X-User-Id: {{user}}
+
+### 9.4 其他用户不受影响（先创建再验证）
+# @name createOtherSession
+POST {{host}}/api/v1/sessions
+Content-Type: application/json
+X-User-Id: other-user
+
+{
+    "title": "其他用户的会话"
+}
+
+### 验证其他用户会话仍在
+GET {{host}}/api/v1/sessions
+X-User-Id: other-user

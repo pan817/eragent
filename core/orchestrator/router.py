@@ -72,17 +72,44 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
 # ── 参数提取（复用原 IntentParser 逻辑） ─────────────────────────────
 
 def _extract_params(query: str) -> dict[str, Any]:
-    """从查询文本中用正则提取业务参数。"""
+    """从查询文本中用正则提取业务参数。
+
+    支持的实体类型：
+    - supplier_id: SUP-001, S-001
+    - po_number: PO-2024-0001
+    - invoice_number: INV-2024-0001
+    - payment_number: PAY-2024-0001
+    - receipt_number: RCV-2024-0001
+    - days: 最近30天, past 90 days
+    """
     params: dict[str, Any] = {}
 
+    # 供应商编号：SUP-xxx 或 S+数字
     supplier_match = re.search(r"(?:SUP|sup|S)-?\d+[-\w]*", query)
     if supplier_match:
         params["supplier_id"] = supplier_match.group()
 
+    # 采购订单号：PO-xxx
     po_match = re.search(r"(?:PO|po)-?[\d][\d\w-]*", query)
     if po_match:
         params["po_number"] = po_match.group()
 
+    # 发票号：INV-xxx
+    inv_match = re.search(r"(?:INV|inv)-?[\d][\d\w-]*", query)
+    if inv_match:
+        params["invoice_number"] = inv_match.group()
+
+    # 付款单号：PAY-xxx
+    pay_match = re.search(r"(?:PAY|pay)-?[\d][\d\w-]*", query)
+    if pay_match:
+        params["payment_number"] = pay_match.group()
+
+    # 收货单号：RCV-xxx
+    rcv_match = re.search(r"(?:RCV|rcv)-?[\d][\d\w-]*", query)
+    if rcv_match:
+        params["receipt_number"] = rcv_match.group()
+
+    # 天数：中文 "最近N天" 或英文 "past/last N days"
     days_match = re.search(r"(?:最近|过去|近)\s*(\d+)\s*天", query)
     if not days_match:
         days_match = re.search(
@@ -141,21 +168,86 @@ class IntentRouter:
     # ── 核心路由 ─────────────────────────────────────────────────────
 
     def _route(self, query: str) -> QuerySignal:
-        """三级路由主逻辑。"""
+        """三级路由主逻辑，记录完整决策过程到 trace。"""
+        from core.observability.middleware import record_span
+
         params = _extract_params(query)
+        trace_data: dict[str, Any] = {
+            "query": query,
+            "params_regex": params.copy(),
+        }
 
-        # Level 1：关键词命中率
-        signal = self._try_level1(query, params)
-        if signal is not None:
+        with record_span("intent", "route_decision") as attrs:
+            # Level 1：关键词命中率
+            l1_scores = self._evaluate_all_rules(query)
+            trace_data["l1_scores"] = l1_scores
+
+            signal = self._try_level1(query, params)
+            if signal is not None:
+                trace_data["hit_level"] = 1
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
+
+            # Level 2：Chroma 语义匹配
+            l2_results = self._search_seeds_for_trace(query)
+            trace_data["l2_results"] = l2_results
+
+            signal = self._try_level2(query, params)
+            if signal is not None:
+                trace_data["hit_level"] = 2
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
+
+            # Level 3：LLM 分类
+            signal = self._try_level3(query, params)
+            trace_data["hit_level"] = 3
+            trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+            trace_data["confidence"] = signal.confidence
+            trace_data["reasoning"] = signal.reasoning
+            trace_data["params_merged"] = signal.entities.copy()
+            attrs.update(trace_data)
             return signal
 
-        # Level 2：Chroma 语义匹配
-        signal = self._try_level2(query, params)
-        if signal is not None:
-            return signal
+    # ── Trace 辅助方法 ────────────────────────────────────────────────
 
-        # Level 3：LLM 分类
-        return self._try_level3(query, params)
+    def _evaluate_all_rules(self, query: str) -> list[dict[str, Any]]:
+        """评估所有 L1 规则并返回评分详情（仅用于 trace，不影响路由）。"""
+        query_lower = query.lower()
+        scores = []
+        for rule in _RULE_LIBRARY:
+            rule_keywords: set[str] = rule["keywords"]
+            hits = [kw for kw in rule_keywords if kw in query_lower]
+            hit_rate = len(hits) / len(rule_keywords)
+            scores.append({
+                "rule": rule["analysis_type"].value,
+                "hit_rate": round(hit_rate, 3),
+                "threshold": rule["threshold"],
+                "matched": hit_rate >= rule["threshold"],
+                "hit_keywords": hits,
+            })
+        return scores
+
+    def _search_seeds_for_trace(self, query: str) -> list[dict[str, Any]]:
+        """执行 L2 种子库检索并返回 top-3 结果（仅用于 trace，不影响路由）。"""
+        try:
+            store = self._ensure_seeds_store()
+            results = store.search(query=query, top_k=3)
+            return [
+                {
+                    "seed_text": r.get("text", "")[:80],
+                    "analysis_type": r.get("metadata", {}).get("analysis_type", ""),
+                    "similarity": round(1.0 - r.get("distance", 999.0), 3),
+                }
+                for r in results
+            ]
+        except Exception:
+            return []
 
     # ── Level 1：关键词命中率 ────────────────────────────────────────
 
@@ -311,11 +403,20 @@ class IntentRouter:
 
     def _try_level3(self, query: str, params: dict[str, Any]) -> QuerySignal:
         """LLM 分类兜底，始终返回结果。"""
+        from core.observability.middleware import record_span
+
         try:
             llm = self._ensure_llm()
             prompt = self._LLM_CLASSIFY_PROMPT.format(query=query)
-            response = llm.invoke(prompt)
-            content: str = response.content if hasattr(response, "content") else str(response)
+
+            # 显式记录 model span（L3 不经过 LangChain 中间件）
+            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
+            with record_span("model", str(model_name)) as model_attrs:
+                model_attrs["model"] = str(model_name)
+                model_attrs["input"] = prompt[:2000]
+                response = llm.invoke(prompt)
+                content: str = response.content if hasattr(response, "content") else str(response)
+                model_attrs["output"] = content[:2000]
 
             # 清理可能的 markdown 代码块
             raw = content.strip()

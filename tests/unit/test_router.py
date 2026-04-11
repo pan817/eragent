@@ -36,6 +36,25 @@ class TestExtractParams:
         params = _extract_params("analyze past 90 days")
         assert params["days"] == 90
 
+    def test_extract_invoice_number(self) -> None:
+        params = _extract_params("查看发票 INV-2024-0001 的详情")
+        assert params["invoice_number"] == "INV-2024-0001"
+
+    def test_extract_payment_number(self) -> None:
+        params = _extract_params("查询付款单 PAY-2024-0500")
+        assert params["payment_number"] == "PAY-2024-0500"
+
+    def test_extract_receipt_number(self) -> None:
+        params = _extract_params("收货单 RCV-2024-0100 有问题")
+        assert params["receipt_number"] == "RCV-2024-0100"
+
+    def test_extract_multiple_entities(self) -> None:
+        params = _extract_params("PO-001 的发票 INV-001 付款 PAY-001 来自 SUP-001")
+        assert params.get("po_number") == "PO-001"
+        assert params.get("invoice_number") == "INV-001"
+        assert params.get("payment_number") == "PAY-001"
+        assert params.get("supplier_id") == "SUP-001"
+
     def test_no_params(self) -> None:
         params = _extract_params("给我一份分析报告")
         assert params == {}
@@ -351,6 +370,29 @@ class TestQuerySignal:
 # ============================================================
 # 种子库加载测试
 # ============================================================
+
+
+class TestTraceHelpers:
+    """路由 trace 辅助方法测试。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def test_evaluate_all_rules(self) -> None:
+        """_evaluate_all_rules 应返回所有规则的评分。"""
+        scores = self.router._evaluate_all_rules("分析三路匹配发票异常")
+        assert len(scores) == 4  # 4 条规则
+        assert all("rule" in s and "hit_rate" in s and "threshold" in s for s in scores)
+        # 三路匹配规则应命中
+        twm = next(s for s in scores if s["rule"] == "three_way_match")
+        assert twm["matched"] is True
+        assert len(twm["hit_keywords"]) > 0
+
+    def test_search_seeds_for_trace_no_store(self) -> None:
+        """_search_seeds_for_trace store 未初始化时返回空列表。"""
+        results = self.router._search_seeds_for_trace("任意查询")
+        # 可能初始化 Chroma 也可能失败，都应返回 list
+        assert isinstance(results, list)
 
 
 class TestSeedsLoading:

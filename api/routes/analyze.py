@@ -22,6 +22,7 @@ from api.schemas.analysis import (
     ErrorInfo,
 )
 from config.settings import get_settings
+from core.chat import get_chat_repository
 from core.logging_utils import get_logger
 from core.memory import get_long_term_memory
 from core.orchestrator.orchestrator import Orchestrator
@@ -70,6 +71,7 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
 
     接收自然语言查询，由 Orchestrator 编排意图解析和 Agent 执行，
     返回结构化分析结果。如果请求中未指定 session_id 则自动生成。
+    当 auto_persist=True 时，自动将 user/assistant 消息写入 chat 表。
 
     Args:
         request: 分析请求对象，包含查询文本、用户信息等。
@@ -84,12 +86,22 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
                 update={"session_id": str(uuid.uuid4())}
             )
 
+        # --- 会话持久化前置：确保 session 存在 ---
+        chat_repo = get_chat_repository()
+        if request.auto_persist and chat_repo:
+            await _ensure_session(chat_repo, request.user_id, request.session_id)
+
         orchestrator = _get_orchestrator()
         result: AnalysisResult = await orchestrator.analyze(request)
+
+        # --- 会话持久化后置：落库消息 ---
+        if request.auto_persist and chat_repo:
+            await _persist_messages(chat_repo, request, result)
+
         return result
 
     except Exception as exc:
-        return AnalysisResult(
+        error_result = AnalysisResult(
             report_id=str(uuid.uuid4()),
             status=AnalysisStatus.FAILED,
             analysis_type=request.analysis_type or AnalysisType.COMPREHENSIVE,
@@ -102,6 +114,84 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
                 message=str(exc),
             ),
         )
+        # 失败也落库（status=error）
+        chat_repo = get_chat_repository()
+        if request.auto_persist and chat_repo:
+            try:
+                await _persist_messages(chat_repo, request, error_result)
+            except Exception as persist_exc:
+                _logger.warning("failed to persist error messages: %s", persist_exc)
+        return error_result
+
+
+async def _ensure_session(
+    repo: Any, user_id: str, session_id: str
+) -> None:
+    """确保 chat_session 存在，不存在则自动创建。"""
+    existing = await _run_db_io(repo.get_session, user_id, session_id)
+    if existing is None:
+        await _run_db_io(repo.create_session_with_id, user_id, session_id)
+
+
+async def _persist_messages(
+    repo: Any,
+    request: AnalysisRequest,
+    result: AnalysisResult,
+) -> None:
+    """将 user + assistant 消息落库到 chat_messages。"""
+    user_id = request.user_id
+    session_id = result.session_id
+
+    if request.regenerate_of:
+        # 重新生成模式：更新已有的 assistant 消息
+        content = result.report_markdown or (
+            result.error.message if result.error else ""
+        )
+        status = "error" if result.status == AnalysisStatus.FAILED else "success"
+        updates = {
+            "content": content,
+            "status": status,
+            "duration_ms": int(result.duration_ms) if result.duration_ms else None,
+            "trace_id": result.trace_id or None,
+        }
+        updated = await _run_db_io(
+            repo.update_message, user_id, session_id,
+            request.regenerate_of, updates,
+        )
+        if updated:
+            result.assistant_message_id = request.regenerate_of
+    else:
+        # 正常模式：追加 user + assistant 两条消息
+        user_msg = {
+            "role": "user",
+            "content": request.query,
+            "client_id": request.client_user_message_id,
+            "status": "success",
+            "metadata": request.metadata,
+        }
+        asst_content = result.report_markdown or (
+            result.error.message if result.error else ""
+        )
+        asst_status = "error" if result.status == AnalysisStatus.FAILED else "success"
+        asst_msg = {
+            "role": "assistant",
+            "content": asst_content or "(无内容)",
+            "client_id": request.client_assistant_message_id,
+            "status": asst_status,
+            "duration_ms": int(result.duration_ms) if result.duration_ms else None,
+            "trace_id": result.trace_id or None,
+            "metadata": request.metadata,
+        }
+
+        append_result = await _run_db_io(
+            repo.append_messages, user_id, session_id, [user_msg, asst_msg]
+        )
+
+        if append_result:
+            msgs = append_result["messages"]
+            result.user_message_id = msgs[0]["id"] if len(msgs) > 0 else None
+            result.assistant_message_id = msgs[1]["id"] if len(msgs) > 1 else None
+            result.session = append_result.get("session")
 
 
 @router.get("/reports/{report_id}")

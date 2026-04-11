@@ -154,10 +154,19 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
 def create_tables(engine: Engine) -> None:
     """仅建表（不灌数据），服务启动时调用。
 
+    创建两组表：
+    - Base.metadata：ORM Declarative 表（业务模型 + 可观测性）
+    - metadata_obj：Core Table 表（memories / reports / dag_cases / chat_sessions / chat_messages）
+
     Args:
         engine: SQLAlchemy Engine。
     """
+    from core.memory.tables import metadata_obj
+    import core.chat.tables  # noqa: F401 — 确保 chat 表注册到 metadata_obj
+    import core.orchestrator.dag.tables  # noqa: F401 — 确保 dag 表注册到 metadata_obj
+
     Base.metadata.create_all(engine)
+    metadata_obj.create_all(engine)
 
 
 def reset_and_seed(engine: Engine, seed: int = 42, count: int = 500) -> dict[str, int]:

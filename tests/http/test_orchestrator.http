@@ -1,0 +1,401 @@
+### ============================================================
+### Orchestrator 编排器场景测试
+### 覆盖：三级路由 × DAG/ReAct 执行 × 各分析类型
+### 启动服务：uvicorn api.main:app --reload
+### 前置：POST /api/v1/init-data 初始化模拟数据
+### ============================================================
+
+@host = http://127.0.0.1:8000
+
+
+### ===== 前置：初始化数据 =====
+
+### 0. 初始化模拟数据
+POST {{host}}/api/v1/init-data
+
+
+### ============================================================
+### 一、Level 1 关键词命中 → DAG 执行路径
+### 预期：route_level=1, summary.route_type=DAG, 并行执行
+### ============================================================
+
+### 1.1 三路匹配 - 强关键词命中
+### 预期：L1 → three_way_match DAG（5 节点：3 并行采集 + 匹配 + 报告）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "test-orch-001"
+}
+
+### 1.2 价格差异 - 强关键词命中
+### 预期：L1 → price_variance DAG（3 节点）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查价格差异和合同价偏差",
+    "user_id": "test-orch-002"
+}
+
+### 1.3 付款合规 - 强关键词命中
+### 预期：L1 → payment_compliance DAG（4 节点）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析付款逾期和折扣滥用情况",
+    "user_id": "test-orch-003"
+}
+
+### 1.4 供应商绩效 - 强关键词 + supplier_id
+### 预期：L1 → supplier_performance DAG，参数 SUP-001 替换到模板
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "评估供应商 SUP-001 的绩效 KPI 和准时交货质量",
+    "user_id": "test-orch-004"
+}
+
+
+### ============================================================
+### 二、Level 2 语义匹配 → DAG 执行路径
+### 预期：L1 未命中，Chroma 种子库语义相似度 > 0.80 命中
+### ============================================================
+
+### 2.1 症状描述式 → 应命中 price_variance
+### 无"价格差异"关键词，语义接近种子"采购成本异常偏高"
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "为什么最近采购成本比预算高出那么多",
+    "user_id": "test-orch-005"
+}
+
+### 2.2 动作描述式 → 应命中 three_way_match
+### 无"三路匹配"关键词，语义接近种子"发票金额和收货单不匹配"
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查一下开票数量和入库数量对不上的情况",
+    "user_id": "test-orch-006"
+}
+
+### 2.3 结果导向式 → 应命中 supplier_performance
+### 语义接近种子"供应商交货总是拖延"
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "哪些供应商送货总是迟到",
+    "user_id": "test-orch-007"
+}
+
+### 2.4 口语化 → 应命中 payment_compliance
+### 语义接近种子"哪些发票过了付款期限还没付"
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "有没有该付钱还没付的账单",
+    "user_id": "test-orch-008"
+}
+
+
+### ============================================================
+### 三、Level 3 LLM 分类 → ReAct 执行路径
+### 预期：L1/L2 均未命中，走 LLM 分类 + P2PAgent ReAct
+### ============================================================
+
+### 3.1 探索性问题（无法归类到单一分析类型）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "哪些采购员的价格谈判能力比较弱",
+    "user_id": "test-orch-009"
+}
+
+### 3.2 跨类型联动
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "SUP-001 质量投诉变多了，是否也影响了付款节奏",
+    "user_id": "test-orch-010"
+}
+
+### 3.3 完全模糊
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "给我看看采购数据",
+    "user_id": "test-orch-011"
+}
+
+### 3.4 非 P2P 领域
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析一下销售部门的业绩趋势",
+    "user_id": "test-orch-012"
+}
+
+
+### ============================================================
+### 四、显式 analysis_type 覆盖路由
+### ============================================================
+
+### 4.1 query 命中价格差异，但显式指定三路匹配
+### 预期：analysis_type=three_way_match（显式优先）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析价格差异情况",
+    "user_id": "test-orch-013",
+    "analysis_type": "three_way_match"
+}
+
+### 4.2 显式 COMPREHENSIVE → 即使 L1 命中也走 ReAct
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "test-orch-014",
+    "analysis_type": "comprehensive"
+}
+
+
+### ============================================================
+### 五、参数提取验证
+### ============================================================
+
+### 5.1 同时提取 supplier_id + days
+### 预期：params 中 supplier_id=SUP-001, days=60
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析 SUP-001 最近60天的价格差异",
+    "user_id": "test-orch-015"
+}
+
+### 5.2 提取 PO 号
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查 PO-2024-0035 的三路匹配情况",
+    "user_id": "test-orch-016"
+}
+
+### 5.3 request 级别 time_range_days 覆盖 query 中的
+### 预期：time_range=最近 90 天（request 90 > query 60）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析最近60天的付款逾期",
+    "user_id": "test-orch-017",
+    "time_range_days": 90
+}
+
+
+### ============================================================
+### 六、DAG 部分失败 / 空数据场景
+### ============================================================
+
+### 6.1 不存在的供应商 → DAG 执行但数据为空
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "评估供应商 SUP-999 的绩效和交货质量",
+    "user_id": "test-orch-018"
+}
+
+### 6.2 极短时间范围 → 可能无数据
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "test-orch-019",
+    "time_range_days": 1
+}
+
+
+### ============================================================
+### 七、会话连续性
+### ============================================================
+
+### 7.1 同一 session 第一次请求
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票异常",
+    "user_id": "test-orch-020",
+    "session_id": "session-continuity-001"
+}
+
+### 7.2 同一 session 第二次（可能利用短期记忆上下文）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "上次分析中最严重的异常是哪个",
+    "user_id": "test-orch-020",
+    "session_id": "session-continuity-001"
+}
+
+### 7.3 不同 session（无上下文）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "上次分析的结果呢",
+    "user_id": "test-orch-020",
+    "session_id": "session-isolated-002"
+}
+
+
+### ============================================================
+### 八、多用户隔离
+### ============================================================
+
+### 8.1 用户 A
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "user-A"
+}
+
+### 8.2 用户 B
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析供应商 SUP-002 的绩效评分",
+    "user_id": "user-B"
+}
+
+### 8.3 用户 A 报告列表
+GET {{host}}/api/v1/reports?user_id=user-A&limit=5
+
+### 8.4 用户 B 报告列表
+GET {{host}}/api/v1/reports?user_id=user-B&limit=5
+
+
+### ============================================================
+### 九、报告持久化验证
+### ============================================================
+
+### 9.1 执行分析（捕获 report_id）
+# @name analyzeForReport
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "report-test"
+}
+
+###
+@report_id = {{analyzeForReport.response.body.report_id}}
+
+### 9.2 按 report_id 获取持久化报告
+GET {{host}}/api/v1/reports/{{report_id}}
+
+### 9.3 不存在的 report_id（应返回 404）
+GET {{host}}/api/v1/reports/00000000-0000-0000-0000-000000000000
+
+
+### ============================================================
+### 十、边界与异常输入
+### ============================================================
+
+### 10.1 空查询（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": ""
+}
+
+### 10.2 非法 analysis_type（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析数据",
+    "analysis_type": "invalid_type"
+}
+
+### 10.3 time_range_days = 0（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配",
+    "time_range_days": 0
+}
+
+### 10.4 time_range_days 超限 999（应返回 422）
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配",
+    "time_range_days": 999
+}
+
+### 10.5 超长 query
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "请详细分析最近的三路匹配异常情况，包括所有采购订单、收货单、发票的数量和金额偏差，找出偏差超过容差阈值的记录，并按严重等级排序，给出每条异常的具体单据号、偏差百分比和建议处理措施。同时分析价格差异，比对实际采购价格与合同价和标准价的偏差，找出价格波动最大的物料品类和供应商。然后检查付款合规性，看看有没有逾期付款、提前付款、超过折扣截止日期仍按折扣金额付款等违规行为。最后综合评估各供应商的绩效表现，包括准时交付率、发票准确率、质检合格率和价格合规率。",
+    "user_id": "test-orch-boundary"
+}
+
+
+### ============================================================
+### 十一、Trace 联动验证
+### ============================================================
+
+### 11.1 执行分析（捕获 trace_id）
+# @name analyzeForTrace
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析三路匹配发票收货异常",
+    "user_id": "trace-test",
+    "session_id": "trace-session-001"
+}
+
+###
+@trace_id = {{analyzeForTrace.response.body.trace_id}}
+
+### 11.2 查看该 trace 详情
+GET {{host}}/api/v1/traces/{{trace_id}}
+
+### 11.3 查看 model 调用 IO
+GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=model
+
+### 11.4 查看 tool 调用 IO
+GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=tool
+
+### 11.5 按 session 列出 trace
+GET {{host}}/api/v1/traces?session_id=trace-session-001&limit=5

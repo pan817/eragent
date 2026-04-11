@@ -136,12 +136,15 @@ class P2PRepository:
         po_number: str = "",
         supplier_id: str = "",
         status: str = "",
+        invoice_number: str = "",
         days: int = 30,
     ) -> list[dict[str, Any]]:
         """查询发票数据。"""
         with self._session_factory() as session:
             stmt = select(ApInvoice)
 
+            if invoice_number:
+                stmt = stmt.where(ApInvoice.invoice_number == invoice_number)
             if po_number:
                 stmt = stmt.where(ApInvoice.po_number == po_number)
             if supplier_id:
@@ -170,12 +173,15 @@ class P2PRepository:
         self,
         invoice_number: str = "",
         supplier_id: str = "",
+        payment_number: str = "",
         days: int = 30,
     ) -> list[dict[str, Any]]:
         """查询付款记录。"""
         with self._session_factory() as session:
             stmt = select(ApPayment)
 
+            if payment_number:
+                stmt = stmt.where(ApPayment.payment_number == payment_number)
             if invoice_number:
                 stmt = stmt.where(ApPayment.invoice_number == invoice_number)
             if supplier_id:

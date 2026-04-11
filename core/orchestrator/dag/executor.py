@@ -4,6 +4,7 @@ DAG 执行器。
 基于 asyncio 的拓扑排序并行执行引擎。
 无依赖的节点并行执行，有依赖的节点等待前置完成后执行。
 报告节点（generate_summary_report）交由 ReportAgent 处理。
+每个节点的执行过程记录到全链路 trace（span_type="dag.task"）。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import time
 from typing import Any
 
 from core.logging_utils import get_logger
+from core.observability.middleware import record_span, _truncate_text
 from core.orchestrator.dag.registry import ToolRegistry
 
 _logger = get_logger(__name__)
@@ -26,11 +28,7 @@ class DAGExecutionError(Exception):
 
 
 class DAGExecutor:
-    """DAG 并行执行器。
-
-    拓扑排序所有任务，按依赖关系分层并行执行。
-    每个节点有独立超时控制，失败节点不阻塞无关节点。
-    """
+    """DAG 并行执行器。"""
 
     def __init__(
         self,
@@ -41,25 +39,11 @@ class DAGExecutor:
         self._report_agent = report_agent
 
     async def execute(self, tasks: list[dict[str, Any]]) -> dict[str, Any]:
-        """执行 DAG 任务列表。
-
-        Args:
-            tasks: DAG 任务列表（已通过 DAGValidator 校验）。
-
-        Returns:
-            执行结果字典，包含：
-            - status: "completed" / "partial" / "failed"
-            - outputs: {output_key: result_str}
-            - completed_tasks: 成功的任务 ID 列表
-            - failed_tasks: 失败的 {task_id: error_msg} 字典
-            - report: Markdown 报告（若有 report_agent）
-            - duration_sec: 总耗时
-        """
+        """执行 DAG 任务列表，记录完整执行过程到 trace。"""
         start = time.monotonic()
         outputs: dict[str, str] = {}
         completed: list[str] = []
         failed: dict[str, str] = {}
-        task_map = {t["task_id"]: t for t in tasks}
 
         # 用 Event 跟踪每个任务完成状态
         events: dict[str, asyncio.Event] = {
@@ -71,83 +55,117 @@ class DAGExecutor:
             tool_name = task.get("tool_name", "")
             timeout_sec = task.get("timeout_sec", 60)
 
-            # 等待所有依赖完成
-            for dep_id in task.get("depends_on", []):
-                await events[dep_id].wait()
-                # 如果依赖失败，当前任务也标记失败
-                if dep_id in failed:
-                    failed[task_id] = f"前置任务 '{dep_id}' 失败"
+            with record_span("dag.task", f"{task_id}:{tool_name}") as span_attrs:
+                span_attrs["task_id"] = task_id
+                span_attrs["tool_name"] = tool_name
+                span_attrs["depends_on"] = task.get("depends_on", [])
+                span_attrs["inputs"] = task.get("inputs", {})
+
+                # 等待所有依赖完成
+                for dep_id in task.get("depends_on", []):
+                    await events[dep_id].wait()
+                    if dep_id in failed:
+                        failed[task_id] = f"前置任务 '{dep_id}' 失败"
+                        span_attrs["status"] = "skipped"
+                        span_attrs["skip_reason"] = failed[task_id]
+                        events[task_id].set()
+                        return
+
+                # 报告节点交给 ReportAgent
+                if tool_name in _REPORT_TOOLS:
+                    if self._report_agent is not None:
+                        try:
+                            report_text = await asyncio.wait_for(
+                                self._report_agent.generate(
+                                    scenario=task.get("inputs", {}).get("scenario", "分析"),
+                                    outputs=outputs,
+                                ),
+                                timeout=timeout_sec,
+                            )
+                            output_key = task.get("output_key", task_id)
+                            outputs[output_key] = report_text
+                            completed.append(task_id)
+                            span_attrs["status"] = "completed"
+                            span_attrs["output_length"] = len(report_text)
+                        except Exception as exc:
+                            failed[task_id] = str(exc)
+                            span_attrs["status"] = "failed"
+                            span_attrs["error"] = str(exc)
+                    else:
+                        completed.append(task_id)
+                        span_attrs["status"] = "skipped_no_report_agent"
                     events[task_id].set()
                     return
 
-            # 报告节点交给 ReportAgent
-            if tool_name in _REPORT_TOOLS:
-                if self._report_agent is not None:
-                    try:
-                        report_text = await asyncio.wait_for(
-                            self._report_agent.generate(
-                                scenario=task.get("inputs", {}).get("scenario", "分析"),
-                                outputs=outputs,
-                            ),
+                # 常规工具执行
+                tool_fn = self._registry.get(tool_name)
+                if tool_fn is None:
+                    failed[task_id] = f"工具 '{tool_name}' 未注册"
+                    span_attrs["status"] = "failed"
+                    span_attrs["error"] = failed[task_id]
+                    events[task_id].set()
+                    return
+
+                try:
+                    inputs = task.get("inputs", {})
+                    # 只过滤未替换的占位符（{xxx}），保留空字符串（合法的"全部"语义）
+                    clean_inputs = {
+                        k: v for k, v in inputs.items()
+                        if not (isinstance(v, str) and v.startswith("{") and v.endswith("}"))
+                    }
+                    span_attrs["clean_inputs"] = clean_inputs
+
+                    # 显式记录 tool span（DAG 路径不经过 LangChain 中间件）
+                    with record_span("tool", tool_name) as tool_attrs:
+                        tool_attrs["tool"] = tool_name
+                        tool_attrs["args"] = clean_inputs
+                        result = await asyncio.wait_for(
+                            tool_fn.ainvoke(clean_inputs),
                             timeout=timeout_sec,
                         )
-                        output_key = task.get("output_key", task_id)
-                        outputs[output_key] = report_text
-                        completed.append(task_id)
-                    except Exception as exc:
-                        failed[task_id] = str(exc)
-                else:
-                    # 无 ReportAgent 时跳过报告节点
+                        tool_attrs["output"] = _truncate_text(result)
+
+                    output_key = task.get("output_key", task_id)
+                    outputs[output_key] = result
                     completed.append(task_id)
-                events[task_id].set()
-                return
+                    span_attrs["status"] = "completed"
+                    span_attrs["output"] = _truncate_text(result)
+                    _logger.debug("task %s completed: %s", task_id, tool_name)
 
-            # 常规工具执行
-            tool_fn = self._registry.get(tool_name)
-            if tool_fn is None:
-                failed[task_id] = f"工具 '{tool_name}' 未注册"
-                events[task_id].set()
-                return
+                except asyncio.TimeoutError:
+                    failed[task_id] = f"工具 '{tool_name}' 超时（{timeout_sec}s）"
+                    span_attrs["status"] = "timeout"
+                    span_attrs["timeout_sec"] = timeout_sec
+                    _logger.warning("task %s timeout: %s after %ds", task_id, tool_name, timeout_sec)
+                except Exception as exc:
+                    failed[task_id] = f"{type(exc).__name__}: {exc}"
+                    span_attrs["status"] = "failed"
+                    span_attrs["error"] = str(exc)
+                    _logger.warning("task %s failed: %s - %s", task_id, tool_name, exc)
+                finally:
+                    events[task_id].set()
 
-            try:
-                inputs = task.get("inputs", {})
-                # 过滤掉未替换的占位符和空值
-                clean_inputs = {
-                    k: v for k, v in inputs.items()
-                    if v and not (isinstance(v, str) and v.startswith("{"))
-                }
-                result = await asyncio.wait_for(
-                    tool_fn.ainvoke(clean_inputs),
-                    timeout=timeout_sec,
-                )
-                output_key = task.get("output_key", task_id)
-                outputs[output_key] = result
-                completed.append(task_id)
-                _logger.debug("task %s completed: %s", task_id, tool_name)
+        # DAG 整体 span
+        with record_span("dag", "dag_execution") as dag_attrs:
+            dag_attrs["task_count"] = len(tasks)
+            dag_attrs["task_ids"] = [t["task_id"] for t in tasks]
+            dag_attrs["tools"] = [t.get("tool_name", "") for t in tasks]
 
-            except asyncio.TimeoutError:
-                failed[task_id] = f"工具 '{tool_name}' 超时（{timeout_sec}s）"
-                _logger.warning("task %s timeout: %s after %ds", task_id, tool_name, timeout_sec)
-            except Exception as exc:
-                failed[task_id] = f"{type(exc).__name__}: {exc}"
-                _logger.warning("task %s failed: %s - %s", task_id, tool_name, exc)
-            finally:
-                events[task_id].set()
+            await asyncio.gather(*(run_task(t) for t in tasks), return_exceptions=True)
 
-        # 并行启动所有任务（依赖关系由 Event 控制）
-        await asyncio.gather(*(run_task(t) for t in tasks), return_exceptions=True)
+            duration = time.monotonic() - start
 
-        duration = time.monotonic() - start
-        total = len(tasks)
-        n_completed = len(completed)
-        n_failed = len(failed)
+            if not failed:
+                status = "completed"
+            elif completed:
+                status = "partial"
+            else:
+                status = "failed"
 
-        if n_failed == 0:
-            status = "completed"
-        elif n_completed > 0:
-            status = "partial"
-        else:
-            status = "failed"
+            dag_attrs["status"] = status
+            dag_attrs["completed_tasks"] = completed
+            dag_attrs["failed_tasks"] = failed
+            dag_attrs["duration_sec"] = round(duration, 2)
 
         return {
             "status": status,

@@ -224,7 +224,10 @@ class TestAnalyzeRouter:
         mock_orchestrator = MagicMock()
         mock_orchestrator.analyze = AsyncMock(return_value=mock_result)
 
-        with patch("api.routes.analyze._get_orchestrator", return_value=mock_orchestrator):
+        with (
+            patch("api.routes.analyze._get_orchestrator", return_value=mock_orchestrator),
+            patch("api.routes.analyze.get_chat_repository", return_value=None),
+        ):
             resp = analyze_client.post(
                 "/analyze",
                 json={"query": "三路匹配", "user_id": "u1"},
@@ -257,7 +260,10 @@ class TestAnalyzeRouter:
         mock_orch = MagicMock()
         mock_orch.analyze = capture
 
-        with patch("api.routes.analyze._get_orchestrator", return_value=mock_orch):
+        with (
+            patch("api.routes.analyze._get_orchestrator", return_value=mock_orch),
+            patch("api.routes.analyze.get_chat_repository", return_value=None),
+        ):
             resp = analyze_client.post(
                 "/analyze",
                 json={"query": "供应商绩效"},
@@ -271,7 +277,10 @@ class TestAnalyzeRouter:
         mock_orch = MagicMock()
         mock_orch.analyze = AsyncMock(side_effect=RuntimeError("boom"))
 
-        with patch("api.routes.analyze._get_orchestrator", return_value=mock_orch):
+        with (
+            patch("api.routes.analyze._get_orchestrator", return_value=mock_orch),
+            patch("api.routes.analyze.get_chat_repository", return_value=None),
+        ):
             resp = analyze_client.post("/analyze", json={"query": "test"})
         assert resp.status_code == 200
         data = resp.json()

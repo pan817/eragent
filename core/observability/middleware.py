@@ -542,6 +542,65 @@ def record_memory_span(operation: str, **attributes: Any):
             active_store.enqueue(sp)
 
 
+@contextmanager
+def record_span(span_type: str, name: str, **attributes: Any):
+    """在当前活跃 trace 中记录一个自定义 span。
+
+    通用版本的 span 记录函数，供任意组件在不持有 TimingMiddleware
+    引用时直接使用。若当前无活跃 trace，直接 yield 并跳过记录。
+
+    span 退出后，可通过 ``attributes`` 字典追加运行时数据（如工具输出）——
+    在 ``with`` 块内直接修改传入的 ``attributes`` 字典即可，因为 finally
+    中写入的是同一个引用。
+
+    Args:
+        span_type: span 类型，如 "intent" / "dag" / "dag.task" / "report" / "case_store"。
+        name: span 名称（可读描述）。
+        **attributes: 写入 span attributes 的键值对（须为 JSON 可序列化类型）。
+
+    Example::
+
+        with record_span("intent", "route_decision", route_level=1):
+            # do routing ...
+            pass
+    """
+    ctx = _current_trace.get()
+    if ctx is None:
+        yield attributes
+        return
+
+    span_id = str(uuid.uuid4())
+    started_at = datetime.utcnow()
+    t0 = time.monotonic()
+    status = "ok"
+    error: str | None = None
+    try:
+        yield attributes
+    except BaseException as exc:
+        status = "error"
+        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+        raise
+    finally:
+        duration_ms = (time.monotonic() - t0) * 1000
+        sp = SpanEvent(
+            trace_id=ctx.trace_id,
+            span_id=span_id,
+            parent_span_id=None,
+            span_type=span_type,
+            name=name,
+            status=status,
+            started_at=started_at,
+            finished_at=datetime.utcnow(),
+            duration_ms=round(duration_ms, 3),
+            attributes=_safe_jsonable(attributes),
+            error=error,
+        )
+        ctx.spans.append(sp)
+        active_store = ctx.store or get_trace_store()
+        if active_store is not None:
+            active_store.enqueue(sp)
+
+
 def _safe_jsonable(value: Any) -> Any:
     """把任意对象转成 JSON 可序列化结构（用于 attributes JSON 列）。"""
     import json

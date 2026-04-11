@@ -25,7 +25,7 @@
 | ORM | SQLAlchemy（统一 engine，多模块共用） |
 | Web 框架 | FastAPI |
 | 配置管理 | config.yaml + Pydantic Settings |
-| 测试 | pytest（覆盖率 ≥ 85%） |
+| 测试 | pytest（覆盖率 ≥ 90%） |
 | Python | ≥ 3.11 |
 
 ## 项目结构
@@ -144,7 +144,7 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 ```bash
 cd eragent
 pip install -e ".[dev]"
-pytest --cov=. --cov-report=term-missing --cov-fail-under=85
+pytest --cov=. --cov-report=term-missing --cov-fail-under=90
 ```
 
 ## 数据库迁移
@@ -158,7 +158,7 @@ alembic current
 # 生成新迁移（修改模型后）
 alembic revision --autogenerate -m "描述"
 ```
-迁移文件位于 `migrations/versions/`，已应用 4 个版本（0001–0004）。
+迁移文件位于 `migrations/versions/`，已应用 5 个版本（0001–0005）。
 
 ## __init__.py 约定
 - 仅在 setuptools 需要识别的 Python 包目录中保留 `__init__.py`
@@ -168,7 +168,12 @@ alembic revision --autogenerate -m "描述"
 
 ## 当前进度
 - 所有功能模块代码已完成，包含统一数据库层、可观测性、拆包后的 memory 模块
-- Alembic 迁移体系建立，已落地 4 个版本（baseline → content_hash → rename_attrs → reports_idx）
-- 单元测试（19 个文件）+ 集成测试覆盖率 ≥ 95%
+- **Orchestrator 三级路由 + DAG 执行层 + 自学习闭环**已完成（Phase 1/2/3）
+  - 三级意图路由：L1 关键词命中率 → L2 Chroma 语义匹配 → L3 LLM 分类
+  - DAG 并行执行器 + 静态模板（4 种分析类型）+ ReAct 兜底（共存模式）
+  - 自学习案例存储（PostgreSQL 权威 + Chroma 缓存，服务启动时从 PG 加载）
+  - 全链路监控：intent / dag / dag.task / tool / model / report / checkpoint / case_store span
+- Alembic 迁移体系建立，已落地 5 个版本（baseline → content_hash → rename_attrs → reports_idx → dag_cases）
+- 单元测试 + 集成测试 + 端到端测试覆盖率 ≥ 90%（505 个测试用例）
 - 端到端测试（真实 LLM）通过
 - 近期优化重点：长期记忆检索质量（RRF 融合、去重、内容长度过滤）

@@ -74,6 +74,28 @@ class AnalysisRequest(BaseModel):
         description="分析类型，不传则由系统自动识别",
     )
 
+    # 会话持久化相关（Section 5）
+    auto_persist: bool = Field(
+        default=True,
+        description="是否自动将 user/assistant 消息写入 chat_sessions/chat_messages",
+    )
+    regenerate_of: str | None = Field(
+        default=None,
+        description="若为已有 assistant message_id，本次请求视为对它的重试，更新而非新建",
+    )
+    client_user_message_id: str | None = Field(
+        default=None,
+        description="前端乐观渲染的 user 消息临时 ID",
+    )
+    client_assistant_message_id: str | None = Field(
+        default=None,
+        description="前端乐观渲染的 assistant 消息临时 ID",
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="请求级元信息，写入消息的 metadata 字段",
+    )
+
 
 # ============================================================
 # 异常记录模型
@@ -178,3 +200,15 @@ class AnalysisResult(BaseModel):
     # 元信息
     created_at: datetime = Field(default_factory=datetime.utcnow, description="报告生成时间")
     duration_ms: float = Field(default=0.0, description="分析耗时（毫秒）")
+
+    # 会话持久化反馈（Section 5）
+    session: dict[str, Any] | None = Field(
+        default=None,
+        description="持久化后的会话概览（id/title/message_count/updated_at）",
+    )
+    user_message_id: str | None = Field(
+        default=None, description="落库后的 user 消息 ID"
+    )
+    assistant_message_id: str | None = Field(
+        default=None, description="落库后的 assistant 消息 ID"
+    )

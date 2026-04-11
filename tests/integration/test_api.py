@@ -17,7 +17,13 @@ def client() -> TestClient:
     from core.database import get_session_factory, init_database, P2PRepository
     from modules.p2p.tools import set_repository
 
-    engine = create_engine_from_dsn("sqlite:///:memory:")
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine_from_dsn(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     init_database(engine, seed=0)
     session_factory = get_session_factory(engine)
     set_repository(P2PRepository(session_factory))

@@ -193,6 +193,125 @@ def test_record_memory_span_captures_error(store):
     assert "ValueError" in (mem_span.error or "")
 
 
+# ============================================================
+# record_span（通用 span 记录）
+# ============================================================
+
+
+def test_record_span_no_active_trace():
+    """record_span 在无活跃 trace 时应静默 no-op。"""
+    from core.observability.middleware import record_span
+
+    with record_span("intent", "test_route") as attrs:
+        attrs["level"] = 1
+    # 不应抛异常
+
+
+def test_record_span_emits_span(store):
+    """record_span 在活跃 trace 中应写出指定类型的 span。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="span_agent", store=store, print_console=False)
+    mw.start_run(session_id="s1", user_id="u1")
+
+    with record_span("intent", "route_decision") as attrs:
+        attrs["route_level"] = 1
+        attrs["confidence"] = 0.85
+        attrs["analysis_type"] = "three_way_match"
+        time.sleep(0.01)
+
+    mw.finish_run(status="success")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) >= 1)
+    runs = store.list_runs(limit=1)
+    assert len(runs) == 1
+    _, spans = store.get_run(runs[0].trace_id)
+    intent_spans = [s for s in spans if s.span_type == "intent"]
+    assert len(intent_spans) == 1
+    sp = intent_spans[0]
+    assert sp.name == "route_decision"
+    assert sp.attributes["route_level"] == 1
+    assert sp.attributes["confidence"] == 0.85
+    assert sp.status == "ok"
+    assert sp.duration_ms >= 0
+
+
+def test_record_span_captures_error(store):
+    """record_span 应正确捕获异常并记录 error 状态。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="err_agent", store=store, print_console=False)
+    mw.start_run()
+
+    with pytest.raises(RuntimeError, match="test error"):
+        with record_span("dag", "test_dag"):
+            raise RuntimeError("test error")
+
+    mw.finish_run(status="error")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) >= 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    dag_span = next(s for s in spans if s.span_type == "dag")
+    assert dag_span.status == "error"
+    assert "RuntimeError" in (dag_span.error or "")
+
+
+def test_record_span_multiple_types(store):
+    """同一个 trace 中可以有多种 span 类型。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="multi_agent", store=store, print_console=False)
+    mw.start_run()
+
+    with record_span("intent", "route"):
+        time.sleep(0.01)
+    with record_span("dag", "execute"):
+        time.sleep(0.01)
+    with record_span("dag.task", "t1:query_po"):
+        time.sleep(0.01)
+    with record_span("report", "generate"):
+        time.sleep(0.01)
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) >= 1)
+    # 等待所有 span flush 完成（4 个 record_span + 1 个 agent）
+    def _all_spans_flushed():
+        runs = store.list_runs(limit=1)
+        if not runs:
+            return False
+        _, spans = store.get_run(runs[0].trace_id)
+        return len(spans) >= 4
+    _wait_flush(store, _all_spans_flushed)
+
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    types = {s.span_type for s in spans}
+    assert {"intent", "dag", "dag.task", "report"}.issubset(types)
+
+
+def test_record_span_with_non_serializable_attrs(store):
+    """record_span 应通过 _safe_jsonable 处理不可序列化的 attributes。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="jsonable_agent", store=store, print_console=False)
+    mw.start_run()
+
+    with record_span("test", "safe_jsonable") as attrs:
+        attrs["normal"] = "text"
+        attrs["number"] = 42
+        attrs["nested"] = {"a": [1, 2, 3]}
+        time.sleep(0.01)
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) >= 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    test_spans = [s for s in spans if s.span_type == "test"]
+    assert len(test_spans) == 1
+    assert test_spans[0].attributes["normal"] == "text"
+    assert test_spans[0].attributes["number"] == 42
+
+
 def test_store_enqueue_drops_on_full(tmp_path):
     engine = create_engine_from_dsn("sqlite:///:memory:")
     Base.metadata.create_all(engine)

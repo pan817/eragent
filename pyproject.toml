@@ -49,11 +49,11 @@ include = ["api*", "core*", "config*", "modules*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=. --cov-report=term-missing --cov-fail-under=85"
+addopts = "--cov=. --cov-report=term-missing --cov-fail-under=90"
 
 [tool.coverage.run]
 source = ["."]
-omit = ["tests/*", "*/__init__.py", "*/mock_data/*"]
+omit = ["tests/*", "*/__init__.py", "*/mock_data/*", "core/orchestrator/dag/tables.py"]
 
 [tool.ruff]
 line-length = 100

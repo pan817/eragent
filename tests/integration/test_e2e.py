@@ -263,6 +263,7 @@ class TestE2EObservability:
             json={
                 "query": "请分析最近的三路匹配异常情况",
                 "user_id": "obs-tester",
+                "analysis_type": "comprehensive",
             },
         )
         assert resp.status_code == 200

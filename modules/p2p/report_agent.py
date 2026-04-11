@@ -61,11 +61,13 @@ class ReportAgent:
         Returns:
             Markdown 格式的分析报告。
         """
+        from core.observability.middleware import record_span
+
         # 拼接所有工具输出
         outputs_parts: list[str] = []
         for key, value in outputs.items():
             if key == "report":
-                continue  # 跳过自身
+                continue
             truncated = value[:3000] if len(value) > 3000 else value
             outputs_parts.append(f"### {key}\n```json\n{truncated}\n```")
 
@@ -76,11 +78,31 @@ class ReportAgent:
             outputs_text=outputs_text,
         )
 
-        try:
-            llm = self._ensure_llm()
-            response = await llm.ainvoke(prompt)
-            content: str = response.content if hasattr(response, "content") else str(response)
-            return content
-        except Exception as exc:
-            _logger.warning("report generation failed: %s", exc)
-            return f"# {scenario}\n\n> 报告生成失败：{exc}\n\n## 原始数据\n\n{outputs_text}"
+        with record_span("report", "generate_report") as span_attrs:
+            span_attrs["scenario"] = scenario
+            span_attrs["input_keys"] = [k for k in outputs if k != "report"]
+            span_attrs["prompt_length"] = len(prompt)
+
+            try:
+                llm = self._ensure_llm()
+
+                # 显式记录 model span（ReportAgent 不经过 LangChain 中间件）
+                model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
+                with record_span("model", str(model_name)) as model_attrs:
+                    model_attrs["model"] = str(model_name)
+                    model_attrs["input"] = prompt[:2000]
+                    response = await llm.ainvoke(prompt)
+                    content: str = response.content if hasattr(response, "content") else str(response)
+                    model_attrs["output"] = content[:2000]
+                    usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", None)
+                    if usage:
+                        model_attrs["usage"] = usage if isinstance(usage, dict) else str(usage)
+
+                span_attrs["output_length"] = len(content)
+                span_attrs["status"] = "ok"
+                return content
+            except Exception as exc:
+                _logger.warning("report generation failed: %s", exc)
+                span_attrs["status"] = "error"
+                span_attrs["error"] = str(exc)
+                return f"# {scenario}\n\n> 报告生成失败：{exc}\n\n## 原始数据\n\n{outputs_text}"

@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.analyze import router as analyze_router
+from api.routes.sessions import router as sessions_router
 from api.routes.traces import router as traces_router
 from config.settings import get_settings
 from core.database import (
@@ -23,6 +24,7 @@ from core.database import (
     get_session_factory,
     reset_and_seed,
 )
+from core.chat import ChatRepository, init_chat_repository
 from core.observability import init_trace_store, shutdown_trace_store
 from modules.p2p.tools import set_repository
 
@@ -49,6 +51,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_session_factory = session_factory
     set_repository(P2PRepository(session_factory))
     init_trace_store(session_factory)
+
+    # 初始化会话历史 Repository（全局 + 路由模块双注入）
+    chat_repo = ChatRepository(session_factory)
+    init_chat_repository(chat_repo)
+    from api.routes.sessions import init_chat_repo
+    init_chat_repo(chat_repo)
     yield
     shutdown_trace_store()
     engine.dispose()
@@ -81,6 +89,7 @@ def create_app() -> FastAPI:
 
     # 挂载 API v1 路由
     app.include_router(analyze_router, prefix="/api/v1")
+    app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
 
     return app
