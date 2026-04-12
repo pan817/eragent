@@ -453,6 +453,262 @@ _INVOICE_SINGLE_DAG = [
 ]
 
 
+# ── 采购支出分析 DAG ───────────────────────────────────────────────
+
+_SPEND_ANALYSIS_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集采购订单",
+        "agent": "p2p_agent",
+        "tool_name": "query_purchase_orders",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "po_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "按品类汇总支出",
+        "agent": "p2p_agent",
+        "tool_name": "calculate_spend_analysis",
+        "depends_on": ["t1"],
+        "inputs": {"group_by": "category", "days": "{days}"},
+        "output_key": "spend_by_category",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t3",
+        "name": "按供应商汇总支出",
+        "agent": "p2p_agent",
+        "tool_name": "calculate_spend_analysis",
+        "depends_on": ["t1"],
+        "inputs": {"group_by": "supplier", "days": "{days}"},
+        "output_key": "spend_by_supplier",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t4",
+        "name": "生成支出分析报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t2", "t3"],
+        "inputs": {"scenario": "采购支出分析（近{days}天）"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
+# ── 收货异常分析 DAG ───────────────────────────────────────────────
+
+_RECEIPT_ANOMALY_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集采购订单",
+        "agent": "p2p_agent",
+        "tool_name": "query_purchase_orders",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
+        "output_key": "po_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "采集收货记录",
+        "agent": "p2p_agent",
+        "tool_name": "query_receipts",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
+        "output_key": "gr_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t3",
+        "name": "分析收货异常",
+        "agent": "p2p_agent",
+        "tool_name": "analyze_receipt_anomalies",
+        "depends_on": ["t1", "t2"],
+        "inputs": {"supplier_id": "{supplier_id}", "po_number": "{po_number}", "days": "{days}"},
+        "output_key": "anomaly_result",
+        "timeout_sec": 60,
+    },
+    {
+        "task_id": "t4",
+        "name": "生成收货异常报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t3"],
+        "inputs": {"scenario": "收货异常分析"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
+# ── 发票重复检测 DAG ───────────────────────────────────────────────
+
+_INVOICE_DUPLICATE_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集发票数据",
+        "agent": "p2p_agent",
+        "tool_name": "query_invoices",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "invoice_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "检测重复发票",
+        "agent": "p2p_agent",
+        "tool_name": "detect_duplicate_invoices",
+        "depends_on": ["t1"],
+        "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
+        "output_key": "duplicate_result",
+        "timeout_sec": 60,
+    },
+    {
+        "task_id": "t3",
+        "name": "生成重复发票报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t2"],
+        "inputs": {"scenario": "发票重复检测"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
+# ── 折扣利用率分析 DAG ─────────────────────────────────────────────
+
+_DISCOUNT_UTILIZATION_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集发票数据",
+        "agent": "p2p_agent",
+        "tool_name": "query_invoices",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "invoice_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "采集付款记录",
+        "agent": "p2p_agent",
+        "tool_name": "query_payments",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "payment_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t3",
+        "name": "分析折扣利用率",
+        "agent": "p2p_agent",
+        "tool_name": "analyze_discount_utilization",
+        "depends_on": ["t1", "t2"],
+        "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
+        "output_key": "discount_result",
+        "timeout_sec": 60,
+    },
+    {
+        "task_id": "t4",
+        "name": "生成折扣利用率报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t3"],
+        "inputs": {"scenario": "早付折扣利用率分析"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
+# ── PO 周期分析 DAG ────────────────────────────────────────────────
+
+_PO_CYCLE_TIME_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集采购订单",
+        "agent": "p2p_agent",
+        "tool_name": "query_purchase_orders",
+        "depends_on": [],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "po_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "计算 PO 周期时间",
+        "agent": "p2p_agent",
+        "tool_name": "calculate_po_cycle_time",
+        "depends_on": ["t1"],
+        "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
+        "output_key": "cycle_result",
+        "timeout_sec": 60,
+    },
+    {
+        "task_id": "t3",
+        "name": "生成周期分析报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t2"],
+        "inputs": {"scenario": "采购订单全流程周期分析"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
+# ── 供应商集中度分析 DAG ───────────────────────────────────────────
+
+_VENDOR_CONCENTRATION_DAG = [
+    {
+        "task_id": "t1",
+        "name": "采集采购订单",
+        "agent": "p2p_agent",
+        "tool_name": "query_purchase_orders",
+        "depends_on": [],
+        "inputs": {"days": "{days}"},
+        "output_key": "po_data",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t2",
+        "name": "分析供应商集中度",
+        "agent": "p2p_agent",
+        "tool_name": "analyze_vendor_concentration",
+        "depends_on": ["t1"],
+        "inputs": {"days": "{days}"},
+        "output_key": "concentration_result",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t3",
+        "name": "按供应商汇总支出",
+        "agent": "p2p_agent",
+        "tool_name": "calculate_spend_analysis",
+        "depends_on": ["t1"],
+        "inputs": {"group_by": "supplier", "days": "{days}"},
+        "output_key": "spend_by_supplier",
+        "timeout_sec": 30,
+    },
+    {
+        "task_id": "t4",
+        "name": "生成集中度分析报告",
+        "agent": "report_agent",
+        "tool_name": "generate_summary_report",
+        "depends_on": ["t2", "t3"],
+        "inputs": {"scenario": "供应商集中度与采购依赖风险分析"},
+        "output_key": "report",
+        "timeout_sec": 60,
+    },
+]
+
+
 # ── 模板注册表 ──────────────────────────────────────────────────────
 
 # 分析类型维度模板
@@ -461,6 +717,12 @@ _TEMPLATE_MAP: dict[AnalysisType, list[dict[str, Any]]] = {
     AnalysisType.PRICE_VARIANCE: _PRICE_VARIANCE_DAG,
     AnalysisType.PAYMENT_COMPLIANCE: _PAYMENT_COMPLIANCE_DAG,
     AnalysisType.SUPPLIER_PERFORMANCE: _SUPPLIER_PERFORMANCE_DAG,
+    AnalysisType.SPEND_ANALYSIS: _SPEND_ANALYSIS_DAG,
+    AnalysisType.RECEIPT_ANOMALY: _RECEIPT_ANOMALY_DAG,
+    AnalysisType.INVOICE_DUPLICATE: _INVOICE_DUPLICATE_DAG,
+    AnalysisType.DISCOUNT_UTILIZATION: _DISCOUNT_UTILIZATION_DAG,
+    AnalysisType.PO_CYCLE_TIME: _PO_CYCLE_TIME_DAG,
+    AnalysisType.VENDOR_CONCENTRATION: _VENDOR_CONCENTRATION_DAG,
 }
 
 # 实体维度模板（当有特定实体 + 综合/风险分析意图时使用）

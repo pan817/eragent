@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.logging_utils import get_logger
 from core.ontology.loader import OntologyLoader
 from core.ontology.reasoner import OntologyReasoner
+
+_logger = get_logger(__name__)
 
 
 _DEFAULT_ONTOLOGY_NARRATIVE = (
@@ -51,12 +54,48 @@ def get_ontology_context() -> str:
         return _DEFAULT_ONTOLOGY_NARRATIVE
 
 
+def trim_to_token_budget(text: str, max_tokens: int, label: str) -> str:
+    """将文本裁剪到 token 预算内。
+
+    超出预算时按比例截断并发出 WARNING 日志，供后续分析。
+    未超出时原样返回。
+
+    Args:
+        text: 待裁剪文本。
+        max_tokens: token 上限。
+        label: 日志标签（如 "短期记忆" / "长期记忆"），用于区分来源。
+
+    Returns:
+        裁剪后的文本。
+    """
+    if not text or max_tokens <= 0:
+        return text
+
+    from core.observability.middleware import estimate_tokens
+
+    current = estimate_tokens(text)
+    if current <= max_tokens:
+        return text
+
+    ratio = max_tokens / current
+    cut_len = int(len(text) * ratio)
+    trimmed = text[:cut_len]
+    _logger.warning(
+        "%s 超出 token 预算，已裁剪: %d → %d tokens (字符 %d → %d)",
+        label, current, max_tokens, len(text), cut_len,
+    )
+    return trimmed
+
+
 def format_long_term_memory(records: list[dict[str, Any]]) -> str:
     """把长期记忆检索结果渲染为一段可直接拼入 prompt 的文本。
 
     输入既可以是 ``LongTermMemory.search_memories`` 返回的 SQL 行字典,
     也可以是 ``search_reports_semantic`` 返回的向量库命中结果。空列表返回
     空字符串,调用方据此决定是否插入占位符。
+
+    输出文本在返回前会经过 token 预算裁剪（可通过配置关闭），
+    确保长期记忆不会占用过多 LLM 上下文窗口。
     """
     if not records:
         return ""
@@ -70,7 +109,23 @@ def format_long_term_memory(records: list[dict[str, Any]]) -> str:
         if len(content) > 300:
             content = content[:300] + "…"
         lines.append(f"{idx}. {content}")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+
+    # 集中裁剪：所有路径（ReAct / DAG）的长期记忆都经过此出口
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        if settings.memory.long_term_context_trim_enabled:
+            max_tokens = int(
+                settings.llm.context_window
+                * settings.memory.long_term_context_max_tokens_pct
+                / 100
+            )
+            text = trim_to_token_budget(text, max_tokens, "长期记忆")
+    except Exception:
+        pass  # 配置加载失败不阻塞，保留原始文本
+
+    return text
 
 
 def build_system_prompt(long_term_context: str = "") -> str:
@@ -120,6 +175,12 @@ def build_system_prompt(long_term_context: str = "") -> str:
 2. 调用相关查询工具获取基础数据
 3. 调用分析工具执行规则检查
 4. 综合分析结果，生成结构化报告
+
+## 对话历史处理
+当用户提到"上次""之前""刚才""上面"等引用之前对话的词汇时：
+- 如果消息中有 [对话历史-上一轮分析结果摘要]，直接基于该摘要回答，不要重新发起分析
+- 可以对摘要内容做总结、提取关键点、回答用户的具体追问
+- 如果摘要信息不足以回答用户的问题，再调用工具补充数据
 
 ## 本体知识上下文
 {ontology_context}

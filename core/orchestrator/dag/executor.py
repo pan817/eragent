@@ -38,8 +38,19 @@ class DAGExecutor:
         self._registry = registry
         self._report_agent = report_agent
 
-    async def execute(self, tasks: list[dict[str, Any]]) -> dict[str, Any]:
-        """执行 DAG 任务列表，记录完整执行过程到 trace。"""
+    async def execute(
+        self,
+        tasks: list[dict[str, Any]],
+        long_term_context: str = "",
+        output_mode_prompt: str = "",
+    ) -> dict[str, Any]:
+        """执行 DAG 任务列表，记录完整执行过程到 trace。
+
+        Args:
+            tasks: DAG 任务定义列表。
+            long_term_context: 长期记忆上下文文本，注入 ReportAgent 报告生成。
+            output_mode_prompt: 输出模式格式指令，注入 ReportAgent。
+        """
         start = time.monotonic()
         outputs: dict[str, str] = {}
         completed: list[str] = []
@@ -79,6 +90,8 @@ class DAGExecutor:
                                 self._report_agent.generate(
                                     scenario=task.get("inputs", {}).get("scenario", "分析"),
                                     outputs=outputs,
+                                    long_term_context=long_term_context,
+                                    output_mode_prompt=output_mode_prompt,
                                 ),
                                 timeout=timeout_sec,
                             )

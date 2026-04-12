@@ -30,8 +30,8 @@ class TestMockDataGenerator:
     def test_generate_receipts(self) -> None:
         """应为每个 PO 行生成收货记录。"""
         suppliers = self.gen.generate_suppliers(2)
-        _, lines, _ = self.gen.generate_purchase_orders(suppliers, 10)
-        rcv_h, rcv_t = self.gen.generate_receipts(lines)
+        headers, lines, _ = self.gen.generate_purchase_orders(suppliers, 10)
+        rcv_h, rcv_t = self.gen.generate_receipts(lines, headers)
         assert len(rcv_t) == 10
 
     def test_generate_invoices(self) -> None:

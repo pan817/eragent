@@ -25,6 +25,12 @@ class AnalysisType(str, Enum):
     PRICE_VARIANCE = "price_variance"
     PAYMENT_COMPLIANCE = "payment_compliance"
     SUPPLIER_PERFORMANCE = "supplier_performance"
+    SPEND_ANALYSIS = "spend_analysis"
+    RECEIPT_ANOMALY = "receipt_anomaly"
+    INVOICE_DUPLICATE = "invoice_duplicate"
+    DISCOUNT_UTILIZATION = "discount_utilization"
+    PO_CYCLE_TIME = "po_cycle_time"
+    VENDOR_CONCENTRATION = "vendor_concentration"
     COMPREHENSIVE = "comprehensive"
 
 
@@ -67,11 +73,26 @@ class AnalysisRequest(BaseModel):
         default=None,
         ge=1,
         le=365,
-        description="分析时间范围（天），不传则使用配置默认值",
+        description="分析时间范围（天），不传则使用配置默认值。time_range 优先级更高",
+    )
+    time_range: str | None = Field(
+        default=None,
+        pattern=r"^(\d+d|this_month|last_month)$",
+        description="时间窗口：7d/30d/90d/this_month/last_month，优先级高于 time_range_days",
     )
     analysis_type: AnalysisType | None = Field(
         default=None,
         description="分析类型，不传则由系统自动识别",
+    )
+    analyst_role: str = Field(
+        default="general",
+        pattern="^(general|procurement|finance|supply_chain|audit|management)$",
+        description="分析师角色，用于 L3 LLM 分类时提供角色偏好先验",
+    )
+    output_mode: str = Field(
+        default="detailed",
+        pattern="^(detailed|brief|table)$",
+        description="输出模式：detailed=详细报告, brief=简报摘要, table=数据表格",
     )
 
     # 会话持久化相关（Section 5）

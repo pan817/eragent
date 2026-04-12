@@ -32,6 +32,9 @@ from core.observability.store import RunEvent, SpanEvent, TraceStore, get_trace_
 # 默认 2000，可被 ObservabilitySettings.max_io_text 覆盖。
 _MAX_IO_TEXT_DEFAULT = 2000
 
+# token 估算默认比率（字符数 / 此比率 ≈ token 数，中文约 1.5）
+_DEFAULT_TOKEN_RATIO = 1.5
+
 
 def _max_io_text() -> int:
     try:
@@ -40,6 +43,26 @@ def _max_io_text() -> int:
         return get_settings().observability.max_io_text
     except Exception:
         return _MAX_IO_TEXT_DEFAULT
+
+
+def _token_estimate_ratio() -> float:
+    try:
+        from config.settings import get_settings
+
+        return get_settings().llm.token_estimate_ratio
+    except Exception:
+        return _DEFAULT_TOKEN_RATIO
+
+
+def estimate_tokens(text: str | None) -> int:
+    """根据字符数估算 token 数量。
+
+    使用可配置的字符/token 比率，适用于中文为主的文本。
+    不依赖外部 tokenizer，轻量且无第三方库依赖。
+    """
+    if not text:
+        return 0
+    return max(1, int(len(text) / _token_estimate_ratio()))
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +157,39 @@ class TimingMiddleware(AgentMiddleware):
             return
         finished_at = datetime.utcnow()
         total_ms = (time.monotonic() - ctx.started_monotonic) * 1000
+
+        # 汇总所有 model span 的 token 使用量
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        peak_prompt_tokens = 0
+        context_budget: dict[str, Any] | None = None
+        for sp in ctx.spans:
+            if sp.span_type == "model":
+                attrs = sp.attributes or {}
+                # TimingMiddleware: usage 嵌套在 output dict 内
+                # ReportAgent 手动 span: usage 在 attrs 顶层，output 是 string
+                output = attrs.get("output")
+                usage = output.get("usage") if isinstance(output, dict) else None
+                if not isinstance(usage, dict):
+                    usage = attrs.get("usage")
+                if isinstance(usage, dict):
+                    pt = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+                    ct = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+                    total_prompt_tokens += pt
+                    total_completion_tokens += ct
+                    if pt > peak_prompt_tokens:
+                        peak_prompt_tokens = pt
+            elif sp.span_type == "context_budget" and context_budget is None:
+                context_budget = sp.attributes
+
+        token_summary: dict[str, Any] = {
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "peak_prompt_tokens": peak_prompt_tokens,
+        }
+        if context_budget:
+            token_summary["context_budget"] = context_budget
+
         agent_span = SpanEvent(
             trace_id=ctx.trace_id,
             span_id=str(uuid.uuid4()),
@@ -148,6 +204,7 @@ class TimingMiddleware(AgentMiddleware):
                 "model_calls": ctx.model_count,
                 "tool_calls": ctx.tool_count,
                 "memory_calls": ctx.memory_count,
+                "token_summary": token_summary,
             },
             error=error,
         )
@@ -336,10 +393,47 @@ class TimingMiddleware(AgentMiddleware):
             or getattr(request.model, "model", None)
             or type(request.model).__name__
         )
+        total_chars = 0
+
+        # 1. system_message（独立字段，LLM 调用时合并到 messages 头部）
+        sys_msg = getattr(request, "system_message", None)
+        if sys_msg is not None:
+            sys_content = getattr(sys_msg, "content", "")
+            if isinstance(sys_content, str):
+                total_chars += len(sys_content)
+            elif sys_content is not None:
+                total_chars += len(str(sys_content))
+
+        # 2. messages（含 checkpointer 历史 + 注入消息 + 工具结果）
+        for m in request.messages or []:
+            content = getattr(m, "content", None)
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif content is not None:
+                total_chars += len(str(content))
+
+        # 3. tools（function schema，每次 LLM 调用都携带）
+        tool_schema_chars = 0
+        for t in request.tools or []:
+            tool_schema_chars += len(getattr(t, "name", "") or "")
+            tool_schema_chars += len(getattr(t, "description", "") or "")
+            schema = getattr(t, "args_schema", None)
+            if schema and callable(getattr(schema, "schema", None)):
+                import json
+                try:
+                    tool_schema_chars += len(
+                        json.dumps(schema.schema(), ensure_ascii=False)
+                    )
+                except Exception:
+                    pass
+
         return {
             "model": str(model_name),
             "message_count": len(request.messages or []),
             "tool_count": len(request.tools or []),
+            "estimated_input_tokens": estimate_tokens(
+                "x" * (total_chars + tool_schema_chars)
+            ),
         }
 
     @staticmethod

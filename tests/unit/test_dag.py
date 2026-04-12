@@ -27,12 +27,11 @@ class TestStubTools:
         """所有存根工具应返回空列表 JSON。"""
         from modules.p2p.tools import (
             query_material_master,
-            calculate_po_cycle_time,
             run_vendor_risk_scoring,
             check_approval_limits,
             check_blacklist,
         )
-        for tool in [query_material_master, calculate_po_cycle_time,
+        for tool in [query_material_master,
                      run_vendor_risk_scoring, check_approval_limits, check_blacklist]:
             result = await tool.ainvoke({})
             assert result == "[]"
@@ -66,8 +65,8 @@ class TestToolRegistry:
 
     def test_build_default_registry(self) -> None:
         reg = build_default_registry()
-        # 15 canonical + 5 aliases = 20
-        assert len(reg.tool_names) == 20
+        # 19 canonical + 5 aliases = 24
+        assert len(reg.tool_names) == 24
         # aliases resolve correctly
         assert reg.get("query_goods_receipts") is reg.get("query_receipts")
         assert reg.get("calculate_ppv") is reg.get("run_price_variance_analysis")

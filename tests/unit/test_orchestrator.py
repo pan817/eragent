@@ -178,12 +178,11 @@ class TestReferenceResolution:
         assert "po_number" not in entities
 
     def test_no_reference(self) -> None:
-        """无指代词时应全部补充。"""
+        """无指代词时不做隐式继承。"""
         ctx = {"has_history": True, "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("分析价格差异", ctx)
         assert enhanced == "分析价格差异"
-        assert "po_number" in entities
-        assert "supplier_id" in entities
+        assert entities == {}  # 无指代词，不继承任何实体
 
     def test_no_history(self) -> None:
         """无历史时原样返回。"""
@@ -273,9 +272,7 @@ class TestOrchestratorSessionContext:
     def test_load_context_no_checkpointer(self, settings: Settings) -> None:
         """checkpointer 不可用时应返回空上下文。"""
         orch = Orchestrator(settings=settings)
-        mock_agent = MagicMock()
-        mock_agent._checkpointer = None
-        orch._agent = mock_agent
+        orch._checkpointer = None
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -285,9 +282,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.return_value = None
-        mock_agent = MagicMock()
-        mock_agent._checkpointer = mock_checkpointer
-        orch._agent = mock_agent
+        orch._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -310,9 +305,7 @@ class TestOrchestratorSessionContext:
             }
         }
         mock_checkpointer.get_tuple.return_value = mock_tuple
-        mock_agent = MagicMock()
-        mock_agent._checkpointer = mock_checkpointer
-        orch._agent = mock_agent
+        orch._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is True
@@ -324,9 +317,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.side_effect = RuntimeError("db error")
-        mock_agent = MagicMock()
-        mock_agent._checkpointer = mock_checkpointer
-        orch._agent = mock_agent
+        orch._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -349,10 +340,7 @@ class TestOrchestratorSessionContext:
         mock_executor._registry = MagicMock()
         orch._dag_executor = mock_executor
 
-        # Mock agent (for checkpointer access)
-        mock_agent = MagicMock()
-        mock_agent._checkpointer = None
-        orch._agent = mock_agent
+        orch._checkpointer = None
 
         # Mock session context 返回 PO 号
         with patch.object(
@@ -391,16 +379,13 @@ class TestOrchestratorDAGShortTermMemory:
 
     @pytest.mark.asyncio
     async def test_dag_saves_to_short_term_memory(self, settings: Settings) -> None:
-        """DAG 执行后应将 query+report 写入 checkpointer。"""
+        """DAG 执行后应通过 agent.update_state 写入 checkpointer。"""
         orch = Orchestrator(settings=settings)
 
-        # Mock checkpointer
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.get_tuple.return_value = None  # 无历史
-        mock_checkpointer.put = MagicMock()
-
+        mock_agent_graph = MagicMock()
+        mock_agent_graph.update_state = MagicMock()
         mock_agent = MagicMock()
-        mock_agent._checkpointer = mock_checkpointer
+        mock_agent._get_or_build_agent.return_value = mock_agent_graph
         orch._agent = mock_agent
 
         await orch._save_dag_to_short_term_memory(
@@ -410,15 +395,18 @@ class TestOrchestratorDAGShortTermMemory:
             time_range_days=30,
         )
 
-        mock_checkpointer.put.assert_called_once()
+        mock_agent_graph.update_state.assert_called_once()
+        call_args = mock_agent_graph.update_state.call_args
+        assert call_args[0][0]["configurable"]["thread_id"] == "test-session"
+        messages = call_args[0][1]["messages"]
+        assert len(messages) == 2
 
     @pytest.mark.asyncio
     async def test_dag_short_term_memory_failure_not_blocking(self, settings: Settings) -> None:
-        """checkpointer 写入失败不应阻塞主流程。"""
+        """agent 不可用时不应阻塞主流程。"""
         orch = Orchestrator(settings=settings)
-
         mock_agent = MagicMock()
-        mock_agent._checkpointer = None  # checkpointer 不可用
+        mock_agent._get_or_build_agent.return_value = None
         orch._agent = mock_agent
 
         # 不应抛异常
@@ -526,3 +514,527 @@ class TestOrchestratorDAGPath:
             result = await orch.analyze(request)
 
         assert result.report_markdown == "react"
+
+
+# ============================================================
+# DAG 长期记忆读取 / 写入
+# ============================================================
+
+
+class TestOrchestratorDAGLongTermMemory:
+    """DAG 路径的长期记忆读取和写入覆盖测试。"""
+
+    @pytest.mark.asyncio
+    async def test_dag_loads_long_term_memory(self, settings: Settings) -> None:
+        """DAG 路径应在执行前读取长期记忆。"""
+        orch = Orchestrator(settings=settings)
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(return_value={
+            "status": "completed",
+            "outputs": {"report": "# Report"},
+            "completed_tasks": ["t1"],
+            "failed_tasks": {},
+            "report": "# Report",
+            "duration_sec": 1.0,
+        })
+        mock_executor._registry = MagicMock()
+        orch._dag_executor = mock_executor
+
+        signal = QuerySignal(
+            raw_query="分析三路匹配",
+            keywords=[AnalysisType.THREE_WAY_MATCH.value],
+            entities={},
+            route_level=1,
+            confidence=0.3,
+            reasoning="L1 test",
+        )
+
+        mock_ltm = MagicMock()
+        mock_ltm.search_memories.return_value = [
+            {"content": "历史记忆1", "attrs": {}},
+        ]
+
+        with (
+            patch.object(orch._intent_router, "route", return_value=signal),
+            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
+            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
+            patch("modules.p2p.prompts.format_long_term_memory", return_value="[历史] 记忆1"),
+        ):
+            MockValidator.return_value.validate.return_value = (True, None)
+            request = AnalysisRequest(query="分析三路匹配")
+            result = await orch.analyze(request)
+
+        # 验证 search_memories 被调用
+        mock_ltm.search_memories.assert_called_once()
+        # 验证 long_term_context 传入 executor.execute
+        call_kwargs = mock_executor.execute.call_args
+        assert call_kwargs.kwargs.get("long_term_context") == "[历史] 记忆1"
+
+    @pytest.mark.asyncio
+    async def test_dag_saves_long_term_memory(self, settings: Settings) -> None:
+        """DAG 路径应在执行后将结论写入长期记忆。"""
+        orch = Orchestrator(settings=settings)
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(return_value={
+            "status": "completed",
+            "outputs": {"report": "# Report"},
+            "completed_tasks": ["t1"],
+            "failed_tasks": {},
+            "report": "# DAG 分析报告",
+            "duration_sec": 1.0,
+        })
+        mock_executor._registry = MagicMock()
+        orch._dag_executor = mock_executor
+
+        signal = QuerySignal(
+            raw_query="分析价格差异",
+            keywords=[AnalysisType.PRICE_VARIANCE.value],
+            entities={},
+            route_level=1,
+            confidence=0.3,
+            reasoning="L1 test",
+        )
+
+        mock_ltm = MagicMock()
+        mock_ltm.search_memories.return_value = []
+
+        with (
+            patch.object(orch._intent_router, "route", return_value=signal),
+            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
+            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
+            patch("modules.p2p.prompts.format_long_term_memory", return_value=""),
+        ):
+            MockValidator.return_value.validate.return_value = (True, None)
+            request = AnalysisRequest(
+                query="分析价格差异", user_id="test-user"
+            )
+            result = await orch.analyze(request)
+
+        # 验证 save_memory 被调用
+        mock_ltm.save_memory.assert_called_once()
+        save_call = mock_ltm.save_memory.call_args
+        assert save_call.kwargs["user_id"] == "test-user"
+        assert save_call.kwargs["memory_type"] == "analysis_conclusion"
+        assert "价格差异" in save_call.kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_dag_long_term_memory_failure_non_blocking(
+        self, settings: Settings
+    ) -> None:
+        """长期记忆读取/写入失败不应阻塞 DAG 执行。"""
+        orch = Orchestrator(settings=settings)
+
+        mock_executor = MagicMock()
+        mock_executor.execute = AsyncMock(return_value={
+            "status": "completed",
+            "outputs": {"report": "# Report"},
+            "completed_tasks": ["t1"],
+            "failed_tasks": {},
+            "report": "# Report OK",
+            "duration_sec": 1.0,
+        })
+        mock_executor._registry = MagicMock()
+        orch._dag_executor = mock_executor
+
+        signal = QuerySignal(
+            raw_query="分析付款合规",
+            keywords=[AnalysisType.PAYMENT_COMPLIANCE.value],
+            entities={},
+            route_level=1,
+            confidence=0.3,
+            reasoning="L1 test",
+        )
+
+        mock_ltm = MagicMock()
+        mock_ltm.search_memories.side_effect = RuntimeError("DB down")
+        mock_ltm.save_memory.side_effect = RuntimeError("DB down")
+
+        with (
+            patch.object(orch._intent_router, "route", return_value=signal),
+            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
+            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
+        ):
+            MockValidator.return_value.validate.return_value = (True, None)
+            request = AnalysisRequest(query="分析付款合规")
+            result = await orch.analyze(request)
+
+        # 即使记忆操作失败，DAG 仍成功返回
+        assert result.status == AnalysisStatus.SUCCESS
+        assert result.report_markdown == "# Report OK"
+
+
+# ============================================================
+# 短期记忆截断
+# ============================================================
+
+
+class TestCheckpointerTruncation:
+    """checkpointer 历史消息截断测试。"""
+
+    def test_truncate_no_checkpointer(self, settings: Settings) -> None:
+        """无 checkpointer 时静默跳过。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        agent._checkpointer = None
+        # 不应抛异常
+        agent._truncate_checkpointer_history("s1", 20)
+
+    def test_truncate_under_limit(self, settings: Settings) -> None:
+        """消息数未超限时不截断。"""
+        from modules.p2p.agent import P2PAgent
+        from langchain_core.messages import HumanMessage, AIMessage
+
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+        mock_tuple = MagicMock()
+        mock_tuple.checkpoint = {
+            "channel_values": {"messages": [HumanMessage(content="q"), AIMessage(content="a")]},
+        }
+        mock_tuple.metadata = {"step": 1}
+        mock_cp.get_tuple.return_value = mock_tuple
+        agent._checkpointer = mock_cp
+
+        agent._truncate_checkpointer_history("s1", 20)
+        mock_cp.put.assert_not_called()  # 未超限，不写回
+
+    def test_truncate_over_limit(self, settings: Settings) -> None:
+        """消息数超限时应截断到最近 N 条。"""
+        from modules.p2p.agent import P2PAgent
+        from langchain_core.messages import HumanMessage, AIMessage
+
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+
+        # 30 条消息，限制 10
+        messages = [HumanMessage(content=f"q{i}") if i % 2 == 0 else AIMessage(content=f"a{i}") for i in range(30)]
+        mock_tuple = MagicMock()
+        mock_tuple.checkpoint = {
+            "id": "old",
+            "channel_values": {"messages": messages},
+        }
+        mock_tuple.metadata = {"step": 5}
+        mock_cp.get_tuple.return_value = mock_tuple
+        agent._checkpointer = mock_cp
+
+        agent._truncate_checkpointer_history("s1", 10)
+
+        mock_cp.put.assert_called_once()
+        call_args = mock_cp.put.call_args
+        written_checkpoint = call_args[0][1]
+        written_messages = written_checkpoint["channel_values"]["messages"]
+        assert len(written_messages) == 10
+        # 应保留最后 10 条
+        assert written_messages[0].content == "q20"
+
+    def test_truncate_failure_non_blocking(self, settings: Settings) -> None:
+        """截断失败不应抛异常。"""
+        from modules.p2p.agent import P2PAgent
+
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+        mock_cp.get_tuple.side_effect = RuntimeError("db error")
+        agent._checkpointer = mock_cp
+
+        # 不应抛异常
+        agent._truncate_checkpointer_history("s1", 10)
+
+
+# ============================================================
+# _estimate_checkpointer_tokens
+# ============================================================
+
+
+class TestEstimateCheckpointerTokens:
+    """checkpointer 历史消息 token 估算测试。"""
+
+    def test_no_checkpointer(self, settings: Settings) -> None:
+        """无 checkpointer 时返回 (0, 0)。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        agent._checkpointer = None
+        tokens, count = agent._estimate_checkpointer_tokens("s1")
+        assert tokens == 0
+        assert count == 0
+
+    def test_empty_history(self, settings: Settings) -> None:
+        """空历史返回 (0, 0)。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+        mock_cp.get_tuple.return_value = None
+        agent._checkpointer = mock_cp
+        tokens, count = agent._estimate_checkpointer_tokens("s1")
+        assert tokens == 0
+        assert count == 0
+
+    def test_with_messages(self, settings: Settings) -> None:
+        """有历史消息时应返回正整数。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+        from modules.p2p.agent import P2PAgent
+
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+        mock_tuple = MagicMock()
+        mock_tuple.checkpoint = {
+            "channel_values": {
+                "messages": [
+                    HumanMessage(content="查询 SUP-001 的绩效"),
+                    AIMessage(content="SUP-001 准时交付率 92%，详细报告如下..." * 10),
+                ]
+            }
+        }
+        mock_cp.get_tuple.return_value = mock_tuple
+        agent._checkpointer = mock_cp
+
+        tokens, count = agent._estimate_checkpointer_tokens("s1")
+        assert tokens > 0
+        assert count == 2
+
+    def test_failure_returns_zero(self, settings: Settings) -> None:
+        """异常时返回 (0, 0)，不抛异常。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        mock_cp = MagicMock()
+        mock_cp.get_tuple.side_effect = RuntimeError("db error")
+        agent._checkpointer = mock_cp
+        tokens, count = agent._estimate_checkpointer_tokens("s1")
+        assert tokens == 0
+        assert count == 0
+
+
+# ============================================================
+# _estimate_tool_definitions_tokens
+# ============================================================
+
+
+class TestEstimateToolDefinitionsTokens:
+    """工具定义 schema token 估算测试。"""
+
+    def test_returns_positive(self, settings: Settings) -> None:
+        """8 个工具的 schema 应有正数 token。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        tokens = agent._estimate_tool_definitions_tokens()
+        assert tokens > 0
+        assert isinstance(tokens, int)
+
+    def test_cached(self, settings: Settings) -> None:
+        """第二次调用应命中缓存，结果相同。"""
+        from modules.p2p.agent import P2PAgent
+        agent = P2PAgent(settings=settings)
+        t1 = agent._estimate_tool_definitions_tokens()
+        t2 = agent._estimate_tool_definitions_tokens()
+        assert t1 == t2
+        assert hasattr(agent, "_tool_definitions_tokens_cache")
+
+
+# ============================================================
+# DAG context_budget 记录
+# ============================================================
+
+
+class TestDAGContextBudget:
+    """DAG 路径 context_budget span 测试。"""
+
+    def test_record_dag_context_budget_emits_span(self, settings: Settings) -> None:
+        """_record_dag_context_budget 应在活跃 trace 中记录 context_budget span。"""
+        from core.observability.middleware import TimingMiddleware, _current_trace
+
+        orch = Orchestrator(settings=settings)
+        mw = orch._timing_middleware
+        mw._print = False
+        mw.start_run()
+
+        orch._record_dag_context_budget(
+            long_term_context="历史分析结论：SUP-001 交货准时率下降",
+            query="分析价格差异",
+        )
+
+        ctx = _current_trace.get()
+        budget_spans = [s for s in ctx.spans if s.span_type == "context_budget"]
+        assert len(budget_spans) == 1
+        attrs = budget_spans[0].attributes
+        assert attrs["route_type"] == "DAG"
+        assert attrs["long_term_memory_tokens"] > 0
+        assert attrs["user_message_tokens"] > 0
+        assert attrs["model_context_limit"] == settings.llm.context_window
+        assert 0 <= attrs["budget_usage_pct"] <= 100
+
+        mw.finish_run()
+
+    def test_record_dag_context_budget_no_memory(self, settings: Settings) -> None:
+        """无长期记忆时 long_term_memory_tokens 应为 0。"""
+        from core.observability.middleware import _current_trace
+
+        orch = Orchestrator(settings=settings)
+        mw = orch._timing_middleware
+        mw._print = False
+        mw.start_run()
+
+        orch._record_dag_context_budget(
+            long_term_context="",
+            query="分析三路匹配",
+        )
+
+        ctx = _current_trace.get()
+        budget_spans = [s for s in ctx.spans if s.span_type == "context_budget"]
+        assert len(budget_spans) == 1
+        assert budget_spans[0].attributes["long_term_memory_tokens"] == 0
+
+        mw.finish_run()
+
+
+# ============================================================
+# trim_to_token_budget
+# ============================================================
+
+
+class TestTrimToTokenBudget:
+    """trim_to_token_budget 集中裁剪函数测试。"""
+
+    def test_within_budget_no_trim(self) -> None:
+        """未超预算时原样返回。"""
+        from modules.p2p.prompts import trim_to_token_budget
+        text = "短文本"
+        assert trim_to_token_budget(text, 1000, "测试") == text
+
+    def test_exceeds_budget_trimmed(self) -> None:
+        """超出预算时应裁剪，返回更短的文本。"""
+        from modules.p2p.prompts import trim_to_token_budget
+        long_text = "这是一段非常长的记忆内容" * 500  # ~5000 字符
+        result = trim_to_token_budget(long_text, 100, "测试")
+        assert len(result) < len(long_text)
+        assert len(result) > 0
+
+    def test_empty_text(self) -> None:
+        """空文本应原样返回。"""
+        from modules.p2p.prompts import trim_to_token_budget
+        assert trim_to_token_budget("", 100, "测试") == ""
+        assert trim_to_token_budget(None, 100, "测试") is None
+
+    def test_zero_budget(self) -> None:
+        """预算为 0 时应原样返回（不做裁剪）。"""
+        from modules.p2p.prompts import trim_to_token_budget
+        text = "一些文本"
+        assert trim_to_token_budget(text, 0, "测试") == text
+
+
+# ============================================================
+# format_long_term_memory 集成裁剪
+# ============================================================
+
+
+class TestFormatLongTermMemoryTrim:
+    """format_long_term_memory 中的集中裁剪测试。"""
+
+    def test_normal_records_within_budget(self) -> None:
+        """正常长度的记录应不被裁剪。"""
+        from modules.p2p.prompts import format_long_term_memory
+        records = [
+            {"content": "分析结论：SUP-001 准时率 92%"},
+            {"content": "分析结论：价格差异 3 笔"},
+        ]
+        result = format_long_term_memory(records)
+        assert "SUP-001" in result
+        assert "价格差异" in result
+
+    def test_very_long_records_trimmed(self) -> None:
+        """超长记录拼接后应被裁剪到预算内。"""
+        from modules.p2p.prompts import format_long_term_memory
+        from core.observability.middleware import estimate_tokens
+        from config.settings import get_settings
+
+        settings = get_settings()
+        max_tokens = int(
+            settings.llm.context_window
+            * settings.memory.long_term_context_max_tokens_pct
+            / 100
+        )
+
+        # 构造超出预算的大量记录（每条 300 字符 × 50 条 = 15000 字符）
+        records = [{"content": f"分析{i}: " + "详细内容" * 40} for i in range(50)]
+        result = format_long_term_memory(records)
+
+        result_tokens = estimate_tokens(result)
+        assert result_tokens <= max_tokens + 1  # 允许 1 token 误差
+
+    def test_trim_disabled_no_cut(self) -> None:
+        """关闭裁剪开关时不应裁剪。"""
+        from modules.p2p.prompts import format_long_term_memory
+
+        records = [{"content": "分析: " + "长内容" * 50} for _ in range(50)]
+
+        mock_settings = MagicMock()
+        mock_settings.memory.long_term_context_trim_enabled = False
+
+        with patch(
+            "config.settings.get_settings", return_value=mock_settings
+        ):
+            result = format_long_term_memory(records)
+
+        # 关闭裁剪时应保留完整文本
+        assert len(result) > 0
+
+
+# ============================================================
+# _load_session_context 短期记忆裁剪
+# ============================================================
+
+
+class TestSessionContextTrim:
+    """_load_session_context 中短期记忆集中裁剪测试。"""
+
+    def test_short_context_no_trim(self, settings: Settings) -> None:
+        """短摘要不应被裁剪。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        orch = Orchestrator(settings=settings)
+        mock_cp = MagicMock()
+        mock_tuple = MagicMock()
+        mock_tuple.checkpoint = {
+            "channel_values": {
+                "messages": [
+                    HumanMessage(content="查询 SUP-001"),
+                    AIMessage(content="SUP-001 准时率 95%"),
+                ]
+            }
+        }
+        mock_cp.get_tuple.return_value = mock_tuple
+        orch._checkpointer = mock_cp
+
+        ctx = orch._load_session_context("s1")
+        assert ctx["context_summary"] == "SUP-001 准时率 95%"
+
+    def test_very_long_context_trimmed(self, settings: Settings) -> None:
+        """超长 AI 回复应被裁剪到 token 预算内。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+        from core.observability.middleware import estimate_tokens
+
+        orch = Orchestrator(settings=settings)
+        mock_cp = MagicMock()
+        # 构造超长 AI 回复（~30000 字符 >> 15% of 32768 tokens）
+        long_response = "分析报告内容详情" * 3000
+        mock_tuple = MagicMock()
+        mock_tuple.checkpoint = {
+            "channel_values": {
+                "messages": [
+                    HumanMessage(content="分析所有数据"),
+                    AIMessage(content=long_response),
+                ]
+            }
+        }
+        mock_cp.get_tuple.return_value = mock_tuple
+        orch._checkpointer = mock_cp
+
+        ctx = orch._load_session_context("s1")
+        summary = ctx["context_summary"]
+
+        max_tokens = int(
+            settings.llm.context_window
+            * settings.memory.short_term_context_max_tokens_pct
+            / 100
+        )
+        assert estimate_tokens(summary) <= max_tokens + 1
+        assert len(summary) < len(long_response)

@@ -52,11 +52,15 @@ def build_default_registry() -> ToolRegistry:
     调用时才导入 tools 模块，避免模块级循环依赖。
     """
     from modules.p2p.tools import (
+        analyze_discount_utilization,
+        analyze_receipt_anomalies,
+        analyze_vendor_concentration,
+        calculate_po_cycle_time,
         calculate_spend_analysis,
         calculate_supplier_kpis,
-        calculate_po_cycle_time,
         check_approval_limits,
         check_blacklist,
+        detect_duplicate_invoices,
         query_invoices,
         query_payments,
         query_purchase_orders,
@@ -84,9 +88,14 @@ def build_default_registry() -> ToolRegistry:
         # Phase 2 新增
         ("query_vendor_master", query_vendor_master),
         ("calculate_spend_analysis", calculate_spend_analysis),
+        # 第一梯队新增工具
+        ("analyze_receipt_anomalies", analyze_receipt_anomalies),
+        ("detect_duplicate_invoices", detect_duplicate_invoices),
+        ("analyze_discount_utilization", analyze_discount_utilization),
+        ("calculate_po_cycle_time", calculate_po_cycle_time),
+        ("analyze_vendor_concentration", analyze_vendor_concentration),
         # 存根
         ("query_material_master", query_material_master),
-        ("calculate_po_cycle_time", calculate_po_cycle_time),
         ("run_vendor_risk_scoring", run_vendor_risk_scoring),
         ("check_approval_limits", check_approval_limits),
         ("check_blacklist", check_blacklist),

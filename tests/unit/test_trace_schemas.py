@@ -102,6 +102,35 @@ class TestRunOut:
         assert r.session_id is None
         assert r.user_id is None
         assert r.error == "crash"
+        assert r.token_summary is None
+
+    def test_with_token_summary(self) -> None:
+        ts = {
+            "total_prompt_tokens": 5000,
+            "total_completion_tokens": 1000,
+            "peak_prompt_tokens": 3000,
+            "context_budget": {
+                "system_prompt_tokens": 800,
+                "long_term_memory_tokens": 500,
+                "short_term_memory_tokens": 200,
+            },
+        }
+        r = RunOut(
+            trace_id="tr3",
+            agent_name="agent",
+            session_id="s1",
+            user_id="u1",
+            status="ok",
+            started_at=NOW,
+            finished_at=NOW,
+            duration_ms=100.0,
+            model_call_count=2,
+            tool_call_count=1,
+            token_summary=ts,
+        )
+        assert r.token_summary is not None
+        assert r.token_summary["total_prompt_tokens"] == 5000
+        assert "context_budget" in r.token_summary
 
 
 class TestRunDetailOut:

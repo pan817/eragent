@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
@@ -165,7 +165,10 @@ class ChatRepository:
             rows = s.execute(
                 select(chat_messages_table)
                 .where(chat_messages_table.c.session_id == session_id)
-                .order_by(chat_messages_table.c.created_at.desc())
+                .order_by(
+                    chat_messages_table.c.created_at.desc(),
+                    chat_messages_table.c.id.desc(),
+                )
                 .limit(message_limit)
             ).fetchall()
 
@@ -300,7 +303,7 @@ class ChatRepository:
                 chat_messages_table.c.session_id == session_id,
                 chat_messages_table.c.role == "user",
             )
-            .order_by(chat_messages_table.c.created_at)
+            .order_by(chat_messages_table.c.created_at, chat_messages_table.c.id)
             .limit(1)
         ).fetchone()
         if row and row.content:
@@ -382,13 +385,14 @@ class ChatRepository:
 
             now = _now()
             created_msgs = []
-            for msg in messages:
+            for i, msg in enumerate(messages):
                 content = msg["content"]
                 if len(content.encode("utf-8")) > _MAX_CONTENT_BYTES:
                     raise ValueError(
                         f"CONTENT_TOO_LARGE: 消息内容超过 {_MAX_CONTENT_BYTES // 1024}KB"
                     )
                 mid = _new_id()
+                ts = now + timedelta(microseconds=i)
                 s.execute(
                     chat_messages_table.insert().values(
                         id=mid,
@@ -399,7 +403,7 @@ class ChatRepository:
                         duration_ms=msg.get("duration_ms"),
                         trace_id=msg.get("trace_id"),
                         metadata_=msg.get("metadata"),
-                        created_at=now,
+                        created_at=ts,
                     )
                 )
                 created_msgs.append({
@@ -411,7 +415,7 @@ class ChatRepository:
                     "status": msg.get("status", "success"),
                     "duration_ms": msg.get("duration_ms"),
                     "trace_id": msg.get("trace_id"),
-                    "created_at": now.isoformat(),
+                    "created_at": ts.isoformat(),
                     "metadata": msg.get("metadata"),
                 })
 
@@ -500,7 +504,10 @@ class ChatRepository:
                 last_msg = s.execute(
                     select(chat_messages_table.c.id)
                     .where(chat_messages_table.c.session_id == session_id)
-                    .order_by(chat_messages_table.c.created_at.desc())
+                    .order_by(
+                        chat_messages_table.c.created_at.desc(),
+                        chat_messages_table.c.id.desc(),
+                    )
                     .limit(1)
                 ).fetchone()
                 if last_msg and last_msg.id == message_id:

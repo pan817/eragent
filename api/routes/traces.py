@@ -35,7 +35,12 @@ def list_traces(
         limit=limit,
         offset=offset,
     )
-    return [RunOut.model_validate(r) for r in runs]
+    result: list[RunOut] = []
+    for r in runs:
+        out = RunOut.model_validate(r)
+        out.token_summary = store.get_token_summary(r.trace_id)
+        result.append(out)
+    return result
 
 
 @router.get("/stats", response_model=list[StatRow])
@@ -92,7 +97,9 @@ def get_trace(trace_id: str) -> RunDetailOut:
     if found is None:
         raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
     run, spans = found
-    return RunDetailOut(
+    out = RunDetailOut(
         **RunOut.model_validate(run).model_dump(),
         spans=[SpanOut.model_validate(s) for s in spans],
     )
+    out.token_summary = store.get_token_summary(trace_id)
+    return out

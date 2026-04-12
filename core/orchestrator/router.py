@@ -31,6 +31,134 @@ _SEEDS_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "intent
 # Chroma collection 名
 _SEEDS_COLLECTION = "intent_seeds"
 
+# ── 分析师角色描述（L3 LLM prompt 注入） ─────────────────────────────
+
+_ROLE_DESCRIPTIONS: dict[str, str] = {
+    "general": "",
+    "procurement": (
+        "采购分析师，重点关注采购订单、价格差异、供应商选择、"
+        "采购支出和三路匹配等采购执行层面的问题。"
+    ),
+    "finance": (
+        "财务合规人员，重点关注付款逾期、折扣利用率、发票重复、"
+        "付款合规和资金风险等财务层面的问题。"
+    ),
+    "supply_chain": (
+        "供应链经理，重点关注供应商绩效、交期、收货异常、"
+        "供应商集中度和采购周期等供应链层面的问题。"
+    ),
+    "audit": (
+        "审计人员，重点关注发票重复、付款合规、三路匹配异常、"
+        "折扣滥用等合规审计层面的问题。"
+    ),
+    "management": (
+        "管理层，重点关注采购支出趋势、供应商集中度、"
+        "供应商绩效全局概览等战略层面的问题。"
+    ),
+}
+
+
+# ── 非分析意图检测（方案 C：跳过 L1/L2，直达 L3）──────────────────────
+
+# 回溯/对话引用模式——命中后还需检查是否含分析关键词
+_RECALL_PATTERNS: list[re.Pattern[str]] = [
+    # 时间指代回溯（"之前/刚才/前面"等既可能是回溯也可能是时间范围）
+    re.compile(
+        r"上次|上一次|刚才|刚刚|方才|最后一次|上回|earlier|last time",
+        re.IGNORECASE,
+    ),
+    # 结果/内容回溯
+    re.compile(
+        r"结果呢|说的什么|分析了什么|做了什么|讲了什么|提到的|得出的结论|"
+        r"结论是什么|报告呢|看看结果|查看结果|显示结果",
+    ),
+    # 重复/总结请求
+    re.compile(
+        r"再说一遍|重复一下|总结一下|回顾一下|概括一下|复述|"
+        r"再讲一遍|重新说|帮我回忆",
+    ),
+]
+
+# 含歧义的回溯词（需要排除"时间范围"用法后才判为回溯）
+_AMBIGUOUS_RECALL_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"之前|前面|previous", re.IGNORECASE),
+]
+
+# 非回溯类 bypass：闲聊/能力询问/否定/确认（直接 bypass，无需二次校验）
+_DIRECT_BYPASS_PATTERNS: list[re.Pattern[str]] = [
+    # 闲聊/问候/感谢
+    re.compile(r"^(你好|您好|hello|hi|hey|谢谢|感谢|thanks|thank you|再见|拜拜|bye)\s*[!！。.]*$", re.IGNORECASE),
+    # 能力/帮助询问
+    re.compile(
+        r"你能做什么|你会什么|有什么功能|怎么用|帮助|help|"
+        r"支持哪些|可以做什么|有哪些分析",
+    ),
+    # 否定/取消
+    re.compile(r"^(不需要了|算了|取消|不用了|没事了|好的|知道了|明白了|ok|okay)\s*[。.!！]*$", re.IGNORECASE),
+    # 纯确认/追问（无实质分析内容）
+    re.compile(r"^(是的|对|嗯|好|可以|继续|然后呢|接下来呢|还有呢|详细说说)\s*[？?。.!！]*$"),
+]
+
+# 分析关键词——查询中含这些词说明用户有具体分析意图，不应被 bypass
+_ANALYSIS_KEYWORDS: set[str] = {
+    # 分析动词
+    "分析", "检查", "查看", "查询", "评估", "计算", "统计", "对比", "比较", "审查",
+    "analyze", "check", "review", "evaluate", "calculate",
+    # 数据对象
+    "订单", "采购", "供应商", "发票", "付款", "收货", "价格", "三路匹配",
+    "po", "supplier", "invoice", "payment", "receipt",
+    # 时间范围修饰
+    "天", "月", "年", "季度", "周",
+    "days", "months", "month", "year", "week",
+    # 业务关键词
+    "异常", "差异", "逾期", "合规", "绩效", "kpi", "支出", "折扣",
+    "重复", "周期", "集中度", "风险",
+}
+
+# L2 置信度长度比打折阈值（方案 D）
+_L2_LENGTH_RATIO_THRESHOLD = 0.4
+_L2_LENGTH_RATIO_DISCOUNT = 0.7
+
+
+def _has_analysis_keywords(query: str) -> bool:
+    """检查 query 中是否包含分析关键词。"""
+    q_lower = query.lower()
+    return any(kw in q_lower for kw in _ANALYSIS_KEYWORDS)
+
+
+def _is_non_analysis_query(query: str) -> bool:
+    """检测 query 是否为非分析意图（会话回溯/闲聊/操作指令等）。
+
+    判断逻辑：
+    1. 直接 bypass 类（闲聊/能力询问/否定/确认）→ 直接返回 True
+    2. 明确回溯类（上次/刚才/结果呢/再说一遍）→ 直接返回 True
+       （"上次分析的结果呢"中的"分析"是回溯上下文，不是分析指令）
+    3. 歧义回溯类（之前/前面/previous）→ 不含分析关键词时返回 True
+       （"分析之前30天的价格差异"中"之前"是时间修饰，不是回溯）
+    4. 其余 → 返回 False
+    """
+    q = query.strip()
+
+    # 直接 bypass 类
+    for pattern in _DIRECT_BYPASS_PATTERNS:
+        if pattern.search(q):
+            return True
+
+    # 明确回溯类：语义明确是回溯，直接 bypass（不做分析关键词校验）
+    for pattern in _RECALL_PATTERNS:
+        if pattern.search(q):
+            return True
+
+    # 歧义回溯类：需要排除"时间范围修饰"用法
+    for pattern in _AMBIGUOUS_RECALL_PATTERNS:
+        if pattern.search(q):
+            if not _has_analysis_keywords(q):
+                return True
+            return False  # 含分析关键词（如"分析之前30天的价格差异"），不 bypass
+
+    return False
+
+
 # ── Level 1 规则库 ────────────────────────────────────────────────────
 
 _RULE_LIBRARY: list[dict[str, Any]] = [
@@ -66,59 +194,105 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         },
         "threshold": 0.15,
     },
+    {
+        "analysis_type": AnalysisType.SPEND_ANALYSIS,
+        "keywords": {
+            "支出", "spend", "采购金额", "花费", "费用",
+            "品类", "支出分布", "采购额", "开支",
+        },
+        "threshold": 0.15,
+    },
+    {
+        "analysis_type": AnalysisType.RECEIPT_ANOMALY,
+        "keywords": {
+            "收货", "超量", "拒收", "退货", "延迟收货",
+            "receipt", "过量", "短缺", "入库异常",
+        },
+        "threshold": 0.15,
+    },
+    {
+        "analysis_type": AnalysisType.INVOICE_DUPLICATE,
+        "keywords": {
+            "重复发票", "duplicate", "重复", "相同发票",
+            "发票", "重复开票", "重复付款",
+        },
+        "threshold": 0.20,
+    },
+    {
+        "analysis_type": AnalysisType.DISCOUNT_UTILIZATION,
+        "keywords": {
+            "折扣", "discount", "早付", "提前付款折扣",
+            "折扣利用", "现金折扣", "节省",
+        },
+        "threshold": 0.15,
+    },
+    {
+        "analysis_type": AnalysisType.PO_CYCLE_TIME,
+        "keywords": {
+            "周期", "cycle", "耗时", "时效",
+            "从下单到", "处理时间", "lead time", "效率",
+        },
+        "threshold": 0.15,
+    },
+    {
+        "analysis_type": AnalysisType.VENDOR_CONCENTRATION,
+        "keywords": {
+            "集中度", "依赖", "concentration", "单一来源",
+            "供应商", "占比", "垄断", "多元化",
+        },
+        "threshold": 0.20,
+    },
 ]
 
 
 # ── 参数提取（复用原 IntentParser 逻辑） ─────────────────────────────
 
-def _extract_params(query: str) -> dict[str, Any]:
+def _extract_params(
+    query: str,
+    entity_patterns: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
     """从查询文本中用正则提取业务参数。
 
-    支持的实体类型：
-    - supplier_id: SUP-001, S-001
-    - po_number: PO-2024-0001
-    - invoice_number: INV-2024-0001
-    - payment_number: PAY-2024-0001
-    - receipt_number: RCV-2024-0001
-    - days: 最近30天, past 90 days
+    正则模式从 config.yaml 的 analysis.entity_patterns 读取，
+    支持每个客户按自己的 EBS 编号格式配置。
+    每个实体类型支持多个正则（按顺序尝试，首个匹配即返回）。
+
+    Args:
+        query: 用户查询文本。
+        entity_patterns: 实体正则配置，为 None 时使用默认模式。
     """
+    if entity_patterns is None:
+        entity_patterns = _DEFAULT_ENTITY_PATTERNS
+
     params: dict[str, Any] = {}
 
-    # 供应商编号：SUP-xxx 或 S+数字
-    supplier_match = re.search(r"(?:SUP|sup|S)-?\d+[-\w]*", query)
-    if supplier_match:
-        params["supplier_id"] = supplier_match.group()
-
-    # 采购订单号：PO-xxx
-    po_match = re.search(r"(?:PO|po)-?[\d][\d\w-]*", query)
-    if po_match:
-        params["po_number"] = po_match.group()
-
-    # 发票号：INV-xxx
-    inv_match = re.search(r"(?:INV|inv)-?[\d][\d\w-]*", query)
-    if inv_match:
-        params["invoice_number"] = inv_match.group()
-
-    # 付款单号：PAY-xxx
-    pay_match = re.search(r"(?:PAY|pay)-?[\d][\d\w-]*", query)
-    if pay_match:
-        params["payment_number"] = pay_match.group()
-
-    # 收货单号：RCV-xxx
-    rcv_match = re.search(r"(?:RCV|rcv)-?[\d][\d\w-]*", query)
-    if rcv_match:
-        params["receipt_number"] = rcv_match.group()
-
-    # 天数：中文 "最近N天" 或英文 "past/last N days"
-    days_match = re.search(r"(?:最近|过去|近)\s*(\d+)\s*天", query)
-    if not days_match:
-        days_match = re.search(
-            r"(?:past|last|recent)\s+(\d+)\s*days?", query, re.IGNORECASE
-        )
-    if days_match:
-        params["days"] = int(days_match.group(1))
+    for entity_name, patterns in entity_patterns.items():
+        for pat_str in patterns:
+            try:
+                match = re.search(pat_str, query, re.IGNORECASE)
+            except re.error:
+                _logger.warning("invalid entity pattern for %s: %s", entity_name, pat_str)
+                continue
+            if match:
+                if entity_name == "days":
+                    # days 用捕获组提取数字
+                    params["days"] = int(match.group(1))
+                else:
+                    params[entity_name] = match.group()
+                break  # 首个匹配即返回
 
     return params
+
+
+# 默认实体正则（与 AnalysisSettings.entity_patterns 一致）
+_DEFAULT_ENTITY_PATTERNS: dict[str, list[str]] = {
+    "po_number": [r"PO-\d[\da-zA-Z_-]*\d", r"PO-\d+"],
+    "supplier_id": [r"SUP-\d+"],
+    "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
+    "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
+    "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+"],
+    "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
+}
 
 
 class IntentRouter:
@@ -136,9 +310,9 @@ class IntentRouter:
 
     # ── 公开接口 ───────────────────────────────────────────────────
 
-    def route(self, query: str) -> QuerySignal:
+    def route(self, query: str, analyst_role: str = "general") -> QuerySignal:
         """路由查询，返回完整的 QuerySignal（供 Orchestrator DAG 分支使用）。"""
-        signal = self._route(query)
+        signal = self._route(query, analyst_role=analyst_role)
         _logger.info(
             "intent routed: level=%d type=%s confidence=%.3f reason=%s",
             signal.route_level,
@@ -167,45 +341,50 @@ class IntentRouter:
 
     # ── 核心路由 ─────────────────────────────────────────────────────
 
-    def _route(self, query: str) -> QuerySignal:
+    def _route(self, query: str, analyst_role: str = "general") -> QuerySignal:
         """三级路由主逻辑，记录完整决策过程到 trace。"""
         from core.observability.middleware import record_span
 
-        params = _extract_params(query)
+        params = _extract_params(query, self._settings.analysis.entity_patterns)
         trace_data: dict[str, Any] = {
             "query": query,
             "params_regex": params.copy(),
         }
 
         with record_span("intent", "route_decision") as attrs:
-            # Level 1：关键词命中率
-            l1_scores = self._evaluate_all_rules(query)
-            trace_data["l1_scores"] = l1_scores
+            # 前置过滤：非分析意图的查询（回溯/闲聊/操作指令）跳过 L1/L2
+            bypass = _is_non_analysis_query(query)
+            trace_data["bypass_l1_l2"] = bypass
 
-            signal = self._try_level1(query, params)
-            if signal is not None:
-                trace_data["hit_level"] = 1
-                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                trace_data["confidence"] = signal.confidence
-                trace_data["reasoning"] = signal.reasoning
-                attrs.update(trace_data)
-                return signal
+            if not bypass:
+                # Level 1：关键词命中率
+                l1_scores = self._evaluate_all_rules(query)
+                trace_data["l1_scores"] = l1_scores
 
-            # Level 2：Chroma 语义匹配
-            l2_results = self._search_seeds_for_trace(query)
-            trace_data["l2_results"] = l2_results
+                signal = self._try_level1(query, params)
+                if signal is not None:
+                    trace_data["hit_level"] = 1
+                    trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                    trace_data["confidence"] = signal.confidence
+                    trace_data["reasoning"] = signal.reasoning
+                    attrs.update(trace_data)
+                    return signal
 
-            signal = self._try_level2(query, params)
-            if signal is not None:
-                trace_data["hit_level"] = 2
-                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                trace_data["confidence"] = signal.confidence
-                trace_data["reasoning"] = signal.reasoning
-                attrs.update(trace_data)
-                return signal
+                # Level 2：Chroma 语义匹配
+                l2_results = self._search_seeds_for_trace(query)
+                trace_data["l2_results"] = l2_results
 
-            # Level 3：LLM 分类
-            signal = self._try_level3(query, params)
+                signal = self._try_level2(query, params)
+                if signal is not None:
+                    trace_data["hit_level"] = 2
+                    trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                    trace_data["confidence"] = signal.confidence
+                    trace_data["reasoning"] = signal.reasoning
+                    attrs.update(trace_data)
+                    return signal
+
+            # Level 3：LLM 分类（注入角色偏好）
+            signal = self._try_level3(query, params, analyst_role=analyst_role)
             trace_data["hit_level"] = 3
             trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
             trace_data["confidence"] = signal.confidence
@@ -353,6 +532,17 @@ class IntentRouter:
         # Chroma cosine distance → similarity = 1 - distance
         similarity = 1.0 - distance
 
+        # 方案 D：query 远短于种子文本时，相似度可能虚高，打折处理
+        seed_text: str = best.get("text", "")
+        length_ratio = len(query) / max(len(seed_text), 1)
+        if length_ratio < _L2_LENGTH_RATIO_THRESHOLD:
+            original = similarity
+            similarity *= _L2_LENGTH_RATIO_DISCOUNT
+            _logger.debug(
+                "L2 length-ratio discount: query=%d seed=%d ratio=%.2f sim=%.3f→%.3f",
+                len(query), len(seed_text), length_ratio, original, similarity,
+            )
+
         if similarity < 0.80:
             return None
 
@@ -378,12 +568,18 @@ class IntentRouter:
     # ── Level 3：LLM 分类 ───────────────────────────────────────────
 
     _LLM_CLASSIFY_PROMPT = """你是 ERP 采购分析系统的意图分类器。根据用户查询，判断最匹配的分析类型。
-
+{role_section}
 可选分析类型：
 - three_way_match: 采购订单、收货单、发票的三单匹配异常检查
 - price_variance: 实际采购价格与合同价/标准价的偏差分析
 - payment_compliance: 付款逾期、提前付款、折扣滥用等合规检查
 - supplier_performance: 供应商交期、质量、KPI 综合绩效评估
+- spend_analysis: 按品类/供应商维度的采购支出分布分析
+- receipt_anomaly: 超量收货、拒收、延迟收货等收货异常分析
+- invoice_duplicate: 重复发票检测
+- discount_utilization: 早付折扣利用率分析
+- po_cycle_time: 采购订单全流程周期分析
+- vendor_concentration: 供应商集中度与采购依赖风险分析
 - comprehensive: 以上多类或无法明确归类的综合分析
 
 输出纯 JSON，无其他文字：
@@ -401,13 +597,23 @@ class IntentRouter:
         self._llm = build_chat_model(self._settings.llm)
         return self._llm
 
-    def _try_level3(self, query: str, params: dict[str, Any]) -> QuerySignal:
+    def _try_level3(
+        self, query: str, params: dict[str, Any], analyst_role: str = "general"
+    ) -> QuerySignal:
         """LLM 分类兜底，始终返回结果。"""
         from core.observability.middleware import record_span
 
         try:
             llm = self._ensure_llm()
-            prompt = self._LLM_CLASSIFY_PROMPT.format(query=query)
+            role_desc = _ROLE_DESCRIPTIONS.get(analyst_role, "")
+            role_section = (
+                f"\n用户角色：{role_desc}\n请结合用户角色偏好判断最可能的分析意图。\n"
+                if role_desc
+                else ""
+            )
+            prompt = self._LLM_CLASSIFY_PROMPT.format(
+                query=query, role_section=role_section
+            )
 
             # 显式记录 model span（L3 不经过 LangChain 中间件）
             model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")

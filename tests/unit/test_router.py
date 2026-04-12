@@ -8,7 +8,7 @@ import pytest
 
 from api.schemas.analysis import AnalysisType
 from config.settings import Settings
-from core.orchestrator.router import IntentRouter, _extract_params, _RULE_LIBRARY
+from core.orchestrator.router import IntentRouter, _extract_params, _is_non_analysis_query, _RULE_LIBRARY
 from core.orchestrator.signal import QuerySignal
 
 
@@ -381,7 +381,7 @@ class TestTraceHelpers:
     def test_evaluate_all_rules(self) -> None:
         """_evaluate_all_rules 应返回所有规则的评分。"""
         scores = self.router._evaluate_all_rules("分析三路匹配发票异常")
-        assert len(scores) == 4  # 4 条规则
+        assert len(scores) == 10  # 10 条规则（4 原始 + 6 新增）
         assert all("rule" in s and "hit_rate" in s and "threshold" in s for s in scores)
         # 三路匹配规则应命中
         twm = next(s for s in scores if s["rule"] == "three_way_match")
@@ -426,3 +426,170 @@ class TestSeedsLoading:
             with patch.object(router, "_load_seeds") as mock_load:
                 router._ensure_seeds_store()
                 mock_load.assert_not_called()
+
+
+# ============================================================
+# analyst_role L3 注入
+# ============================================================
+
+
+class TestAnalystRoleInjection:
+    """analyst_role 角色注入到 L3 prompt 的测试。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def test_role_passed_to_l3_prompt(self) -> None:
+        """analyst_role 应注入到 L3 LLM prompt 中。"""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "payment_compliance", "confidence": 0.9}'
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+        # L1/L2 都不命中，走 L3
+        signal = self.router._try_level3(
+            "最近有什么异常", {}, analyst_role="finance"
+        )
+
+        # 验证 prompt 中包含角色描述
+        call_args = mock_llm.invoke.call_args[0][0]
+        assert "财务合规人员" in call_args
+        assert "付款逾期" in call_args
+
+    def test_general_role_no_injection(self) -> None:
+        """general 角色不注入角色描述。"""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "comprehensive", "confidence": 0.5}'
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+        signal = self.router._try_level3(
+            "最近有什么异常", {}, analyst_role="general"
+        )
+
+        call_args = mock_llm.invoke.call_args[0][0]
+        assert "用户角色" not in call_args
+
+    def test_procurement_role_injection(self) -> None:
+        """procurement 角色应注入采购相关描述。"""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "price_variance", "confidence": 0.85}'
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+        signal = self.router._try_level3(
+            "看看数据", {}, analyst_role="procurement"
+        )
+
+        call_args = mock_llm.invoke.call_args[0][0]
+        assert "采购分析师" in call_args
+        assert signal.keywords[0] == "price_variance"
+
+    def test_route_passes_analyst_role(self) -> None:
+        """route() 应将 analyst_role 透传到 L3。"""
+        # L1 命中，不会到 L3，role 不影响
+        signal = self.router.route("分析三路匹配发票收货异常", analyst_role="finance")
+        assert signal.route_level == 1  # L1 命中，不受角色影响
+
+
+# ============================================================
+# 非分析意图检测（方案 C）
+# ============================================================
+
+
+class TestNonAnalysisQueryDetection:
+    """_is_non_analysis_query 前置过滤测试。"""
+
+    # ── 应被识别为非分析意图（bypass=True）──
+    @pytest.mark.parametrize("query", [
+        # 明确回溯类
+        "上次分析的结果呢",
+        "上一次分析了什么",
+        "刚才的报告呢",
+        "刚刚说了什么",
+        "结果呢",
+        "结论是什么",
+        "显示结果",
+        "再说一遍",
+        "重复一下",
+        "帮我回忆",
+        "回顾一下",
+        "概括一下",
+        # 歧义回溯词但无分析关键词
+        "之前说的是什么",
+        "前面提到的是什么",
+        # 闲聊/问候
+        "你好",
+        "谢谢",
+        "hello",
+        "bye",
+        # 能力询问
+        "你能做什么",
+        "有哪些分析功能",
+        # 否定/取消
+        "不需要了",
+        "算了",
+        "好的",
+        "知道了",
+        # 纯确认/追问
+        "继续",
+        "然后呢",
+        "嗯",
+    ])
+    def test_bypass_queries(self, query: str) -> None:
+        assert _is_non_analysis_query(query) is True
+
+    # ── 歧义回溯词 + 分析关键词（不应 bypass）──
+    @pytest.mark.parametrize("query", [
+        "分析之前30天的价格差异",        # "之前"是歧义词 + 含"分析/价格/差异"
+        "查看之前的采购订单数据",          # "之前"是歧义词 + 含"采购/订单"
+        "前面几个月的付款合规情况",        # "前面"是歧义词 + 含"付款/合规"
+        "之前SUP-001的分析有异常",        # "之前"是歧义词 + 含"分析/异常"
+        "analyze previous month purchase orders",  # "previous"是歧义词 + 含分析词
+    ])
+    def test_ambiguous_recall_with_analysis_not_blocked(self, query: str) -> None:
+        assert _is_non_analysis_query(query) is False
+
+    # ── 明确回溯词（即使含分析词也应 bypass）──
+    @pytest.mark.parametrize("query", [
+        "上次分析那个供应商的价格差异",    # "上次"是明确回溯
+        "帮我总结一下刚才的分析",          # "总结一下"是明确回溯
+        "刚才收到一批货有质量问题",        # "刚才"是明确回溯
+        "上一次分析的异常有哪些",          # "上一次"是明确回溯
+    ])
+    def test_clear_recall_always_bypass(self, query: str) -> None:
+        assert _is_non_analysis_query(query) is True
+
+    # ── 正常分析查询（不应 bypass）──
+    @pytest.mark.parametrize("query", [
+        "分析三路匹配异常",
+        "检查价格差异",
+        "分析付款逾期情况",
+        "评估供应商 SUP-001 绩效",
+        "采购支出按品类分布",
+        "有没有重复发票",
+        "折扣利用率分析",
+        "从下单到收货要多久",
+        "供应商集中度分析",
+        "分析最近的收货异常",
+        "最近有什么异常",
+        "看看采购数据",
+        "哪些订单有问题",
+    ])
+    def test_normal_queries_not_blocked(self, query: str) -> None:
+        assert _is_non_analysis_query(query) is False
+
+    def test_bypass_skips_l1_l2(self) -> None:
+        """回溯查询应跳过 L1/L2 直达 L3。"""
+        router = IntentRouter(settings=Settings())
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "comprehensive", "confidence": 0.9}'
+        mock_llm.invoke.return_value = mock_response
+        router._llm = mock_llm
+
+        signal = router.route("上次分析的结果呢")
+        assert signal.route_level == 3  # 跳过 L1/L2，直达 L3

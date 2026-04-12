@@ -9,7 +9,6 @@ P2P Agent 定义。
 from __future__ import annotations
 
 import asyncio
-import atexit
 import json
 import threading
 import time
@@ -27,7 +26,8 @@ from api.schemas.analysis import (
 )
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
-from core.observability import TimingMiddleware, attach_checkpointer_tracing
+from core.observability import TimingMiddleware
+from core.observability.middleware import estimate_tokens, record_span
 from modules.p2p.model_factory import build_chat_model
 from modules.p2p.prompts import build_system_prompt, format_long_term_memory
 
@@ -133,6 +133,7 @@ class P2PAgent:
         self,
         settings: Settings | None = None,
         timing_middleware: TimingMiddleware | None = None,
+        checkpointer: Any | None = None,
     ) -> None:
         """初始化 P2P Agent。
 
@@ -141,16 +142,14 @@ class P2PAgent:
             timing_middleware: 链路监控中间件。允许调用方（如 Orchestrator）
                 在更外层创建并复用同一份 middleware，确保 trace 能覆盖
                 P2PAgent 的导入与构建阶段。为 None 时内部懒建一份。
+            checkpointer: 外部注入的 LangGraph PostgresSaver 实例，
+                由 Orchestrator 统一管理生命周期。为 None 时 Agent
+                以无短期记忆模式运行。
         """
         self._settings: Settings = settings if settings is not None else get_settings()
         self._agent: Any | None = None
         self._timing_middleware: TimingMiddleware | None = timing_middleware
-        # 短期记忆由 LangGraph PostgresSaver checkpointer 持久化,以 session_id 作为 thread_id,
-        # 每轮会话的历史 messages 由 checkpointer 自动加载/写回,无需进程内字典。
-        self._checkpointer: Any | None = None
-        self._checkpointer_cm: Any | None = None  # context manager 句柄,用于 atexit 清理
-        # Agent 构建 + checkpointer 初始化在多线程/多协程下都可能并发访问,
-        # 用 RLock 同步避免重复初始化
+        self._checkpointer: Any | None = checkpointer
         self._lock = threading.RLock()
 
     @property
@@ -165,76 +164,152 @@ class P2PAgent:
             self._timing_middleware = TimingMiddleware(agent_name="p2p_agent")
         return self._timing_middleware
 
-    def _get_checkpointer(self) -> Any:
-        """延迟构建 LangGraph PostgresSaver checkpointer。
-
-        使用项目共用的 PostgreSQL(``settings.postgresql.conninfo``),首次调用时
-        进入 context manager 并触发 ``setup()`` 建表。进程退出时通过 atexit
-        关闭底层连接。初始化失败时抛出异常,由调用方捕获降级。
-        """
-        if self._checkpointer is not None:
-            return self._checkpointer
-        with self._lock:
-            if self._checkpointer is not None:
-                return self._checkpointer
-            from langgraph.checkpoint.postgres import PostgresSaver
-
-            conninfo = self._settings.postgresql.conninfo
-            cm = PostgresSaver.from_conn_string(conninfo)
-            saver = cm.__enter__()
-            try:
-                saver.setup()
-            except Exception:
-                cm.__exit__(None, None, None)
-                raise
-            # 给 saver 实例打上 checkpoint span 补丁,让 get_tuple / put /
-            # put_writes 的耗时与关键元信息(thread_id、n_messages、step、source 等)
-            # 落入当前 trace 的 checkpoint 类型 span。
-            attach_checkpointer_tracing(saver, self.timing_middleware)
-            self._checkpointer_cm = cm
-            self._checkpointer = saver
-            atexit.register(self._close_checkpointer)
-            return saver
-
-    def _close_checkpointer(self) -> None:
-        """关闭 checkpointer 的 context manager(atexit 回调,幂等)。"""
-        cm = self._checkpointer_cm
-        if cm is None:
-            return
-        self._checkpointer_cm = None
-        self._checkpointer = None
-        try:
-            cm.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def clear_short_term_memory(self, session_id: str | None = None) -> int:
-        """清理短期记忆(checkpointer 中对应 thread_id 的历史)。
-
-        Args:
-            session_id: 指定会话 ID 时仅清理该会话(即 thread_id);
-                为 None 时目前不支持一次性清空所有 thread(PostgresSaver 无全量 API),
-                返回 0 表示未执行任何操作。
-
-        Returns:
-            实际被清理的会话数量。
-        """
-        if self._checkpointer is None:
-            return 0
-        if session_id is None:
-            # PostgresSaver 未暴露"删除所有 thread"的 API,避免误伤其他表数据,
-            # 这里不执行任何操作。需要批量清空请直接 TRUNCATE checkpoint* 表。
-            return 0
-        try:
-            self._checkpointer.delete_thread(session_id)
-            return 1
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("clear short-term memory failed: %s", exc)
-            return 0
-
     # ------------------------------------------------------------------
     # 构建方法
     # ------------------------------------------------------------------
+
+    def _truncate_checkpointer_history(self, thread_id: str, max_messages: int) -> None:
+        """截断 checkpointer 中的历史消息，防止超出 LLM 上下文限制。
+
+        保留最近 max_messages 条消息，裁剪旧消息后写回。
+        失败时静默跳过，不阻塞主流程。
+        """
+        if self._checkpointer is None or max_messages <= 0:
+            return
+
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            existing = self._checkpointer.get_tuple(config)
+            if not existing or not existing.checkpoint:
+                return
+
+            channel_values = existing.checkpoint.get("channel_values", {})
+            messages = channel_values.get("messages", [])
+
+            if len(messages) <= max_messages:
+                return  # 未超限，无需截断
+
+            _logger.info(
+                "truncating short-term memory: %d → %d messages (thread=%s)",
+                len(messages),
+                max_messages,
+                thread_id,
+            )
+
+            # 保留最近 N 条
+            channel_values["messages"] = messages[-max_messages:]
+            existing.checkpoint["channel_values"] = channel_values
+            existing.checkpoint["id"] = str(uuid.uuid4())
+
+            metadata = {
+                "source": "truncate",
+                "step": (existing.metadata or {}).get("step", 0) + 1,
+                "writes": None,
+            }
+            self._checkpointer.put(config, existing.checkpoint, metadata, {})
+
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("checkpointer truncation failed (non-blocking): %s", exc)
+
+    def _estimate_tool_definitions_tokens(self) -> int:
+        """估算工具定义（function schema）的 token 数量。
+
+        LangChain 在每次 LLM 调用时都会携带所有工具的 JSON Schema，
+        包含 name、description、parameters。此方法计算一次后缓存。
+        """
+        if hasattr(self, "_tool_definitions_tokens_cache"):
+            return self._tool_definitions_tokens_cache
+
+        try:
+            tools = self._build_tools()
+            total_chars = 0
+            for t in tools:
+                total_chars += len(getattr(t, "name", ""))
+                total_chars += len(getattr(t, "description", "") or "")
+                schema = getattr(t, "args_schema", None)
+                if schema:
+                    schema_dict = schema.schema() if callable(getattr(schema, "schema", None)) else {}
+                    total_chars += len(json.dumps(schema_dict, ensure_ascii=False))
+            result = estimate_tokens("x" * total_chars)
+        except Exception:
+            result = 0
+        self._tool_definitions_tokens_cache = result
+        return result
+
+    def _estimate_checkpointer_tokens(self, thread_id: str) -> tuple[int, int]:
+        """估算 checkpointer 中历史消息的 token 数量。
+
+        Returns:
+            (token 数, 消息条数) 元组。checkpointer 不可用时返回 (0, 0)。
+        """
+        if self._checkpointer is None:
+            return 0, 0
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            existing = self._checkpointer.get_tuple(config)
+            if not existing or not existing.checkpoint:
+                return 0, 0
+            messages = existing.checkpoint.get("channel_values", {}).get("messages", [])
+            total_chars = 0
+            for msg in messages:
+                content = getattr(msg, "content", "")
+                if isinstance(content, str):
+                    total_chars += len(content)
+            return estimate_tokens("x" * total_chars), len(messages)
+        except Exception:
+            return 0, 0
+
+    def _record_context_budget(
+        self,
+        *,
+        context_summary: str,
+        long_term_text: str,
+        long_term_count: int,
+        user_message: str,
+        tool_definitions_tokens: int,
+        checkpointer_history_tokens: int,
+        checkpointer_message_count: int,
+    ) -> None:
+        """记录 context_budget span，追踪注入 LLM 的各部分 token 占比。"""
+        system_prompt = build_system_prompt()
+        # 从系统提示词中分离出本体上下文部分的 token
+        from modules.p2p.prompts import get_ontology_context
+        ontology_text = get_ontology_context()
+        ontology_tokens = estimate_tokens(ontology_text)
+        system_prompt_tokens = estimate_tokens(system_prompt) - ontology_tokens
+
+        short_term_tokens = estimate_tokens(context_summary)
+        long_term_tokens = estimate_tokens(long_term_text)
+        user_message_tokens = estimate_tokens(user_message)
+
+        total_inject_tokens = (
+            system_prompt_tokens
+            + ontology_tokens
+            + long_term_tokens
+            + short_term_tokens
+            + user_message_tokens
+            + tool_definitions_tokens
+            + checkpointer_history_tokens
+        )
+        context_window = self._settings.llm.context_window
+        budget_usage_pct = round(
+            total_inject_tokens / context_window * 100, 1
+        ) if context_window > 0 else 0.0
+
+        with record_span("context_budget", "context_budget",
+                         system_prompt_tokens=system_prompt_tokens,
+                         ontology_context_tokens=ontology_tokens,
+                         long_term_memory_tokens=long_term_tokens,
+                         long_term_memory_count=long_term_count,
+                         short_term_memory_tokens=short_term_tokens,
+                         user_message_tokens=user_message_tokens,
+                         tool_definitions_tokens=tool_definitions_tokens,
+                         checkpointer_history_tokens=checkpointer_history_tokens,
+                         checkpointer_message_count=checkpointer_message_count,
+                         total_inject_tokens=total_inject_tokens,
+                         model_context_limit=context_window,
+                         budget_usage_pct=budget_usage_pct):
+            pass  # 纯记录，无业务逻辑
 
     def _build_tools(self) -> list:
         """导入并返回 P2P 工具集。
@@ -284,16 +359,6 @@ class P2PAgent:
             tools = self._build_tools()
             system_prompt = build_system_prompt()
             middleware = self.timing_middleware
-            # 尝试挂载 PostgresSaver checkpointer 作为短期记忆层。
-            # DB 不可用时降级为无 checkpointer 模式,不阻塞 agent 启动。
-            checkpointer: Any | None = None
-            try:
-                checkpointer = self._get_checkpointer()
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning(
-                    "postgres checkpointer init failed, short-term memory disabled: %s",
-                    exc,
-                )
             agent_kwargs: dict[str, Any] = dict(
                 model=model,
                 tools=tools,
@@ -301,8 +366,8 @@ class P2PAgent:
                 name="p2p_agent",
                 middleware=[middleware],
             )
-            if checkpointer is not None:
-                agent_kwargs["checkpointer"] = checkpointer
+            if self._checkpointer is not None:
+                agent_kwargs["checkpointer"] = self._checkpointer
             self._agent = create_agent(**agent_kwargs)
             return self._agent
 
@@ -318,17 +383,22 @@ class P2PAgent:
         time_range_days: int = 30,
         user_id: str = "default",
         session_id: str = "",
+        context_summary: str = "",
+        skip_memory_write: bool = False,
+        output_mode_prompt: str = "",
     ) -> dict[str, Any]:
         """供 Orchestrator 调用的异步入口。
-
-        将 Orchestrator 的参数映射到 analyze()，并将 AnalysisResult
-        转换为 Orchestrator 期望的 dict 格式。
 
         Args:
             analysis_type: 分析类型。
             query: 自然语言查询。
             params: 意图解析提取的额外参数（supplier_id, po_number 等）。
             time_range_days: 分析时间范围（天）。
+            user_id: 用户 ID。
+            session_id: 会话 ID。
+            context_summary: 上一轮对话的 AI 回复摘要（来自 checkpointer）。
+            skip_memory_write: 跳过长期记忆写入（非分析意图时避免循环引用）。
+            output_mode_prompt: 输出模式格式指令。
 
         Returns:
             包含 anomalies, supplier_kpis, summary, report_markdown,
@@ -339,6 +409,9 @@ class P2PAgent:
             user_id=user_id,
             session_id=session_id,
             time_range_days=time_range_days,
+            context_summary=context_summary,
+            skip_memory_write=skip_memory_write,
+            output_mode_prompt=output_mode_prompt,
         )
 
         return {
@@ -356,6 +429,9 @@ class P2PAgent:
         user_id: str = "default",
         session_id: str = "",
         time_range_days: int = 30,
+        context_summary: str = "",
+        skip_memory_write: bool = False,
+        output_mode_prompt: str = "",
     ) -> AnalysisResult:
         """执行 P2P 分析任务。
 
@@ -379,55 +455,80 @@ class P2PAgent:
         max_retries: int = self._settings.llm.max_retries
         last_error: Exception | None = None
 
+        # ── 构建本轮消息（重试循环外部，避免重复注入系统消息）──
+        output_hint = f"\n[输出格式] {output_mode_prompt}" if output_mode_prompt else ""
+        user_message: str = (
+            f"{query}\n\n"
+            f"[分析参数] 时间范围: 最近 {time_range_days} 天"
+            f"{output_hint}"
+        )
+
+        invoke_messages: list[tuple[str, str]] = []
+
+        # 注入上一轮对话摘要
+        if context_summary:
+            invoke_messages.append((
+                "system",
+                f"[对话历史-上一轮分析结果摘要]\n{context_summary}",
+            ))
+
+        # 注入长期记忆
+        long_term_snippets: list[dict[str, Any]] = []
+        if self._settings.memory.long_term_enabled and not skip_memory_write:
+            try:
+                from core.memory import get_long_term_memory
+
+                ltm = get_long_term_memory()
+                max_retrieved = self._settings.memory.long_term_max_retrieved
+                long_term_snippets = ltm.search_memories(
+                    user_id=user_id, query=query, limit=max_retrieved
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("long-term memory retrieval skipped: %s", exc)
+
+        long_term_text = format_long_term_memory(long_term_snippets)
+        if long_term_text:
+            invoke_messages.insert(
+                0,
+                (
+                    "system",
+                    f"[长期记忆-历史参考]\n以下是该用户与本次查询相关的历史记忆,"
+                    f"可作为分析参考:\n{long_term_text}",
+                ),
+            )
+
+        invoke_messages.append(("user", user_message))
+
+        effective_thread = (
+            f"_recall_{uuid.uuid4().hex[:8]}"
+            if skip_memory_write
+            else session_id
+        )
+        invoke_config: dict[str, Any] = {
+            "configurable": {"thread_id": effective_thread}
+        }
+
+        # ── 短期记忆截断：防止历史消息无限累积超出 LLM 上下文限制 ──
+        max_short_term = self._settings.memory.short_term_max_messages
+        self._truncate_checkpointer_history(effective_thread, max_short_term)
+
+        # ── 记录 context_budget span：各部分 token 占比 ──
+        tool_def_tokens = self._estimate_tool_definitions_tokens()
+        cp_tokens, cp_count = self._estimate_checkpointer_tokens(effective_thread)
+        self._record_context_budget(
+            context_summary=context_summary,
+            long_term_text=long_term_text,
+            long_term_count=len(long_term_snippets),
+            user_message=user_message,
+            tool_definitions_tokens=tool_def_tokens,
+            checkpointer_history_tokens=cp_tokens,
+            checkpointer_message_count=cp_count,
+        )
+
+        # ── 重试循环 ──
         for attempt in range(max_retries):
             try:
                 agent = self._get_or_build_agent()
-
-                # 构造带上下文的用户消息
-                user_message: str = (
-                    f"{query}\n\n"
-                    f"[分析参数] 时间范围: 最近 {time_range_days} 天"
-                )
-
-                # 短期记忆由 PostgresSaver checkpointer 按 thread_id(=session_id)
-                # 自动加载历史 messages,这里只需传入本轮新消息。
-                invoke_messages: list[tuple[str, str]] = []
-
-                # 注入长期记忆：按 user_id 隔离,按当前 query 做 LIKE 召回 + 可选向量召回。
-                # 召回失败(DB 未初始化/不可用)不应阻断主路径,静默降级。
-                long_term_snippets: list[dict[str, Any]] = []
-                if self._settings.memory.long_term_enabled:
-                    try:
-                        from core.memory import get_long_term_memory
-
-                        ltm = get_long_term_memory()
-                        max_retrieved = self._settings.memory.long_term_max_retrieved
-                        # search_memories 内部已做 hybrid 召回（稀疏 + 稠密 + RRF）
-                        long_term_snippets = ltm.search_memories(
-                            user_id=user_id, query=query, limit=max_retrieved
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        _logger.debug("long-term memory retrieval skipped: %s", exc)
-
-                long_term_text = format_long_term_memory(long_term_snippets)
-                if long_term_text:
-                    invoke_messages.insert(
-                        0,
-                        (
-                            "system",
-                            f"[长期记忆-历史参考]\n以下是该用户与本次查询相关的历史记忆,"
-                            f"可作为分析参考:\n{long_term_text}",
-                        ),
-                    )
-
-                invoke_messages.append(("user", user_message))
-
-                # trace 生命周期由 Orchestrator 在最外层驱动,
-                # 此处仅触发 ainvoke,让 middleware 的 model/tool span 自然落入当前 trace。
-                # thread_id 即 session_id,PostgresSaver 会据此加载/写回短期记忆历史。
-                invoke_config: dict[str, Any] = {
-                    "configurable": {"thread_id": session_id}
-                }
                 result: dict[str, Any] = await agent.ainvoke(
                     {"messages": invoke_messages},
                     config=invoke_config,
@@ -462,8 +563,9 @@ class P2PAgent:
                     pass  # content 是纯文本 Markdown 报告，无需解析
 
                 # 写回长期记忆：解析完结构化字段后写入，携带完整 metadata。
+                # skip_memory_write=True 时跳过（非分析意图，避免循环引用）。
                 # 失败不阻塞主路径。
-                if content and self._settings.memory.long_term_enabled:
+                if content and self._settings.memory.long_term_enabled and not skip_memory_write:
                     try:
                         from core.memory import get_long_term_memory
 
@@ -486,7 +588,7 @@ class P2PAgent:
                             ),
                         )
                     except Exception as exc:  # noqa: BLE001
-                        _logger.debug("long-term memory save skipped: %s", exc)
+                        _logger.warning("long-term memory save skipped: %s", exc)
 
                 elapsed_ms: float = (time.monotonic() - start_time) * 1000
 

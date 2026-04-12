@@ -32,7 +32,7 @@ def _make_trace_app():
 
 
 def _fake_run(**kwargs) -> MagicMock:
-    run = MagicMock()
+    run = MagicMock(spec=[])
     run.trace_id = kwargs.get("trace_id", str(uuid.uuid4()))
     run.agent_name = kwargs.get("agent_name", "p2p_agent")
     run.session_id = kwargs.get("session_id", "sess1")
@@ -44,6 +44,7 @@ def _fake_run(**kwargs) -> MagicMock:
     run.model_call_count = 1
     run.tool_call_count = 2
     run.error = None
+    run.token_summary = None
     return run
 
 
@@ -79,6 +80,7 @@ class TestTracesRouter:
         run = _fake_run()
         mock_store = MagicMock()
         mock_store.list_runs.return_value = [run]
+        mock_store.get_token_summary.return_value = None
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get("/traces")
         assert resp.status_code == 200
@@ -86,9 +88,25 @@ class TestTracesRouter:
         assert len(data) == 1
         assert data[0]["agent_name"] == "p2p_agent"
 
+    def test_list_traces_with_token_summary(self, traces_client):
+        run = _fake_run()
+        mock_store = MagicMock()
+        mock_store.list_runs.return_value = [run]
+        mock_store.get_token_summary.return_value = {
+            "total_prompt_tokens": 5000,
+            "total_completion_tokens": 1000,
+            "peak_prompt_tokens": 3000,
+        }
+        with patch("api.routes.traces.get_trace_store", return_value=mock_store):
+            resp = traces_client.get("/traces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["token_summary"]["total_prompt_tokens"] == 5000
+
     def test_list_traces_with_filters(self, traces_client):
         mock_store = MagicMock()
         mock_store.list_runs.return_value = []
+        mock_store.get_token_summary.return_value = None
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get("/traces?session_id=sess1&user_id=u1&limit=10&offset=5")
         assert resp.status_code == 200
@@ -174,12 +192,18 @@ class TestTracesRouter:
         sp = _fake_span(trace_id=trace_id)
         mock_store = MagicMock()
         mock_store.get_run.return_value = (run, [sp])
+        mock_store.get_token_summary.return_value = {
+            "total_prompt_tokens": 2000,
+            "total_completion_tokens": 500,
+            "peak_prompt_tokens": 2000,
+        }
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get(f"/traces/{trace_id}")
         assert resp.status_code == 200
         data = resp.json()
         assert data["trace_id"] == trace_id
         assert len(data["spans"]) == 1
+        assert data["token_summary"]["total_prompt_tokens"] == 2000
 
 
 # ---------------------------------------------------------------------------

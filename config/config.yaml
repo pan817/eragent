@@ -18,6 +18,8 @@ llm:
   timeout: 120               # 请求超时（秒）
   max_retries: 3             # 最大重试次数
   use_system_proxy: false    # 是否读取系统代理（HTTP_PROXY/HTTPS_PROXY）；false=强制直连
+  context_window: 32768      # 模型上下文窗口大小（token 数）
+  token_estimate_ratio: 1.5  # 字符数 / token 数估算比率（中文约 1.5）
 
 neo4j:
   enabled: false              # 总开关：false 时服务不依赖 Neo4j，相关功能短路
@@ -61,6 +63,27 @@ analysis:
   max_time_range_days: 365       # 单次查询最大时间范围（天）
   response_timeout_seconds: 5.0  # 单次分析响应超时（秒）
 
+  # 实体编号正则模式（按客户 EBS 编号规则配置）
+  # 每个实体支持多个正则模式（按顺序尝试，首个匹配即返回）
+  entity_patterns:
+    po_number:
+      - 'PO-\d[\da-zA-Z_-]*\d'     # PO-2024-0001
+      - 'PO-\d+'                     # PO-001
+    supplier_id:
+      - 'SUP-\d+'                    # SUP-001
+    invoice_number:
+      - 'INV-\d[\da-zA-Z_-]*\d'     # INV-2024-0001
+      - 'INV-\d+'                    # INV-001
+    payment_number:
+      - 'PAY-\d[\da-zA-Z_-]*\d'     # PAY-2024-0001
+      - 'PAY-\d+'                    # PAY-001
+    receipt_number:
+      - 'RCV-\d[\da-zA-Z_-]*\d'     # RCV-2024-0001
+      - 'RCV-\d+'                    # RCV-001
+    days:
+      - '(?:最近|过去|近)\s*(\d+)\s*天'
+      - '(?:past|last|recent)\s+(\d+)\s*days?'
+
 p2p:
   three_way_match:
     default_tolerance_pct: 5.0   # 三路匹配默认容差（%）
@@ -97,9 +120,13 @@ memory:
   short_term:
     max_messages: 20            # 滑动窗口最大消息数
     summary_threshold: 15       # 超过N条消息触发摘要压缩
+    context_trim_enabled: true  # 注入 LLM 前的 token 裁剪兜底开关
+    context_max_tokens_pct: 15  # 短期记忆最大占 context_window 的百分比
   long_term:
     enabled: true               # 长期记忆主路径总开关（SQL 读写）
     max_retrieved: 5            # Hybrid 检索最多返回N条历史记忆
+    context_trim_enabled: true  # 注入 LLM 前的 token 裁剪兜底开关
+    context_max_tokens_pct: 10  # 长期记忆最大占 context_window 的百分比
     fusion_k: 60                # RRF 融合的平滑常数
     max_per_user: 200           # 每个用户保留的最大记忆条数（0 表示不限制）
     min_content_len: 50         # 短于该长度的内容直接 skip（0 关闭）

@@ -2,13 +2,18 @@
 P2P 模拟数据生成器。
 
 按 Oracle EBS 标准表结构生成包含正常和异常数据的测试数据集。
-异常率接近真实生产环境（5-10%），用于 MVP 阶段验证分析逻辑。
+异常率接近真实生产环境（5-10%），用于验证分析逻辑。
+
+日期分布策略：
+- 60% 数据：2026-01-01 ~ 今天（近期，30d/90d 查询可命中）
+- 25% 数据：2025 年（历史，365d 查询可命中）
+- 15% 数据：2024 年及更早（早期数据）
 """
 
 from __future__ import annotations
 
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 
@@ -18,12 +23,41 @@ class MockDataGenerator:
     def __init__(self, seed: int = 42) -> None:
         """初始化生成器。seed 确保数据可重复。"""
         self._rng = random.Random(seed)
-        self._base_date = datetime(2024, 3, 1)
+        self._today = date.today()
 
-    def _rand_date(self, start_offset: int = 0, end_offset: int = 90) -> str:
-        """生成随机日期字符串（ISO 格式）。"""
-        delta = self._rng.randint(start_offset, end_offset)
-        return (self._base_date + timedelta(days=delta)).strftime("%Y-%m-%d")
+    def _rand_creation_date(self) -> date:
+        """按 60/25/15 分布生成 PO 创建日期。
+
+        近期数据（60%）的上限为今天 - 60 天，确保后续单据
+        （收货 +25~50 天、发票 +30~55 天、付款基于到期日）
+        不会产生超过今天的日期。
+        """
+        roll = self._rng.random()
+        if roll < 0.60:
+            # 60%：2026-01-01 ~ 今天-60天（预留后续单据偏移空间）
+            start = date(2026, 1, 1)
+            end = self._today - timedelta(days=60)
+            if end <= start:
+                end = start
+            span = max((end - start).days, 1)
+            return start + timedelta(days=self._rng.randint(0, span))
+        elif roll < 0.85:
+            # 25%：2025 年
+            start = date(2025, 1, 1)
+            return start + timedelta(days=self._rng.randint(0, 364))
+        else:
+            # 15%：2024 年
+            start = date(2024, 1, 1)
+            return start + timedelta(days=self._rng.randint(0, 364))
+
+    def _offset_date(self, base: date, min_days: int, max_days: int, rng: random.Random) -> date:
+        """基于基准日期偏移随机天数，不超过今天。"""
+        result = base + timedelta(days=rng.randint(min_days, max_days))
+        return min(result, self._today)
+
+    @staticmethod
+    def _fmt(d: date) -> str:
+        return d.strftime("%Y-%m-%d")
 
     def generate_suppliers(self, count: int = 5) -> list[dict[str, Any]]:
         """生成供应商主数据（AP_SUPPLIERS + AP_SUPPLIER_SITES_ALL）。"""
@@ -76,7 +110,7 @@ class MockDataGenerator:
                 standard_price = unit_price
             amount = round(qty * unit_price, 2)
             po_num = f"PO-2024-{i + 1:04d}"
-            creation = self._rand_date(0, 60)
+            creation = self._rand_creation_date()
 
             headers.append({
                 "po_header_id": i + 1,
@@ -84,9 +118,10 @@ class MockDataGenerator:
                 "supplier_id": sup["supplier_id"],
                 "supplier_name": sup["supplier_name"],
                 "status": "APPROVED",
-                "creation_date": creation,
+                "creation_date": self._fmt(creation),
                 "total_amount": amount,
                 "currency": "CNY",
+                "_creation_date_obj": creation,  # 内部用，不入库
             })
             lines.append({
                 "po_line_id": i + 1,
@@ -101,13 +136,13 @@ class MockDataGenerator:
                 "category": item[2],
                 "standard_price": standard_price,
             })
-            promised = self._rand_date(30, 75)
+            promised = self._offset_date(creation, 20, 45, self._rng)
             locations.append({
                 "line_location_id": i + 1,
                 "po_line_id": i + 1,
                 "po_number": po_num,
-                "promised_date": promised,
-                "need_by_date": promised,
+                "promised_date": self._fmt(promised),
+                "need_by_date": self._fmt(promised),
                 "quantity": qty,
             })
         return headers, lines, locations
@@ -115,6 +150,7 @@ class MockDataGenerator:
     def generate_receipts(
         self,
         po_lines: list[dict[str, Any]],
+        po_headers: list[dict[str, Any]],
         anomaly_rate: float = 0.08,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """
@@ -122,6 +158,9 @@ class MockDataGenerator:
 
         anomaly_rate 控制数量偏差和交货延迟的比例。
         """
+        # 建立 po_number → creation_date 映射
+        creation_map = {h["po_number"]: h["_creation_date_obj"] for h in po_headers}
+
         headers: list[dict[str, Any]] = []
         transactions: list[dict[str, Any]] = []
         for idx, pl in enumerate(po_lines):
@@ -134,12 +173,13 @@ class MockDataGenerator:
                 rcv_qty = qty
                 rejected = 0
             accepted = rcv_qty - rejected
-            rcv_date = self._rand_date(35, 80)
+            base_date = creation_map.get(pl["po_number"], self._today)
+            rcv_date = self._offset_date(base_date, 25, 50, self._rng)
             headers.append({
                 "shipment_header_id": idx + 1,
                 "receipt_num": f"RCV-2024-{idx + 1:04d}",
                 "supplier_id": pl.get("supplier_id", ""),
-                "creation_date": rcv_date,
+                "creation_date": self._fmt(rcv_date),
             })
             transactions.append({
                 "transaction_id": idx + 1,
@@ -150,7 +190,7 @@ class MockDataGenerator:
                 "quantity": rcv_qty,
                 "accepted_quantity": accepted,
                 "rejected_quantity": rejected,
-                "transaction_date": rcv_date,
+                "transaction_date": self._fmt(rcv_date),
                 "supplier_id": pl.get("supplier_id", ""),
             })
         return headers, transactions
@@ -170,14 +210,15 @@ class MockDataGenerator:
         inv_lines: list[dict[str, Any]] = []
         for idx, (ph, pl) in enumerate(zip(po_headers, po_lines)):
             po_amount = ph["total_amount"]
+            base_date = ph["_creation_date_obj"]
             # 异常：发票金额偏差超容差
             if self._rng.random() < anomaly_rate:
                 inv_amount = round(po_amount * self._rng.uniform(1.06, 1.15), 2)
             else:
                 inv_amount = po_amount
-            inv_date = self._rand_date(40, 85)
-            due_date_dt = datetime.strptime(inv_date, "%Y-%m-%d") + timedelta(days=30)
-            disc_due_dt = datetime.strptime(inv_date, "%Y-%m-%d") + timedelta(days=10)
+            inv_date = self._offset_date(base_date, 30, 55, self._rng)
+            due_date = min(inv_date + timedelta(days=30), self._today)
+            disc_due = min(inv_date + timedelta(days=10), self._today)
             inv_num = f"INV-2024-{idx + 1:04d}"
             invoices.append({
                 "invoice_id": idx + 1,
@@ -186,9 +227,9 @@ class MockDataGenerator:
                 "supplier_id": ph["supplier_id"],
                 "supplier_name": ph["supplier_name"],
                 "invoice_amount": inv_amount,
-                "invoice_date": inv_date,
-                "due_date": due_date_dt.strftime("%Y-%m-%d"),
-                "discount_due_date": disc_due_dt.strftime("%Y-%m-%d"),
+                "invoice_date": self._fmt(inv_date),
+                "due_date": self._fmt(due_date),
+                "discount_due_date": self._fmt(disc_due),
                 "status": "VALIDATED",
                 "payment_terms": "NET30",
             })
@@ -215,7 +256,7 @@ class MockDataGenerator:
         """
         payments: list[dict[str, Any]] = []
         for idx, inv in enumerate(invoices):
-            due = datetime.strptime(inv["due_date"], "%Y-%m-%d")
+            due = datetime.strptime(inv["due_date"], "%Y-%m-%d").date()
             inv_amount = inv["invoice_amount"]
             roll = self._rng.random()
 
@@ -229,7 +270,9 @@ class MockDataGenerator:
                 pay_amount = inv_amount
             elif roll < anomaly_rate + 0.03:
                 # 折扣滥用：过了折扣期仍按折扣价付
-                disc_due = datetime.strptime(inv.get("discount_due_date", inv["due_date"]), "%Y-%m-%d")
+                disc_due = datetime.strptime(
+                    inv.get("discount_due_date", inv["due_date"]), "%Y-%m-%d"
+                ).date()
                 pay_date = disc_due + timedelta(days=self._rng.randint(3, 15))
                 pay_amount = round(inv_amount * 0.98, 2)  # 按2%折扣付
             else:
@@ -237,13 +280,15 @@ class MockDataGenerator:
                 pay_date = due - timedelta(days=self._rng.randint(1, 5))
                 pay_amount = inv_amount
 
+            pay_date = min(pay_date, self._today)
+
             payments.append({
                 "payment_id": idx + 1,
                 "payment_number": f"PAY-2024-{idx + 1:04d}",
                 "invoice_number": inv["invoice_number"],
                 "supplier_id": inv["supplier_id"],
                 "payment_amount": pay_amount,
-                "payment_date": pay_date.strftime("%Y-%m-%d"),
+                "payment_date": self._fmt(pay_date),
                 "payment_method": self._rng.choice(["BANK_TRANSFER", "CHECK"]),
             })
         return payments
@@ -264,9 +309,14 @@ class MockDataGenerator:
         line_sup_map = {h["po_number"]: h["supplier_id"] for h in po_headers}
         for pl in po_lines:
             pl["supplier_id"] = line_sup_map.get(pl["po_number"], "")
-        rcv_headers, rcv_transactions = self.generate_receipts(po_lines)
+        rcv_headers, rcv_transactions = self.generate_receipts(po_lines, po_headers)
         invoices, invoice_lines = self.generate_invoices(po_headers, po_lines)
         payments = self.generate_payments(invoices)
+
+        # 清理内部字段
+        for h in po_headers:
+            h.pop("_creation_date_obj", None)
+
         return {
             "suppliers": suppliers,
             "po_headers": po_headers,

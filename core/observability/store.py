@@ -278,6 +278,20 @@ class TraceStore:
             )
             return run, spans
 
+    def get_token_summary(self, trace_id: str) -> dict[str, Any] | None:
+        """从 agent span 的 attributes 中提取 token_summary。"""
+        with self._session_factory() as session:
+            stmt = (
+                select(TraceSpan.attributes)
+                .where(TraceSpan.trace_id == trace_id)
+                .where(TraceSpan.span_type == "agent")
+                .limit(1)
+            )
+            row = session.execute(stmt).scalar_one_or_none()
+            if row and isinstance(row, dict):
+                return row.get("token_summary")
+            return None
+
     def stats(
         self,
         *,

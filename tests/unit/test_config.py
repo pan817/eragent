@@ -58,6 +58,8 @@ class TestDefaultSettings:
         assert s.neo4j.uri == "bolt://localhost:7687"
         assert s.postgresql.port == 5432
         assert s.memory.short_term_max_messages == 20
+        assert s.llm.context_window == 32768
+        assert s.llm.token_estimate_ratio == 1.5
 
     def test_p2p_tolerances(self) -> None:
         """P2P 容差配置的默认值应正确。"""

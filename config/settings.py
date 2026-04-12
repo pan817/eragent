@@ -44,6 +44,10 @@ class LLMSettings(BaseSettings):
     # 是否让 LLM HTTP 客户端读取系统代理环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）。
     # False 时强制直连，忽略系统代理；True 时遵循环境变量。
     use_system_proxy: bool = False
+    # 模型上下文窗口大小（token 数），用于 context_budget 占比计算
+    context_window: int = 32768
+    # 字符数 → token 数的估算比率（中文为主文本约 1.5 字符/token）
+    token_estimate_ratio: float = 1.5
 
     model_config = {"populate_by_name": True, "env_prefix": "LLM_"}
 
@@ -147,6 +151,15 @@ class AnalysisSettings(BaseSettings):
     response_timeout_seconds: float = 60.0
     # 数据库 I/O 在线程池里执行，单次操作的硬超时
     db_io_timeout_seconds: float = 30.0
+    # 实体编号正则模式（按客户 EBS 编号规则配置）
+    entity_patterns: dict[str, list[str]] = Field(default_factory=lambda: {
+        "po_number": [r"PO-\d[\da-zA-Z_-]*\d", r"PO-\d+"],
+        "supplier_id": [r"SUP-\d+"],
+        "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
+        "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
+        "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+"],
+        "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
+    })
 
     model_config = {"env_prefix": "ANALYSIS_"}
 
@@ -239,6 +252,8 @@ class MemorySettings(BaseSettings):
 
     short_term_max_messages: int = 20
     short_term_summary_threshold: int = 15
+    short_term_context_trim_enabled: bool = True   # 注入 LLM 前裁剪兜底开关
+    short_term_context_max_tokens_pct: int = 15    # 短期记忆最大占 context_window 的百分比
     long_term_enabled: bool = True
     long_term_max_retrieved: int = 5
     long_term_fusion_k: int = 60
@@ -246,6 +261,8 @@ class MemorySettings(BaseSettings):
     long_term_min_content_len: int = 50           # 短内容过滤阈值（0 关闭）
     long_term_dedupe_window_seconds: int = 900    # 内容指纹去重窗口（0 关闭）
     long_term_skip_empty_conclusions: bool = False  # 跳过 anomaly_count=0 且 summary 空的结论
+    long_term_context_trim_enabled: bool = True    # 注入 LLM 前裁剪兜底开关
+    long_term_context_max_tokens_pct: int = 10     # 长期记忆最大占 context_window 的百分比
 
     model_config = {"env_prefix": "MEMORY_"}
 
@@ -335,6 +352,8 @@ class Settings(BaseSettings):
             merged["memory"] = {
                 "short_term_max_messages": short_term.get("max_messages", 20),
                 "short_term_summary_threshold": short_term.get("summary_threshold", 15),
+                "short_term_context_trim_enabled": short_term.get("context_trim_enabled", True),
+                "short_term_context_max_tokens_pct": short_term.get("context_max_tokens_pct", 15),
                 "long_term_enabled": long_term.get("enabled", True),
                 "long_term_max_retrieved": long_term.get("max_retrieved", 5),
                 "long_term_fusion_k": long_term.get("fusion_k", 60),
@@ -344,6 +363,8 @@ class Settings(BaseSettings):
                 "long_term_skip_empty_conclusions": long_term.get(
                     "skip_empty_conclusions", False
                 ),
+                "long_term_context_trim_enabled": long_term.get("context_trim_enabled", True),
+                "long_term_context_max_tokens_pct": long_term.get("context_max_tokens_pct", 10),
             }
 
         # 环境变量注入敏感字段（支持明文和加密两种模式）

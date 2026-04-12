@@ -7,7 +7,13 @@ import json
 import pytest
 
 from modules.p2p.tools import (
+    analyze_discount_utilization,
+    analyze_receipt_anomalies,
+    analyze_vendor_concentration,
+    calculate_po_cycle_time,
+    calculate_spend_analysis,
     calculate_supplier_kpis,
+    detect_duplicate_invoices,
     query_invoices,
     query_payments,
     query_purchase_orders,
@@ -79,3 +85,82 @@ class TestAnalysisTools:
         result = await calculate_supplier_kpis.ainvoke({"supplier_id": "SUP-001", "period": "2024-Q1"})
         data = json.loads(result)
         assert isinstance(data, dict)
+
+
+class TestNewAnalysisTools:
+    """第一梯队新增分析工具测试。"""
+
+    async def test_calculate_spend_analysis_by_category(self) -> None:
+        result = await calculate_spend_analysis.ainvoke({"group_by": "category", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+        if data:
+            assert "group_key" in data[0]
+            assert "total_amount" in data[0]
+
+    async def test_calculate_spend_analysis_by_supplier(self) -> None:
+        result = await calculate_spend_analysis.ainvoke({"group_by": "supplier", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+
+    async def test_analyze_receipt_anomalies(self) -> None:
+        result = await analyze_receipt_anomalies.ainvoke({"days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+        # mock 数据中有拒收记录，应检测到异常
+        if data:
+            assert "issues" in data[0]
+            assert "po_number" in data[0]
+
+    async def test_analyze_receipt_anomalies_by_supplier(self) -> None:
+        result = await analyze_receipt_anomalies.ainvoke({"supplier_id": "SUP-001", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+
+    async def test_detect_duplicate_invoices(self) -> None:
+        result = await detect_duplicate_invoices.ainvoke({"days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+
+    async def test_detect_duplicate_invoices_by_supplier(self) -> None:
+        result = await detect_duplicate_invoices.ainvoke({"supplier_id": "SUP-001", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, list)
+
+    async def test_analyze_discount_utilization(self) -> None:
+        result = await analyze_discount_utilization.ainvoke({"days": 365})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+        assert "total_eligible" in data
+        assert "utilization_rate" in data
+
+    async def test_analyze_discount_utilization_by_supplier(self) -> None:
+        result = await analyze_discount_utilization.ainvoke({"supplier_id": "SUP-001", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+
+    async def test_calculate_po_cycle_time(self) -> None:
+        result = await calculate_po_cycle_time.ainvoke({"days": 365})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+        assert "total_orders" in data
+        assert "details" in data
+
+    async def test_calculate_po_cycle_time_by_supplier(self) -> None:
+        result = await calculate_po_cycle_time.ainvoke({"supplier_id": "SUP-001", "days": 365})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+
+    async def test_analyze_vendor_concentration(self) -> None:
+        result = await analyze_vendor_concentration.ainvoke({"days": 365})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+        assert "grand_total_spend" in data
+        assert "top_vendors" in data
+        assert "single_source_categories" in data
+
+    async def test_analyze_vendor_concentration_top_n(self) -> None:
+        result = await analyze_vendor_concentration.ainvoke({"days": 365, "top_n": 3})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+        assert len(data["top_vendors"]) <= 3

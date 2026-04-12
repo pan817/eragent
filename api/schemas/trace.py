@@ -38,6 +38,7 @@ class RunOut(BaseModel):
     model_call_count: int
     tool_call_count: int
     error: str | None = None
+    token_summary: dict[str, Any] | None = None
 
 
 class RunDetailOut(RunOut):

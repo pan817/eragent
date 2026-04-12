@@ -7,7 +7,11 @@ import time
 import pytest
 
 import core.observability  # noqa: F401  触发 tables 注册到 Base.metadata
-from core.observability.middleware import TimingMiddleware, record_memory_span
+from core.observability.middleware import (
+    TimingMiddleware,
+    estimate_tokens,
+    record_memory_span,
+)
 from core.observability.store import RunEvent, SpanEvent, TraceStore
 from core.database import Base
 from core.database.engine import create_engine_from_dsn, get_session_factory
@@ -49,15 +53,44 @@ class _FakeToolCallRequest:
         self.runtime = None
 
 
+class _FakeMessage:
+    def __init__(self, content: str = "", role: str = "user"):
+        self.content = content
+        self.type = role
+
+
 class _FakeModel:
     model_name = "glm-4"
 
 
+class _FakeSystemMessage:
+    def __init__(self, content: str = "你是一位专业的分析专家"):
+        self.content = content
+
+
+class _FakeArgsSchema:
+    @staticmethod
+    def schema():
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+
+class _FakeToolDef:
+    def __init__(self, name: str = "query_data", description: str = "查询数据工具"):
+        self.name = name
+        self.description = description
+        self.args_schema = _FakeArgsSchema()
+
+
 class _FakeModelRequest:
-    def __init__(self):
+    def __init__(self, messages=None, system_message=None, tools=None):
         self.model = _FakeModel()
-        self.messages = [1, 2, 3]
-        self.tools = [object(), object()]
+        self.messages = messages if messages is not None else [
+            _FakeMessage("你好"),
+            _FakeMessage("分析一下", "system"),
+            _FakeMessage("结果", "assistant"),
+        ]
+        self.system_message = system_message
+        self.tools = tools if tools is not None else [_FakeToolDef(), _FakeToolDef("run_check", "执行检查")]
 
 
 def test_middleware_tool_and_model_spans(store):
@@ -322,3 +355,232 @@ def test_store_enqueue_drops_on_full(tmp_path):
     # 第二次不应抛异常
     s.enqueue(RunEvent(kind="run_start", trace_id="t2", agent_name="a"))
     engine.dispose()
+
+
+# ============================================================
+# estimate_tokens
+# ============================================================
+
+
+def test_estimate_tokens_empty():
+    """空字符串或 None 应返回 0。"""
+    assert estimate_tokens("") == 0
+    assert estimate_tokens(None) == 0
+
+
+def test_estimate_tokens_nonempty():
+    """非空字符串应返回正整数。"""
+    result = estimate_tokens("你好世界，这是一段测试文本")
+    assert result > 0
+    assert isinstance(result, int)
+
+
+def test_estimate_tokens_short():
+    """极短字符串至少返回 1。"""
+    assert estimate_tokens("a") >= 1
+
+
+# ============================================================
+# model span estimated_input_tokens
+# ============================================================
+
+
+def test_model_span_has_estimated_input_tokens(store):
+    """model span 应包含 estimated_input_tokens 属性。"""
+    mw = TimingMiddleware(agent_name="token_agent", store=store, print_console=False)
+    mw.start_run(session_id="s1")
+
+    def model_handler(req):
+        return "ok"
+
+    mw.wrap_model_call(_FakeModelRequest(), model_handler)
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    model_span = next(s for s in spans if s.span_type == "model")
+    assert "estimated_input_tokens" in model_span.attributes
+    assert model_span.attributes["estimated_input_tokens"] > 0
+
+
+def test_estimated_input_tokens_includes_system_message(store):
+    """estimated_input_tokens 应包含 system_message 的 token。"""
+    mw = TimingMiddleware(agent_name="sys_agent", store=store, print_console=False)
+    mw.start_run()
+
+    def handler(req):
+        return "ok"
+
+    # 无 system_message
+    req_no_sys = _FakeModelRequest(
+        messages=[_FakeMessage("短消息")],
+        system_message=None,
+        tools=[],
+    )
+    mw.wrap_model_call(req_no_sys, handler)
+
+    # 有 system_message
+    req_with_sys = _FakeModelRequest(
+        messages=[_FakeMessage("短消息")],
+        system_message=_FakeSystemMessage("这是一段很长的系统提示词" * 50),
+        tools=[],
+    )
+    mw.wrap_model_call(req_with_sys, handler)
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    model_spans = [s for s in spans if s.span_type == "model"]
+    assert len(model_spans) == 2
+    tokens_no_sys = model_spans[0].attributes["estimated_input_tokens"]
+    tokens_with_sys = model_spans[1].attributes["estimated_input_tokens"]
+    assert tokens_with_sys > tokens_no_sys
+
+
+def test_estimated_input_tokens_includes_tool_schemas(store):
+    """estimated_input_tokens 应包含工具定义 schema 的 token。"""
+    mw = TimingMiddleware(agent_name="tool_agent", store=store, print_console=False)
+    mw.start_run()
+
+    def handler(req):
+        return "ok"
+
+    # 无 tools
+    req_no_tools = _FakeModelRequest(
+        messages=[_FakeMessage("查询")],
+        tools=[],
+    )
+    mw.wrap_model_call(req_no_tools, handler)
+
+    # 有 tools
+    req_with_tools = _FakeModelRequest(
+        messages=[_FakeMessage("查询")],
+        tools=[_FakeToolDef(f"tool_{i}", f"工具描述 {i}" * 20) for i in range(8)],
+    )
+    mw.wrap_model_call(req_with_tools, handler)
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    model_spans = [s for s in spans if s.span_type == "model"]
+    tokens_no_tools = model_spans[0].attributes["estimated_input_tokens"]
+    tokens_with_tools = model_spans[1].attributes["estimated_input_tokens"]
+    assert tokens_with_tools > tokens_no_tools
+
+
+# ============================================================
+# agent span token_summary
+# ============================================================
+
+
+def test_agent_span_has_token_summary(store):
+    """finish_run 后 agent span 应包含 token_summary 汇总。"""
+    mw = TimingMiddleware(agent_name="summary_agent", store=store, print_console=False)
+    mw.start_run()
+
+    def model_handler(req):
+        return "result"
+
+    mw.wrap_model_call(_FakeModelRequest(), model_handler)
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    agent_span = next(s for s in spans if s.span_type == "agent")
+    ts = agent_span.attributes.get("token_summary")
+    assert ts is not None
+    assert "total_prompt_tokens" in ts
+    assert "total_completion_tokens" in ts
+    assert "peak_prompt_tokens" in ts
+
+
+# ============================================================
+# store.get_token_summary
+# ============================================================
+
+
+def test_get_token_summary_returns_none_for_missing_trace(store):
+    """不存在的 trace_id 应返回 None。"""
+    assert store.get_token_summary("nonexistent") is None
+
+
+def test_get_token_summary_extracts_from_agent_span(store):
+    """应从 agent span 的 attributes 中提取 token_summary。"""
+    mw = TimingMiddleware(agent_name="ts_agent", store=store, print_console=False)
+    trace_id = mw.start_run()
+
+    def model_handler(req):
+        return "ok"
+
+    mw.wrap_model_call(_FakeModelRequest(), model_handler)
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    ts = store.get_token_summary(trace_id)
+    assert ts is not None
+    assert isinstance(ts, dict)
+    assert "total_prompt_tokens" in ts
+
+
+# ============================================================
+# finish_run token_summary: usage fallback（ReportAgent 风格 span）
+# ============================================================
+
+
+def test_token_summary_with_toplevel_usage(store):
+    """ReportAgent 风格的 model span（usage 在 attrs 顶层而非 output 内）
+    也应被 finish_run 正确汇总到 token_summary。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="fallback_agent", store=store, print_console=False)
+    mw.start_run()
+
+    # 模拟 ReportAgent 手动记录的 model span：output 是 string，usage 在顶层
+    with record_span("model", "qwen3-max") as attrs:
+        attrs["model"] = "qwen3-max"
+        attrs["input"] = "some prompt"
+        attrs["output"] = "report content"  # string, not dict
+        attrs["usage"] = {"input_tokens": 500, "output_tokens": 200}
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    agent_span = next(s for s in spans if s.span_type == "agent")
+    ts = agent_span.attributes["token_summary"]
+    assert ts["total_prompt_tokens"] == 500
+    assert ts["total_completion_tokens"] == 200
+    assert ts["peak_prompt_tokens"] == 500
+
+
+def test_token_summary_mixed_span_styles(store):
+    """同一 trace 中混合 TimingMiddleware 和 ReportAgent 风格的 model span，
+    token 应全部被累加。"""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="mixed_agent", store=store, print_console=False)
+    mw.start_run()
+
+    # 模拟 TimingMiddleware 风格：output 是 dict，内含 usage
+    with record_span("model", "mw_model") as attrs:
+        attrs["output"] = {
+            "content": "...",
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 300},
+        }
+
+    # 模拟 ReportAgent 风格：output 是 string，usage 在顶层
+    with record_span("model", "report_model") as attrs:
+        attrs["output"] = "report text"
+        attrs["usage"] = {"input_tokens": 800, "output_tokens": 150}
+
+    mw.finish_run()
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    agent_span = next(s for s in spans if s.span_type == "agent")
+    ts = agent_span.attributes["token_summary"]
+    assert ts["total_prompt_tokens"] == 1800   # 1000 + 800
+    assert ts["total_completion_tokens"] == 450  # 300 + 150
+    assert ts["peak_prompt_tokens"] == 1000

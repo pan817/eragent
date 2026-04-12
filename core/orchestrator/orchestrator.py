@@ -11,7 +11,9 @@ Orchestrator 编排器模块。
 
 from __future__ import annotations
 
+import atexit
 import asyncio
+import threading
 import time
 import uuid
 from typing import Any
@@ -30,12 +32,55 @@ from core.orchestrator.router import IntentRouter
 
 _logger = get_logger(__name__)
 
+# 输出模式 → prompt 后缀
+_OUTPUT_MODE_PROMPTS: dict[str, str] = {
+    "detailed": "",
+    "brief": "请以简报摘要形式输出，控制在 3-5 个要点，突出关键数据和结论，总字数不超过 500 字。",
+    "table": "请优先使用 Markdown 表格呈现核心数据，辅以不超过 2 句话的结论。",
+}
+
+
+def _resolve_time_range(time_range: str | None) -> int | None:
+    """将 time_range 字符串转换为天数。
+
+    Args:
+        time_range: 如 "7d"/"30d"/"this_month"/"last_month"，None 表示未传。
+
+    Returns:
+        等效天数，None 表示未传或无法解析。
+    """
+    if not time_range:
+        return None
+
+    import re
+    from datetime import date, timedelta
+
+    # Nd 格式
+    m = re.match(r"^(\d+)d$", time_range)
+    if m:
+        return int(m.group(1))
+
+    today = date.today()
+
+    if time_range == "this_month":
+        # 本月1日到今天
+        return (today - today.replace(day=1)).days + 1
+
+    if time_range == "last_month":
+        # 上月1日到今天（近似覆盖，包含本月数据）
+        first_of_this_month = today.replace(day=1)
+        first_of_last_month = (first_of_this_month - timedelta(days=1)).replace(day=1)
+        return (today - first_of_last_month).days
+
+    return None
+
 
 class Orchestrator:
     """P2P 分析编排器。
 
     协调意图解析、DAG/Agent 调度和结果封装的核心组件。
-    采用延迟初始化策略，避免启动时加载重量级依赖。
+    Checkpointer（短期记忆）在 Orchestrator 级别管理，
+    作为基础设施注入给 P2PAgent 和 DAG 路径共享使用。
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -45,6 +90,9 @@ class Orchestrator:
         self._agent: Any = None
         self._dag_executor: Any = None
         self._report_agent: Any = None
+        self._checkpointer: Any | None = None
+        self._checkpointer_cm: Any | None = None
+        self._lock = threading.RLock()
         self._init_components()
 
     def _init_components(self) -> None:
@@ -54,11 +102,72 @@ class Orchestrator:
             agent_name="p2p_agent"
         )
 
+    # ── Checkpointer 生命周期管理 ──────────────────────────────────
+
+    def _get_checkpointer(self) -> Any:
+        """延迟构建 LangGraph PostgresSaver checkpointer。
+
+        使用项目共用的 PostgreSQL，首次调用时进入 context manager
+        并触发 setup() 建表。进程退出时通过 atexit 关闭底层连接。
+        初始化失败时抛出异常，由调用方捕获降级。
+        """
+        if self._checkpointer is not None:
+            return self._checkpointer
+        with self._lock:
+            if self._checkpointer is not None:
+                return self._checkpointer
+            from langgraph.checkpoint.postgres import PostgresSaver
+            from core.observability.checkpointer import attach_tracing as attach_checkpointer_tracing
+
+            conninfo = self._settings.postgresql.conninfo
+            cm = PostgresSaver.from_conn_string(conninfo)
+            saver = cm.__enter__()
+            try:
+                saver.setup()
+            except Exception:
+                cm.__exit__(None, None, None)
+                raise
+            attach_checkpointer_tracing(saver, self._timing_middleware)
+            self._checkpointer_cm = cm
+            self._checkpointer = saver
+            atexit.register(self._close_checkpointer)
+            _logger.info("checkpointer initialized (Orchestrator-level)")
+            return saver
+
+    def _close_checkpointer(self) -> None:
+        """关闭 checkpointer 的 context manager（atexit 回调，幂等）。"""
+        cm = self._checkpointer_cm
+        if cm is None:
+            return
+        self._checkpointer_cm = None
+        self._checkpointer = None
+        try:
+            cm.__exit__(None, None, None)
+        except Exception:
+            pass
+
+    def _ensure_checkpointer(self) -> Any | None:
+        """获取 checkpointer，初始化失败时返回 None（不阻塞主流程）。"""
+        try:
+            return self._get_checkpointer()
+        except Exception as exc:
+            _logger.warning(
+                "checkpointer init failed, short-term memory disabled: %s", exc
+            )
+            return None
+
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
-        """清理 P2PAgent 的短期记忆。"""
-        if self._agent is None:
+        """清理短期记忆（checkpointer 中对应 thread_id 的历史）。"""
+        if self._checkpointer is None:
             return 0
-        return self._agent.clear_short_term_memory(session_id)
+        if session_id is None:
+            return 0
+        try:
+            self._checkpointer.delete_thread(session_id)
+            return 1
+        except Exception as exc:
+            _logger.warning("clear short-term memory failed: %s", exc)
+            return 0
 
     def _persist_report(self, result: AnalysisResult) -> None:
         """将成功的分析结果写入长期记忆。"""
@@ -95,6 +204,7 @@ class Orchestrator:
             self._agent = P2PAgent(
                 settings=self._settings,
                 timing_middleware=self._timing_middleware,
+                checkpointer=self._ensure_checkpointer(),
             )
         return self._agent
 
@@ -114,6 +224,216 @@ class Orchestrator:
                 report_agent=self._report_agent,
             )
         return self._dag_executor
+
+    # ── 实体 DB 验证 ──────────────────────────────────────────────────
+
+    async def _validate_entities(
+        self, repo: Any, params: dict[str, Any]
+    ) -> None:
+        """验证正则提取的实体是否在 DB 中存在，不存在则清除。
+
+        防止误匹配（如 "最近 10045 天" 中 10045 被当作 PO 号）。
+        验证失败不阻塞主流程。
+        """
+        from core.observability.middleware import record_span
+
+        with record_span("entity", "validate_entities") as span_attrs:
+            input_entities = {k: v for k, v in params.items() if k != "days" and v}
+            span_attrs["input"] = input_entities.copy()
+            discarded: list[str] = []
+
+            # PO 号验证
+            po = params.get("po_number", "")
+            if po:
+                try:
+                    orders = await asyncio.to_thread(
+                        repo.query_purchase_orders, po_number=po
+                    )
+                    if not orders:
+                        _logger.info("entity validation: po_number=%s not found in DB, discarded", po)
+                        del params["po_number"]
+                        discarded.append(f"po_number={po}")
+                except Exception as exc:
+                    _logger.warning("entity validation (po_number) failed: %s", exc)
+
+            # 供应商验证
+            sid = params.get("supplier_id", "")
+            if sid:
+                try:
+                    orders = await asyncio.to_thread(
+                        repo.query_purchase_orders, supplier_id=sid
+                    )
+                    if not orders:
+                        _logger.info("entity validation: supplier_id=%s not found in DB, discarded", sid)
+                        del params["supplier_id"]
+                        discarded.append(f"supplier_id={sid}")
+                except Exception as exc:
+                    _logger.warning("entity validation (supplier_id) failed: %s", exc)
+
+            # 发票号验证
+            inv = params.get("invoice_number", "")
+            if inv:
+                try:
+                    invoices = await asyncio.to_thread(
+                        repo.query_invoices, supplier_id="", status=""
+                    )
+                    if not any(i.get("invoice_number") == inv for i in invoices):
+                        _logger.info("entity validation: invoice_number=%s not found in DB, discarded", inv)
+                        del params["invoice_number"]
+                        discarded.append(f"invoice_number={inv}")
+                except Exception as exc:
+                    _logger.warning("entity validation (invoice_number) failed: %s", exc)
+
+            # 付款号验证
+            pay = params.get("payment_number", "")
+            if pay:
+                try:
+                    payments = await asyncio.to_thread(
+                        repo.query_payments, payment_number=pay
+                    )
+                    if not payments:
+                        _logger.info("entity validation: payment_number=%s not found in DB, discarded", pay)
+                        del params["payment_number"]
+                        discarded.append(f"payment_number={pay}")
+                except Exception as exc:
+                    _logger.warning("entity validation (payment_number) failed: %s", exc)
+
+            # 收货号验证
+            rcv = params.get("receipt_number", "")
+            if rcv:
+                try:
+                    receipts = await asyncio.to_thread(
+                        repo.query_receipts, po_number="", supplier_id=""
+                    )
+                    if not any(
+                        r.get("receipt_id") == rcv or r.get("gr_number") == rcv
+                        for r in receipts
+                    ):
+                        _logger.info("entity validation: receipt_number=%s not found in DB, discarded", rcv)
+                        del params["receipt_number"]
+                        discarded.append(f"receipt_number={rcv}")
+                except Exception as exc:
+                    _logger.warning("entity validation (receipt_number) failed: %s", exc)
+
+            validated = {k: v for k, v in params.items() if k != "days" and v}
+            span_attrs["validated"] = validated
+            span_attrs["discarded"] = discarded
+            span_attrs["status"] = "ok"
+
+    # ── 实体关联补充 ─────────────────────────────────────────────────
+
+    async def _enrich_entities(self, params: dict[str, Any]) -> None:
+        """验证并补充实体关联。
+
+        两阶段处理：
+        阶段 1：DB 验证——正则提取的实体在 DB 中是否存在，不存在则清除（防误匹配）。
+        阶段 2：级联补充——从已有实体反查关联实体。
+          1. payment_number → invoice_number（付款关联发票）
+          2. receipt_number → po_number, supplier_id（收货关联 PO 和供应商）
+          3. invoice_number → po_number, supplier_id（发票关联 PO 和供应商）
+          4. po_number → supplier_id（PO 关联供应商）
+
+        查询失败不阻塞主流程。
+        """
+        from core.observability.middleware import record_span
+
+        try:
+            from modules.p2p.tools import _get_repository
+            repo = _get_repository()
+        except Exception:
+            return
+
+        # ── 阶段 1：DB 验证 ──
+        await self._validate_entities(repo, params)
+
+        # ── 阶段 2：级联补充 ──
+        with record_span("entity", "enrich_entities") as span_attrs:
+            before = {k: v for k, v in params.items() if k != "days" and v}
+            span_attrs["before"] = before.copy()
+            enriched_pairs: list[str] = []
+
+            def _log_enriched(src: str, src_val: str, tgt: str, tgt_val: str) -> None:
+                _logger.info("entity enriched: %s=%s → %s=%s", src, src_val, tgt, tgt_val)
+                enriched_pairs.append(f"{src}={src_val}→{tgt}={tgt_val}")
+
+            # 1. payment_number → invoice_number
+            pay = params.get("payment_number", "")
+            if pay and not params.get("invoice_number"):
+                try:
+                    payments = await asyncio.to_thread(
+                        repo.query_payments, payment_number=pay
+                    )
+                    if payments:
+                        inv_num = payments[0].get("invoice_number", "")
+                        if inv_num:
+                            params["invoice_number"] = inv_num
+                            _log_enriched("payment_number", pay, "invoice_number", inv_num)
+                except Exception as exc:
+                    _logger.warning("entity enrichment (payment→invoice) failed: %s", exc)
+
+            # 2. receipt_number → po_number, supplier_id
+            rcv = params.get("receipt_number", "")
+            if rcv:
+                try:
+                    receipts = await asyncio.to_thread(
+                        repo.query_receipts, po_number="", supplier_id=""
+                    )
+                    matched = [r for r in receipts if r.get("receipt_id") == rcv or r.get("gr_number") == rcv]
+                    if matched:
+                        if not params.get("po_number"):
+                            po_num = matched[0].get("po_number", "")
+                            if po_num:
+                                params["po_number"] = po_num
+                                _log_enriched("receipt_number", rcv, "po_number", po_num)
+                        if not params.get("supplier_id"):
+                            sid = matched[0].get("supplier_id", "")
+                            if sid:
+                                params["supplier_id"] = sid
+                                _log_enriched("receipt_number", rcv, "supplier_id", sid)
+                except Exception as exc:
+                    _logger.warning("entity enrichment (receipt→po/supplier) failed: %s", exc)
+
+            # 3. invoice_number → po_number, supplier_id
+            inv = params.get("invoice_number", "")
+            if inv:
+                try:
+                    invoices = await asyncio.to_thread(
+                        repo.query_invoices, supplier_id="", status=""
+                    )
+                    matched = [i for i in invoices if i.get("invoice_number") == inv]
+                    if matched:
+                        if not params.get("po_number"):
+                            po_num = matched[0].get("po_number", "")
+                            if po_num:
+                                params["po_number"] = po_num
+                                _log_enriched("invoice_number", inv, "po_number", po_num)
+                        if not params.get("supplier_id"):
+                            sid = matched[0].get("supplier_id", "")
+                            if sid:
+                                params["supplier_id"] = sid
+                                _log_enriched("invoice_number", inv, "supplier_id", sid)
+                except Exception as exc:
+                    _logger.warning("entity enrichment (invoice→po/supplier) failed: %s", exc)
+
+            # 4. po_number → supplier_id
+            po = params.get("po_number", "")
+            if po and not params.get("supplier_id"):
+                try:
+                    orders = await asyncio.to_thread(
+                        repo.query_purchase_orders, po_number=po
+                    )
+                    if orders:
+                        sid = orders[0].get("supplier_id", "")
+                        if sid:
+                            params["supplier_id"] = sid
+                            _log_enriched("po_number", po, "supplier_id", sid)
+                except Exception as exc:
+                    _logger.warning("entity enrichment (po→supplier) failed: %s", exc)
+
+            after = {k: v for k, v in params.items() if k != "days" and v}
+            span_attrs["after"] = after
+            span_attrs["enriched"] = enriched_pairs
+            span_attrs["status"] = "ok"
 
     # ── 短期记忆上下文读取 ─────────────────────────────────────────
 
@@ -136,14 +456,13 @@ class Orchestrator:
             span_attrs["session_id"] = session_id
 
             try:
-                agent = self._lazy_agent
-                checkpointer = agent._checkpointer
+                checkpointer = self._ensure_checkpointer()
                 if checkpointer is None:
                     span_attrs["status"] = "skipped"
                     span_attrs["reason"] = "checkpointer not available"
                     return empty
 
-                config = {"configurable": {"thread_id": session_id}}
+                config = {"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}
                 existing = checkpointer.get_tuple(config)
 
                 if not existing or not existing.checkpoint:
@@ -174,12 +493,25 @@ class Orchestrator:
                 # 从历史 query 和 response 中提取实体
                 entities: dict[str, Any] = {}
                 for text in [last_human, last_ai]:
-                    extracted = _extract_params(text)
+                    extracted = _extract_params(
+                        text, self._settings.analysis.entity_patterns
+                    )
                     for key, val in extracted.items():
                         if key not in entities and val:
                             entities[key] = val
 
-                context_summary = last_ai[:500] if last_ai else ""
+                # 集中裁剪：所有路径的短期记忆都经过此产出点
+                context_summary = last_ai if last_ai else ""
+                if context_summary and self._settings.memory.short_term_context_trim_enabled:
+                    from modules.p2p.prompts import trim_to_token_budget
+                    max_tokens = int(
+                        self._settings.llm.context_window
+                        * self._settings.memory.short_term_context_max_tokens_pct
+                        / 100
+                    )
+                    context_summary = trim_to_token_budget(
+                        context_summary, max_tokens, "短期记忆"
+                    )
 
                 span_attrs["status"] = "ok"
                 span_attrs["has_history"] = True
@@ -288,9 +620,9 @@ class Orchestrator:
             if generic_ref:
                 relevant = entities.copy()
 
-        # 无任何指代检测命中，但有历史 → 全部补充（保持向后兼容）
-        if not relevant and not re.search(_GENERIC_REF, query):
-            relevant = entities.copy()
+        # 无指代词时不做隐式继承——避免用户的新查询被静默限定到历史实体范围。
+        # 例如用户上一轮分析了 SUP-001，这一轮问"分析价格差异"，
+        # 不应自动限定为 SUP-001 的价格差异。
 
         return enhanced, relevant
 
@@ -324,54 +656,82 @@ class Orchestrator:
                 self._load_session_context, session_id
             )
 
-            # 1. 指代消解：将指代词替换为具体实体，确定关联的实体子集
-            enhanced_query, relevant_entities = self._resolve_references(
-                request.query, session_ctx
-            )
-            if enhanced_query != request.query:
-                _logger.info(
-                    "reference resolved: '%s' → '%s' (entities: %s)",
-                    request.query,
-                    enhanced_query,
-                    list(relevant_entities.keys()),
-                )
+            # 0.5 检测是否为非分析意图（回溯/闲聊等）
+            from core.orchestrator.router import _is_non_analysis_query
+            is_recall = _is_non_analysis_query(request.query)
 
-            # 2. 意图解析（用增强后的 query 路由）
-            signal = self._intent_router.route(enhanced_query)
+            # 1. 指代消解：非分析意图时跳过实体继承
+            if is_recall:
+                enhanced_query = request.query
+                relevant_entities: dict[str, Any] = {}
+                _logger.info(
+                    "non-analysis query detected, skip entity inheritance: '%s'",
+                    request.query,
+                )
+            else:
+                enhanced_query, relevant_entities = self._resolve_references(
+                    request.query, session_ctx
+                )
+                if enhanced_query != request.query:
+                    _logger.info(
+                        "reference resolved: '%s' → '%s' (entities: %s)",
+                        request.query,
+                        enhanced_query,
+                        list(relevant_entities.keys()),
+                    )
+
+            # 2. 意图解析（用增强后的 query 路由，传入角色偏好）
+            signal = self._intent_router.route(
+                enhanced_query, analyst_role=request.analyst_role
+            )
             analysis_type: AnalysisType = request.analysis_type or self._intent_router.resolve_type(signal)
 
             # 3. 合并参数
             parsed_params = signal.entities.copy()
+            # time_range 优先级: time_range > time_range_days > query 提取 > config 默认
+            resolved_days = _resolve_time_range(request.time_range)
             time_range_days: int = (
-                request.time_range_days
+                resolved_days
+                or request.time_range_days
                 or signal.time_range_days
                 or self._settings.analysis.default_time_range_days
             )
             parsed_params["days"] = time_range_days
 
-            # 4. 选择性补充上下文实体（只补充指代消解确定的关联实体）
-            for key, val in relevant_entities.items():
-                if key not in parsed_params or not parsed_params[key]:
-                    parsed_params[key] = val
-                    _logger.debug(
-                        "entity '%s'='%s' inherited from session context", key, val
-                    )
+            # 4. 选择性补充上下文实体（非分析意图时跳过）
+            if not is_recall:
+                for key, val in relevant_entities.items():
+                    if key not in parsed_params or not parsed_params[key]:
+                        parsed_params[key] = val
+                        _logger.debug(
+                            "entity '%s'='%s' inherited from session context", key, val
+                        )
+
+            # 4.5 实体关联补充：有 po_number 但缺 supplier_id 时从 DB 反查
+            if not is_recall:
+                await self._enrich_entities(parsed_params)
 
             # 5. 路由决策
+            # - 非分析意图 → 强制 ReAct（用户在回溯/闲聊，不是发起新分析）
             # - L1/L2 命中且非 COMPREHENSIVE → DAG 执行
             # - COMPREHENSIVE + 有具体实体 → 实体维度 DAG
             # - 其余 → ReAct 兜底
-            has_entity = bool(
-                parsed_params.get("po_number")
-                or parsed_params.get("supplier_id")
-                or parsed_params.get("payment_number")
-                or parsed_params.get("invoice_number")
-                or parsed_params.get("receipt_number")
-            )
-            use_dag = (
-                (signal.route_level in (1, 2) and analysis_type != AnalysisType.COMPREHENSIVE)
-                or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
-            )
+            if is_recall:
+                use_dag = False
+            else:
+                has_entity = bool(
+                    parsed_params.get("po_number")
+                    or parsed_params.get("supplier_id")
+                    or parsed_params.get("payment_number")
+                    or parsed_params.get("invoice_number")
+                    or parsed_params.get("receipt_number")
+                )
+                use_dag = (
+                    (signal.route_level in (1, 2) and analysis_type != AnalysisType.COMPREHENSIVE)
+                    or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
+                )
+
+            output_mode_prompt = _OUTPUT_MODE_PROMPTS.get(request.output_mode, "")
 
             if use_dag:
                 result = await self._execute_dag(
@@ -385,6 +745,7 @@ class Orchestrator:
                     time_range_days=time_range_days,
                     start_time=start_time,
                     signal=signal,
+                    output_mode_prompt=output_mode_prompt,
                 )
             else:
                 result = await self._execute_react(
@@ -398,10 +759,15 @@ class Orchestrator:
                     time_range_days=time_range_days,
                     start_time=start_time,
                     signal=signal,
+                    context_summary=session_ctx.get("context_summary", ""),
+                    skip_memory_write=is_recall,
+                    output_mode_prompt=output_mode_prompt,
                 )
 
-            # 5. 持久化
-            await asyncio.to_thread(self._persist_report, result)
+            # 5. 持久化（非分析意图的回溯查询不写入长期记忆和报告，
+            #    避免 "Q: 上次分析的结果呢 A: ..." 被存入记忆产生循环引用）
+            if not is_recall:
+                await asyncio.to_thread(self._persist_report, result)
             return result
 
         except Exception as exc:
@@ -440,6 +806,7 @@ class Orchestrator:
         time_range_days: int,
         start_time: float,
         signal: Any,
+        output_mode_prompt: str = "",
     ) -> AnalysisResult:
         """通过 DAG Executor 执行分析。"""
         from core.orchestrator.dag.templates import load_dag_template
@@ -489,16 +856,39 @@ class Orchestrator:
             signal.confidence,
         )
 
-        dag_result = await executor.execute(dag_tasks)
+        # 长期记忆读取：检索历史记忆，注入 ReportAgent 上下文
+        long_term_context = await self._load_long_term_memory(user_id, query)
+
+        # 记录 context_budget span（DAG 路径）
+        self._record_dag_context_budget(
+            long_term_context=long_term_context,
+            query=query,
+        )
+
+        dag_result = await executor.execute(
+            dag_tasks,
+            long_term_context=long_term_context,
+            output_mode_prompt=output_mode_prompt,
+        )
         duration_ms = (time.monotonic() - start_time) * 1000.0
 
-        # DAG 执行完成后，将 query + 报告写入短期记忆（checkpointer），
-        # 确保同一 session 的后续请求（无论 DAG 还是 ReAct）能看到本次对话历史。
         report_text = dag_result.get("report", "")
+
+        # 短期记忆写入
         await self._save_dag_to_short_term_memory(
             query=query,
             response=report_text,
             session_id=session_id,
+            time_range_days=time_range_days,
+        )
+
+        # 长期记忆写入（save_memory）
+        await self._save_dag_to_long_term_memory(
+            user_id=user_id,
+            session_id=session_id,
+            query=query,
+            response=report_text,
+            analysis_type=analysis_type,
             time_range_days=time_range_days,
         )
 
@@ -534,6 +924,135 @@ class Orchestrator:
             duration_ms=duration_ms,
         )
 
+    # ── DAG context_budget 记录 ────────────────────────────────────────
+
+    def _record_dag_context_budget(
+        self,
+        *,
+        long_term_context: str,
+        query: str,
+    ) -> None:
+        """记录 DAG 路径的 context_budget span。
+
+        DAG 路径的 LLM 调用仅发生在 ReportAgent，其 prompt 由
+        报告模板 + 工具输出 + 长期记忆上下文组成。
+        此处记录长期记忆和查询的 token 估算，工具输出 token
+        在执行前未知，由 ReportAgent 的 model span 覆盖。
+        """
+        from core.observability.middleware import estimate_tokens, record_span
+
+        long_term_tokens = estimate_tokens(long_term_context)
+        query_tokens = estimate_tokens(query)
+        # ReportAgent 的报告模板固定部分（_REPORT_PROMPT 去除变量约 350 字符）
+        report_template_tokens = estimate_tokens("x" * 350)
+
+        total_inject_tokens = report_template_tokens + long_term_tokens + query_tokens
+        context_window = self._settings.llm.context_window
+        budget_usage_pct = round(
+            total_inject_tokens / context_window * 100, 1
+        ) if context_window > 0 else 0.0
+
+        with record_span(
+            "context_budget", "context_budget_dag",
+            route_type="DAG",
+            report_template_tokens=report_template_tokens,
+            long_term_memory_tokens=long_term_tokens,
+            user_message_tokens=query_tokens,
+            total_inject_tokens=total_inject_tokens,
+            model_context_limit=context_window,
+            budget_usage_pct=budget_usage_pct,
+            note="不含工具输出 token（执行前未知，见 model span）",
+        ):
+            pass
+
+    # ── DAG 长期记忆读取 ─────────────────────────────────────────────
+
+    async def _load_long_term_memory(
+        self, user_id: str, query: str
+    ) -> str:
+        """检索长期记忆，返回格式化的上下文文本。
+
+        与 P2PAgent 中的长期记忆读取逻辑对齐。
+        读取失败不阻塞主流程，返回空字符串。
+        """
+        if not self._settings.memory.long_term_enabled:
+            return ""
+
+        try:
+            from core.memory import get_long_term_memory
+            from modules.p2p.prompts import format_long_term_memory
+
+            ltm = get_long_term_memory()
+            max_retrieved = self._settings.memory.long_term_max_retrieved
+            snippets = await asyncio.to_thread(
+                ltm.search_memories,
+                user_id=user_id,
+                query=query,
+                limit=max_retrieved,
+            )
+            text = format_long_term_memory(snippets)
+            if text:
+                _logger.debug(
+                    "DAG long-term memory loaded: %d snippets for user=%s",
+                    len(snippets),
+                    user_id,
+                )
+            return text
+        except Exception as exc:
+            _logger.warning("DAG long-term memory retrieval skipped: %s", exc)
+            return ""
+
+    # ── DAG 长期记忆写入 ─────────────────────────────────────────────
+
+    async def _save_dag_to_long_term_memory(
+        self,
+        user_id: str,
+        session_id: str,
+        query: str,
+        response: str,
+        analysis_type: AnalysisType,
+        time_range_days: int,
+    ) -> None:
+        """将 DAG 分析结论写入长期记忆（memories 表）。
+
+        与 P2PAgent 中的 save_memory 逻辑对齐：
+        使用相同的 _build_memory_content / _build_memory_metadata 构建内容。
+        写入失败不阻塞主流程。
+        """
+        if not response or not self._settings.memory.long_term_enabled:
+            return
+
+        try:
+            from core.memory import get_long_term_memory
+            from modules.p2p.agent import _build_memory_content, _build_memory_metadata
+
+            ltm = get_long_term_memory()
+            content = _build_memory_content(
+                query=query, response=response, summary={},
+            )
+            metadata = _build_memory_metadata(
+                query=query,
+                analysis_type=analysis_type.value,
+                anomalies=[],
+                summary={},
+                time_range_days=time_range_days,
+            )
+            await asyncio.to_thread(
+                ltm.save_memory,
+                user_id=user_id,
+                session_id=session_id,
+                memory_type="analysis_conclusion",
+                content=content,
+                metadata=metadata,
+            )
+            _logger.debug(
+                "DAG analysis conclusion saved to long-term memory: user=%s session=%s",
+                user_id,
+                session_id,
+            )
+        except Exception as exc:
+            _logger.warning("DAG long-term memory save skipped: %s", exc)
+
     # ── DAG 短期记忆写入 ────────────────────────────────────────────
 
     async def _save_dag_to_short_term_memory(
@@ -545,9 +1064,9 @@ class Orchestrator:
     ) -> None:
         """将 DAG 执行的 query + response 写入 checkpointer 短期记忆。
 
-        构造与 ReAct 路径一致的 HumanMessage + AIMessage 对，
-        通过 checkpointer.put 写入，确保同 session 后续请求能读到历史。
-        写入失败不阻塞主流程（与 ReAct 路径 checkpointer 降级策略一致）。
+        通过 agent.update_state 写入，确保 checkpoint 的 channel 格式
+        与 LangGraph agent 内部一致（避免手动 put 导致格式不兼容）。
+        写入失败不阻塞主流程。
         """
         from core.observability.middleware import record_span
 
@@ -557,12 +1076,16 @@ class Orchestrator:
             span_attrs["response_length"] = len(response)
 
             try:
-                # 延迟获取 checkpointer（通过 P2PAgent 共享实例）
                 agent = self._lazy_agent
-                checkpointer = agent._checkpointer
-                if checkpointer is None:
+
+                # 写入前截断历史，防止消息无限累积
+                max_short_term = self._settings.memory.short_term_max_messages
+                agent._truncate_checkpointer_history(session_id, max_short_term)
+
+                agent_graph = agent._get_or_build_agent()
+                if agent_graph is None:
                     span_attrs["status"] = "skipped"
-                    span_attrs["reason"] = "checkpointer not available"
+                    span_attrs["reason"] = "agent not available"
                     return
 
                 from langchain_core.messages import AIMessage, HumanMessage
@@ -574,44 +1097,13 @@ class Orchestrator:
 
                 config = {"configurable": {"thread_id": session_id}}
 
-                # 读取现有 checkpoint（可能为 None）
-                existing = checkpointer.get_tuple(config)
-
-                if existing and existing.checkpoint:
-                    # 在已有 checkpoint 基础上追加消息
-                    checkpoint = existing.checkpoint
-                    channel_values = checkpoint.get("channel_values", {})
-                    messages = channel_values.get("messages", [])
-                    messages.extend([user_msg, ai_msg])
-                    channel_values["messages"] = messages
-                    checkpoint["channel_values"] = channel_values
-
-                    import uuid as _uuid
-                    checkpoint["id"] = str(_uuid.uuid4())
-
-                    metadata = {
-                        "source": "dag",
-                        "step": (existing.metadata or {}).get("step", 0) + 1,
-                        "writes": None,
-                    }
-                    await asyncio.to_thread(
-                        checkpointer.put, config, checkpoint, metadata, {}
-                    )
-                else:
-                    # 首次写入，构造新 checkpoint
-                    import uuid as _uuid
-                    checkpoint = {
-                        "v": 1,
-                        "id": str(_uuid.uuid4()),
-                        "ts": None,
-                        "channel_values": {"messages": [user_msg, ai_msg]},
-                        "channel_versions": {},
-                        "versions_seen": {},
-                    }
-                    metadata = {"source": "dag", "step": 1, "writes": None}
-                    await asyncio.to_thread(
-                        checkpointer.put, config, checkpoint, metadata, {}
-                    )
+                # update_state 以 LangGraph 内部格式写入 checkpoint，
+                # 与 agent.ainvoke 自动写入的格式完全一致。
+                await asyncio.to_thread(
+                    agent_graph.update_state,
+                    config,
+                    {"messages": [user_msg, ai_msg]},
+                )
 
                 span_attrs["status"] = "ok"
                 span_attrs["n_messages"] = 2
@@ -640,6 +1132,9 @@ class Orchestrator:
         time_range_days: int,
         start_time: float,
         signal: Any = None,
+        context_summary: str = "",
+        skip_memory_write: bool = False,
+        output_mode_prompt: str = "",
     ) -> AnalysisResult:
         """通过 P2PAgent ReAct 模式执行分析（Level 3 兜底）。"""
         agent_result: dict[str, Any] = await self._lazy_agent.run(
@@ -649,6 +1144,9 @@ class Orchestrator:
             time_range_days=time_range_days,
             user_id=user_id,
             session_id=session_id,
+            context_summary=context_summary,
+            skip_memory_write=skip_memory_write,
+            output_mode_prompt=output_mode_prompt,
         )
 
         duration_ms = (time.monotonic() - start_time) * 1000.0

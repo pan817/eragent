@@ -399,3 +399,107 @@ GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=tool
 
 ### 11.5 按 session 列出 trace
 GET {{host}}/api/v1/traces?session_id=trace-session-001&limit=5
+
+
+### ============================================================
+### 十二、新增分析场景（第一梯队 6 个场景）
+### 预期：L1 关键词命中 → DAG 执行
+### ============================================================
+
+### 12.1 采购支出分析 - 按品类
+### 预期：L1 → spend_analysis DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析最近的采购支出分布，按品类统计花费情况",
+    "user_id": "test-new-001"
+}
+
+### 12.2 采购支出分析 - 按供应商
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "各供应商的采购支出占比分析",
+    "user_id": "test-new-002"
+}
+
+### 12.3 收货异常分析
+### 预期：L1 → receipt_anomaly DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析最近有没有超量收货或拒收的情况",
+    "user_id": "test-new-003"
+}
+
+### 12.4 收货异常分析 - 指定供应商
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查 SUP-001 的收货延迟和退货记录",
+    "user_id": "test-new-004"
+}
+
+### 12.5 发票重复检测
+### 预期：L1 → invoice_duplicate DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "检查有没有重复发票或重复付款的情况",
+    "user_id": "test-new-005"
+}
+
+### 12.6 折扣利用率分析
+### 预期：L1 → discount_utilization DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析早付折扣的利用情况，错过了多少折扣机会",
+    "user_id": "test-new-006"
+}
+
+### 12.7 PO 周期分析
+### 预期：L1 → po_cycle_time DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析采购订单从下单到收货到付款的周期耗时",
+    "user_id": "test-new-007"
+}
+
+### 12.8 供应商集中度分析
+### 预期：L1 → vendor_concentration DAG
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析供应商集中度和采购依赖风险，有没有单一来源",
+    "user_id": "test-new-008"
+}
+
+### 12.9 显式指定新分析类型
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "分析采购数据",
+    "user_id": "test-new-009",
+    "analysis_type": "spend_analysis"
+}
+
+### 12.10 显式指定收货异常类型
+POST {{host}}/api/v1/analyze
+Content-Type: application/json
+
+{
+    "query": "看看最近的数据",
+    "user_id": "test-new-010",
+    "analysis_type": "receipt_anomaly"
+}
