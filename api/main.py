@@ -88,9 +88,9 @@ def create_app() -> FastAPI:
     )
 
     # 挂载 API v1 路由
-    app.include_router(analyze_router, prefix="/api/v1")
-    app.include_router(sessions_router, prefix="/api/v1")
-    app.include_router(traces_router, prefix="/api/v1")
+    app.include_router(analyze_router, prefix="/api/v1/ptp-agent")
+    app.include_router(sessions_router, prefix="/api/v1/ptp-agent")
+    app.include_router(traces_router, prefix="/api/v1/ptp-agent")
 
     return app
 
@@ -113,7 +113,7 @@ async def health_check() -> dict[str, Any]:
     }
 
 
-@app.post("/api/v1/init-data", tags=["data"])
+@app.post("/api/v1/ptp-agent/init-data", tags=["data"])
 async def init_data() -> dict[str, Any]:
     """初始化模拟数据。
 

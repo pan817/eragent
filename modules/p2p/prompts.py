@@ -50,7 +50,8 @@ def get_ontology_context() -> str:
             f"### 核心业务实体\n{entities_text}\n"
             f"### 合规规则\n{rules_text}"
         )
-    except Exception:
+    except Exception as exc:
+        _logger.warning("get_ontology_context failed, using default narrative: %s", exc)
         return _DEFAULT_ONTOLOGY_NARRATIVE
 
 
@@ -122,8 +123,8 @@ def format_long_term_memory(records: list[dict[str, Any]]) -> str:
                 / 100
             )
             text = trim_to_token_budget(text, max_tokens, "长期记忆")
-    except Exception:
-        pass  # 配置加载失败不阻塞，保留原始文本
+    except Exception as exc:
+        _logger.debug("long-term memory trim config load failed, keeping original text: %s", exc)
 
     return text
 

@@ -15,8 +15,8 @@ llm:
   # api_key: 通过环境变量 LLM_API_KEY 注入
   temperature: 0.1
   max_tokens: 4096
-  timeout: 120               # 请求超时（秒）
-  max_retries: 3             # 最大重试次数
+  timeout: 240               # 请求超时（秒）；单次 LLM 最大耗时 240s
+  max_retries: 2             # 最大重试次数；最坏 240s×3=720s
   use_system_proxy: false    # 是否读取系统代理（HTTP_PROXY/HTTPS_PROXY）；false=强制直连
   context_window: 32768      # 模型上下文窗口大小（token 数）
   token_estimate_ratio: 1.5  # 字符数 / token 数估算比率（中文约 1.5）
@@ -38,6 +38,8 @@ chroma:
   # embedding_api_key: 通过环境变量 CHROMA_EMBEDDING_API_KEY 注入
   default_top_k: 5
   min_score: 0.0
+  enable_long_term_indexing: false   # 长期记忆写入时同步索引到向量库
+  enable_report_indexing: false      # 报告写入时同步索引到向量库
   # 多 collection 划分：业务键 → 实际 collection 名称
   collections:
     ontology_p2p: "ontology_p2p"
@@ -51,8 +53,8 @@ postgresql:
   database: "eragent"
   username: "dev"
   # password: 通过环境变量 POSTGRES_PASSWORD 注入
-  pool_size: 5
-  max_overflow: 10
+  pool_size: 20
+  max_overflow: 30
 
 mock_data:
   record_count: 500              # 模拟数据生成条数（PO/发票/付款各 N 条）
@@ -61,7 +63,8 @@ mock_data:
 analysis:
   default_time_range_days: 30    # 默认分析时间范围（天）
   max_time_range_days: 365       # 单次查询最大时间范围（天）
-  response_timeout_seconds: 5.0  # 单次分析响应超时（秒）
+  response_timeout_seconds: 900.0  # 整体超时；需覆盖 LLM 含重试(720s) + 编排开销
+  db_io_timeout_seconds: 30.0    # 数据库 I/O 单次操作硬超时（秒）
 
   # 实体编号正则模式（按客户 EBS 编号规则配置）
   # 每个实体支持多个正则模式（按顺序尝试，首个匹配即返回）
@@ -83,6 +86,17 @@ analysis:
     days:
       - '(?:最近|过去|近)\s*(\d+)\s*天'
       - '(?:past|last|recent)\s+(\d+)\s*days?'
+
+agent_runtime:
+  max_short_term_sessions: 1024       # 进程内最大并发 session 数（LRU 淘汰）
+  retry_backoff_base_seconds: 1.0     # 重试退避基数（秒），实际等待 base * 2^attempt
+  retry_backoff_max_seconds: 30.0     # 退避上限（秒）
+
+observability:
+  max_io_text: 2000                   # trace 中 input/output 文本截断长度
+  trace_queue_maxsize: 10000          # trace 异步写入队列上限
+  trace_batch_size: 50                # 批量写入条数
+  trace_flush_interval: 1.0           # 批量写入间隔（秒）
 
 p2p:
   three_way_match:

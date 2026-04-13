@@ -425,7 +425,8 @@ class IntentRouter:
                 }
                 for r in results
             ]
-        except Exception:
+        except Exception as exc:
+            _logger.debug("_search_seeds_for_trace vector search failed: %s", exc)
             return []
 
     # ── Level 1：关键词命中率 ────────────────────────────────────────
@@ -601,7 +602,11 @@ class IntentRouter:
         self, query: str, params: dict[str, Any], analyst_role: str = "general"
     ) -> QuerySignal:
         """LLM 分类兜底，始终返回结果。"""
-        from core.observability.middleware import record_span
+        from core.observability.middleware import (
+            _safe_jsonable,
+            estimate_tokens,
+            record_span,
+        )
 
         try:
             llm = self._ensure_llm()
@@ -620,9 +625,18 @@ class IntentRouter:
             with record_span("model", str(model_name)) as model_attrs:
                 model_attrs["model"] = str(model_name)
                 model_attrs["input"] = prompt[:2000]
+                model_attrs["estimated_input_tokens"] = estimate_tokens(prompt)
                 response = llm.invoke(prompt)
                 content: str = response.content if hasattr(response, "content") else str(response)
-                model_attrs["output"] = content[:2000]
+                usage = (
+                    getattr(response, "usage_metadata", None)
+                    or getattr(response, "response_metadata", None)
+                )
+                model_attrs["output"] = {
+                    "content": content[:2000],
+                    "tool_calls": None,
+                    "usage": _safe_jsonable(usage) if usage else None,
+                }
 
             # 清理可能的 markdown 代码块
             raw = content.strip()

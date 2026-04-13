@@ -231,7 +231,8 @@ class P2PAgent:
                     schema_dict = schema.schema() if callable(getattr(schema, "schema", None)) else {}
                     total_chars += len(json.dumps(schema_dict, ensure_ascii=False))
             result = estimate_tokens("x" * total_chars)
-        except Exception:
+        except Exception as exc:
+            _logger.warning("_estimate_tool_definitions_tokens failed: %s", exc)
             result = 0
         self._tool_definitions_tokens_cache = result
         return result
@@ -256,7 +257,8 @@ class P2PAgent:
                 if isinstance(content, str):
                     total_chars += len(content)
             return estimate_tokens("x" * total_chars), len(messages)
-        except Exception:
+        except Exception as exc:
+            _logger.warning("_estimate_checkpointer_tokens failed: %s", exc)
             return 0, 0
 
     def _record_context_budget(
@@ -485,6 +487,15 @@ class P2PAgent:
                 )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("long-term memory retrieval skipped: %s", exc)
+                from core.observability.middleware import record_span
+
+                with record_span(
+                    "memory", "memory.read_failed",
+                    user_id=user_id,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                ) as span_attrs:
+                    span_attrs["status"] = "error"
 
         long_term_text = format_long_term_memory(long_term_snippets)
         if long_term_text:
@@ -589,6 +600,15 @@ class P2PAgent:
                         )
                     except Exception as exc:  # noqa: BLE001
                         _logger.warning("long-term memory save skipped: %s", exc)
+                        from core.observability.middleware import record_span
+
+                        with record_span(
+                            "memory", "memory.write_failed",
+                            user_id=user_id,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                        ) as span_attrs:
+                            span_attrs["status"] = "error"
 
                 elapsed_ms: float = (time.monotonic() - start_time) * 1000
 

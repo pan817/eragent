@@ -83,7 +83,7 @@ class TestE2EThreeWayMatch:
 
     def test_three_way_match_full_flow(self, e2e_client: TestClient) -> None:
         """自然语言请求 → 意图解析 → LLM 驱动工具调用 → 规则检查 → 返回报告。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "请分析最近的三路匹配异常情况",
             "user_id": "e2e-tester",
         })
@@ -106,7 +106,7 @@ class TestE2EPriceVariance:
 
     def test_price_variance_full_flow(self, e2e_client: TestClient) -> None:
         """价格差异分析全链路：LLM 应调用价格分析工具并生成报告。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "分析采购价格差异",
         })
 
@@ -122,7 +122,7 @@ class TestE2EPaymentCompliance:
 
     def test_payment_compliance_full_flow(self, e2e_client: TestClient) -> None:
         """付款合规全链路：LLM 应检测逾期/提前付款并生成报告。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "检查付款合规性，是否有逾期付款",
         })
 
@@ -143,7 +143,7 @@ class TestE2ESupplierPerformance:
         raw = gen.generate_all()
         supplier_id = raw["po_headers"][0]["supplier_id"]
 
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": f"评估供应商 {supplier_id} 的绩效 KPI",
         })
 
@@ -159,7 +159,7 @@ class TestE2EComprehensive:
 
     def test_comprehensive_analysis(self, e2e_client: TestClient) -> None:
         """模糊查询 → 意图解析为 COMPREHENSIVE → LLM 自主选择多个工具 → 综合报告。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "帮我全面分析一下最近的采购数据，看看有什么异常",
         })
 
@@ -175,7 +175,7 @@ class TestE2ECustomTimeRange:
 
     def test_explicit_time_range(self, e2e_client: TestClient) -> None:
         """用户指定 time_range_days=90 → 结果中正确反映。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "三路匹配检查",
             "time_range_days": 90,
         })
@@ -187,7 +187,7 @@ class TestE2ECustomTimeRange:
 
     def test_time_range_from_query_text(self, e2e_client: TestClient) -> None:
         """查询文本含 "最近60天" → IntentParser 提取 → 时间范围正确。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "分析最近60天的三路匹配情况",
         })
 
@@ -201,7 +201,7 @@ class TestE2EExplicitAnalysisType:
 
     def test_explicit_type_overrides_intent(self, e2e_client: TestClient) -> None:
         """显式 analysis_type 优先于意图解析。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "三路匹配相关的分析",
             "analysis_type": "payment_compliance",
         })
@@ -216,17 +216,17 @@ class TestE2EValidation:
 
     def test_empty_query_returns_422(self, e2e_client: TestClient) -> None:
         """空查询文本 → 422。"""
-        resp = e2e_client.post("/api/v1/analyze", json={"query": ""})
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={"query": ""})
         assert resp.status_code == 422
 
     def test_query_too_long_returns_422(self, e2e_client: TestClient) -> None:
         """超长查询文本 → 422。"""
-        resp = e2e_client.post("/api/v1/analyze", json={"query": "x" * 2001})
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={"query": "x" * 2001})
         assert resp.status_code == 422
 
     def test_invalid_time_range_returns_422(self, e2e_client: TestClient) -> None:
         """非法时间范围 → 422。"""
-        resp = e2e_client.post("/api/v1/analyze", json={
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": "分析",
             "time_range_days": 0,
         })
@@ -242,7 +242,7 @@ class TestE2EObservability:
         deadline = time.monotonic() + timeout
         last: list = []
         while time.monotonic() < deadline:
-            resp = client.get("/api/v1/traces", params={"limit": 50})
+            resp = client.get("/api/v1/ptp-agent/traces", params={"limit": 50})
             assert resp.status_code == 200
             last = resp.json()
             match = next((r for r in last if predicate(r)), None)
@@ -254,12 +254,12 @@ class TestE2EObservability:
     def test_analyze_records_full_trace(self, e2e_client: TestClient) -> None:
         """analyze 请求结束后，TraceStore 应记录完整的 agent/model/tool span 树。"""
         # 先记录已有 trace_id 集合，便于精确定位本次请求新增的那一条
-        before_resp = e2e_client.get("/api/v1/traces", params={"limit": 200})
+        before_resp = e2e_client.get("/api/v1/ptp-agent/traces", params={"limit": 200})
         assert before_resp.status_code == 200
         existing_ids = {r["trace_id"] for r in before_resp.json()}
 
         resp = e2e_client.post(
-            "/api/v1/analyze",
+            "/api/v1/ptp-agent/analyze",
             json={
                 "query": "请分析最近的三路匹配异常情况",
                 "user_id": "obs-tester",
@@ -285,7 +285,7 @@ class TestE2EObservability:
         assert run["error"] is None
 
         # 详情：应至少包含 1 个 agent + 1 个 model + 1 个 tool span
-        detail_resp = e2e_client.get(f"/api/v1/traces/{run['trace_id']}")
+        detail_resp = e2e_client.get(f"/api/v1/ptp-agent/traces/{run['trace_id']}")
         assert detail_resp.status_code == 200
         detail = detail_resp.json()
         spans = detail["spans"]
@@ -314,12 +314,12 @@ class TestE2EObservability:
 
     def test_traces_filtering_and_404(self, e2e_client: TestClient) -> None:
         """list 支持分页/过滤；未知 trace_id 返回 404。"""
-        resp = e2e_client.get("/api/v1/traces", params={"limit": 5})
+        resp = e2e_client.get("/api/v1/ptp-agent/traces", params={"limit": 5})
         assert resp.status_code == 200
         runs = resp.json()
         assert len(runs) <= 5
 
-        missing = e2e_client.get("/api/v1/traces/00000000-0000-0000-0000-000000000000")
+        missing = e2e_client.get("/api/v1/ptp-agent/traces/00000000-0000-0000-0000-000000000000")
         assert missing.status_code == 404
 
 

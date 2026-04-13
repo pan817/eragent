@@ -29,6 +29,10 @@ from core.memory.tables import metadata_obj as memory_metadata  # noqa: E402
 # 触发 Declarative 子类注册（trace_runs / trace_spans 等）
 import core.observability.tables  # noqa: E402,F401
 
+# 触发 Core Table 注册到 memory_metadata（dag_cases / chat_sessions / chat_messages）
+import core.chat.tables  # noqa: E402,F401
+import core.orchestrator.dag.tables  # noqa: E402,F401
+
 config = context.config
 
 if config.config_file_name is not None:
@@ -56,7 +60,18 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """在线模式：连库执行迁移。"""
+    """在线模式：连库执行迁移。
+
+    使用 PostgreSQL advisory lock 防止多 worker 并发执行迁移。
+    第一个 worker 获取锁并执行迁移，其他 worker 阻塞等待后发现
+    已是最新版本，直接跳过。SQLite 等不支持 advisory lock 的方言
+    直接执行迁移。
+    """
+    from sqlalchemy import text
+
+    # advisory lock key：所有 worker 竞争同一把锁
+    _MIGRATION_LOCK_ID = 20260413
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -64,12 +79,22 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+        use_advisory_lock = connection.dialect.name == "postgresql"
+
+        if use_advisory_lock:
+            connection.execute(text("SELECT pg_advisory_lock(:id)"), {"id": _MIGRATION_LOCK_ID})
+
+        try:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            if use_advisory_lock:
+                connection.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _MIGRATION_LOCK_ID})
+                connection.commit()
 
 
 if context.is_offline_mode():

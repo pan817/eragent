@@ -95,6 +95,7 @@ class DAGCaseStore:
                 dag=dag,
                 route_type=route_type,
                 duration_sec=duration_sec,
+                span_attrs=span_attrs,
             )
             span_attrs["pg_ok"] = pg_ok
 
@@ -106,6 +107,7 @@ class DAGCaseStore:
                 dag=dag,
                 route_type=route_type,
                 duration_sec=duration_sec,
+                span_attrs=span_attrs,
             )
             span_attrs["chroma_ok"] = chroma_ok
 
@@ -117,12 +119,15 @@ class DAGCaseStore:
         dag: list[dict[str, Any]],
         route_type: str,
         duration_sec: float,
+        span_attrs: dict[str, Any] | None = None,
     ) -> bool:
         """写入 PostgreSQL（upsert by query_hash）。返回是否成功。"""
         try:
             session_factory = self._ensure_session_factory()
         except Exception as exc:
             _logger.warning("dag case PG session init failed: %s", exc)
+            if span_attrs is not None:
+                span_attrs["pg_error"] = f"{type(exc).__name__}: {exc}"
             return False
 
         from core.orchestrator.dag.tables import dag_cases_table
@@ -155,6 +160,8 @@ class DAGCaseStore:
                 return True
         except Exception as exc:
             _logger.warning("DAG case PG write failed: %s", exc)
+            if span_attrs is not None:
+                span_attrs["pg_error"] = f"{type(exc).__name__}: {exc}"
             return False
 
     def _write_to_chroma(
@@ -165,12 +172,15 @@ class DAGCaseStore:
         dag: list[dict[str, Any]],
         route_type: str,
         duration_sec: float,
+        span_attrs: dict[str, Any] | None = None,
     ) -> bool:
         """写入 Chroma（检索缓存）。返回是否成功。"""
         try:
             store = self._ensure_chroma()
         except Exception as exc:
             _logger.warning("dag case Chroma init failed: %s", exc)
+            if span_attrs is not None:
+                span_attrs["chroma_error"] = f"{type(exc).__name__}: {exc}"
             return False
 
         doc_id = f"dag_case_{query_hash}"
@@ -198,6 +208,8 @@ class DAGCaseStore:
             return True
         except Exception as exc:
             _logger.warning("DAG case Chroma write failed: %s", exc)
+            if span_attrs is not None:
+                span_attrs["chroma_error"] = f"{type(exc).__name__}: {exc}"
             return False
 
     # ── 启动加载（PG → Chroma） ────────────────────────────────────

@@ -143,8 +143,8 @@ class Orchestrator:
         self._checkpointer = None
         try:
             cm.__exit__(None, None, None)
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.debug("checkpointer close failed (non-critical): %s", exc)
 
     def _ensure_checkpointer(self) -> Any | None:
         """获取 checkpointer，初始化失败时返回 None（不阻塞主流程）。"""
@@ -154,6 +154,14 @@ class Orchestrator:
             _logger.warning(
                 "checkpointer init failed, short-term memory disabled: %s", exc
             )
+            from core.observability.middleware import record_span
+
+            with record_span(
+                "checkpoint", "checkpointer_init_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            ) as span_attrs:
+                span_attrs["status"] = "error"
             return None
 
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
@@ -241,6 +249,7 @@ class Orchestrator:
             input_entities = {k: v for k, v in params.items() if k != "days" and v}
             span_attrs["input"] = input_entities.copy()
             discarded: list[str] = []
+            errors: list[str] = []
 
             # PO 号验证
             po = params.get("po_number", "")
@@ -255,6 +264,7 @@ class Orchestrator:
                         discarded.append(f"po_number={po}")
                 except Exception as exc:
                     _logger.warning("entity validation (po_number) failed: %s", exc)
+                    errors.append(f"po_number: {type(exc).__name__}: {exc}")
 
             # 供应商验证
             sid = params.get("supplier_id", "")
@@ -269,6 +279,7 @@ class Orchestrator:
                         discarded.append(f"supplier_id={sid}")
                 except Exception as exc:
                     _logger.warning("entity validation (supplier_id) failed: %s", exc)
+                    errors.append(f"supplier_id: {type(exc).__name__}: {exc}")
 
             # 发票号验证
             inv = params.get("invoice_number", "")
@@ -283,6 +294,7 @@ class Orchestrator:
                         discarded.append(f"invoice_number={inv}")
                 except Exception as exc:
                     _logger.warning("entity validation (invoice_number) failed: %s", exc)
+                    errors.append(f"invoice_number: {type(exc).__name__}: {exc}")
 
             # 付款号验证
             pay = params.get("payment_number", "")
@@ -297,6 +309,7 @@ class Orchestrator:
                         discarded.append(f"payment_number={pay}")
                 except Exception as exc:
                     _logger.warning("entity validation (payment_number) failed: %s", exc)
+                    errors.append(f"payment_number: {type(exc).__name__}: {exc}")
 
             # 收货号验证
             rcv = params.get("receipt_number", "")
@@ -314,11 +327,16 @@ class Orchestrator:
                         discarded.append(f"receipt_number={rcv}")
                 except Exception as exc:
                     _logger.warning("entity validation (receipt_number) failed: %s", exc)
+                    errors.append(f"receipt_number: {type(exc).__name__}: {exc}")
 
             validated = {k: v for k, v in params.items() if k != "days" and v}
             span_attrs["validated"] = validated
             span_attrs["discarded"] = discarded
-            span_attrs["status"] = "ok"
+            if errors:
+                span_attrs["validation_errors"] = errors
+                span_attrs["status"] = "partial"
+            else:
+                span_attrs["status"] = "ok"
 
     # ── 实体关联补充 ─────────────────────────────────────────────────
 
@@ -351,6 +369,7 @@ class Orchestrator:
             before = {k: v for k, v in params.items() if k != "days" and v}
             span_attrs["before"] = before.copy()
             enriched_pairs: list[str] = []
+            errors: list[str] = []
 
             def _log_enriched(src: str, src_val: str, tgt: str, tgt_val: str) -> None:
                 _logger.info("entity enriched: %s=%s → %s=%s", src, src_val, tgt, tgt_val)
@@ -370,6 +389,7 @@ class Orchestrator:
                             _log_enriched("payment_number", pay, "invoice_number", inv_num)
                 except Exception as exc:
                     _logger.warning("entity enrichment (payment→invoice) failed: %s", exc)
+                    errors.append(f"payment→invoice: {type(exc).__name__}: {exc}")
 
             # 2. receipt_number → po_number, supplier_id
             rcv = params.get("receipt_number", "")
@@ -392,6 +412,7 @@ class Orchestrator:
                                 _log_enriched("receipt_number", rcv, "supplier_id", sid)
                 except Exception as exc:
                     _logger.warning("entity enrichment (receipt→po/supplier) failed: %s", exc)
+                    errors.append(f"receipt→po/supplier: {type(exc).__name__}: {exc}")
 
             # 3. invoice_number → po_number, supplier_id
             inv = params.get("invoice_number", "")
@@ -414,6 +435,7 @@ class Orchestrator:
                                 _log_enriched("invoice_number", inv, "supplier_id", sid)
                 except Exception as exc:
                     _logger.warning("entity enrichment (invoice→po/supplier) failed: %s", exc)
+                    errors.append(f"invoice→po/supplier: {type(exc).__name__}: {exc}")
 
             # 4. po_number → supplier_id
             po = params.get("po_number", "")
@@ -429,11 +451,16 @@ class Orchestrator:
                             _log_enriched("po_number", po, "supplier_id", sid)
                 except Exception as exc:
                     _logger.warning("entity enrichment (po→supplier) failed: %s", exc)
+                    errors.append(f"po→supplier: {type(exc).__name__}: {exc}")
 
             after = {k: v for k, v in params.items() if k != "days" and v}
             span_attrs["after"] = after
             span_attrs["enriched"] = enriched_pairs
-            span_attrs["status"] = "ok"
+            if errors:
+                span_attrs["enrichment_errors"] = errors
+                span_attrs["status"] = "partial"
+            else:
+                span_attrs["status"] = "ok"
 
     # ── 短期记忆上下文读取 ─────────────────────────────────────────
 
@@ -650,6 +677,81 @@ class Orchestrator:
         trace_status: str = "success"
         trace_error: str | None = None
 
+        timeout = self._settings.analysis.response_timeout_seconds
+
+        try:
+            return await asyncio.wait_for(
+                self._analyze_inner(
+                    request=request,
+                    start_time=start_time,
+                    report_id=report_id,
+                    session_id=session_id,
+                    timing_middleware=timing_middleware,
+                    trace_id=trace_id,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            trace_status = "timeout"
+            duration_ms = (time.monotonic() - start_time) * 1000.0
+            trace_error = (
+                f"TimeoutError: 分析响应超时 "
+                f"(elapsed={duration_ms:.0f}ms, limit={timeout}s)"
+            )
+            _logger.error(
+                "analyze timeout: elapsed=%.0fms limit=%.0fs query='%s'",
+                duration_ms,
+                timeout,
+                request.query,
+            )
+            return AnalysisResult(
+                report_id=report_id,
+                trace_id=trace_id,
+                status=AnalysisStatus.FAILED,
+                analysis_type=request.analysis_type or AnalysisType.COMPREHENSIVE,
+                query=request.query,
+                user_id=request.user_id,
+                session_id=session_id,
+                time_range="",
+                error=ErrorInfo(
+                    code="RESPONSE_TIMEOUT",
+                    message=f"分析响应超时（限制 {timeout}s）",
+                ),
+                duration_ms=duration_ms,
+            )
+        except Exception as exc:
+            trace_status = "error"
+            trace_error = f"{type(exc).__name__}: {exc}"
+            duration_ms = (time.monotonic() - start_time) * 1000.0
+            return AnalysisResult(
+                report_id=report_id,
+                trace_id=trace_id,
+                status=AnalysisStatus.FAILED,
+                analysis_type=request.analysis_type or AnalysisType.COMPREHENSIVE,
+                query=request.query,
+                user_id=request.user_id,
+                session_id=session_id,
+                time_range="",
+                error=ErrorInfo(
+                    code="ORCHESTRATOR_ERROR",
+                    message=str(exc),
+                ),
+                duration_ms=duration_ms,
+            )
+        finally:
+            timing_middleware.finish_run(status=trace_status, error=trace_error)
+
+    async def _analyze_inner(
+        self,
+        *,
+        request: AnalysisRequest,
+        start_time: float,
+        report_id: str,
+        session_id: str,
+        timing_middleware: Any,
+        trace_id: str,
+    ) -> AnalysisResult:
+        """analyze 的实际执行逻辑（被 wait_for 包裹以支持整体超时）。"""
         try:
             # 0. 读取短期记忆上下文（提取历史实体）
             session_ctx = await asyncio.to_thread(
@@ -770,27 +872,8 @@ class Orchestrator:
                 await asyncio.to_thread(self._persist_report, result)
             return result
 
-        except Exception as exc:
-            trace_status = "error"
-            trace_error = f"{type(exc).__name__}: {exc}"
-            duration_ms = (time.monotonic() - start_time) * 1000.0
-            return AnalysisResult(
-                report_id=report_id,
-                trace_id=trace_id,
-                status=AnalysisStatus.FAILED,
-                analysis_type=request.analysis_type or AnalysisType.COMPREHENSIVE,
-                query=request.query,
-                user_id=request.user_id,
-                session_id=session_id,
-                time_range="",
-                error=ErrorInfo(
-                    code="ORCHESTRATOR_ERROR",
-                    message=str(exc),
-                ),
-                duration_ms=duration_ms,
-            )
-        finally:
-            timing_middleware.finish_run(status=trace_status, error=trace_error)
+        except Exception:
+            raise
 
     # ── DAG 执行路径 ────────────────────────────────────────────────
 

@@ -52,7 +52,7 @@ _THREE_WAY_MATCH_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -62,7 +62,7 @@ _THREE_WAY_MATCH_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "gr_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -72,7 +72,7 @@ _THREE_WAY_MATCH_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}", "invoice_number": "{invoice_number}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t4",
@@ -82,7 +82,7 @@ _THREE_WAY_MATCH_DAG = [
         "depends_on": ["t1", "t2", "t3"],
         "inputs": {"po_number": "{po_number}"},
         "output_key": "match_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t5",
@@ -92,7 +92,7 @@ _THREE_WAY_MATCH_DAG = [
         "depends_on": ["t4"],
         "inputs": {"scenario": "三路匹配分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -108,7 +108,7 @@ _PRICE_VARIANCE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -118,7 +118,7 @@ _PRICE_VARIANCE_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "ppv_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t3",
@@ -128,7 +128,7 @@ _PRICE_VARIANCE_DAG = [
         "depends_on": ["t2"],
         "inputs": {"scenario": "价格差异分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -144,7 +144,7 @@ _PAYMENT_COMPLIANCE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}", "invoice_number": "{invoice_number}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -154,7 +154,7 @@ _PAYMENT_COMPLIANCE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "payment_number": "{payment_number}", "invoice_number": "{invoice_number}"},
         "output_key": "payment_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -164,7 +164,7 @@ _PAYMENT_COMPLIANCE_DAG = [
         "depends_on": ["t1", "t2"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "compliance_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t4",
@@ -174,7 +174,7 @@ _PAYMENT_COMPLIANCE_DAG = [
         "depends_on": ["t3"],
         "inputs": {"scenario": "付款合规分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -190,7 +190,7 @@ _SUPPLIER_PERFORMANCE_DAG = [
         "depends_on": [],
         "inputs": {"vendor_ids": "{supplier_id}"},
         "output_key": "vendor_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -200,7 +200,7 @@ _SUPPLIER_PERFORMANCE_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "period": "近{days}天"},
         "output_key": "kpi_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t3",
@@ -210,7 +210,7 @@ _SUPPLIER_PERFORMANCE_DAG = [
         "depends_on": ["t2"],
         "inputs": {"scenario": "供应商绩效分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -227,7 +227,7 @@ _PO_RISK_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -237,7 +237,7 @@ _PO_RISK_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "po_number": "{po_number}", "supplier_id": "{supplier_id}"},
         "output_key": "gr_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -247,7 +247,7 @@ _PO_RISK_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "po_number": "{po_number}", "supplier_id": "{supplier_id}", "invoice_number": "{invoice_number}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t4",
@@ -257,7 +257,7 @@ _PO_RISK_DAG = [
         "depends_on": ["t1", "t2", "t3"],
         "inputs": {"po_number": "{po_number}"},
         "output_key": "match_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t5",
@@ -267,7 +267,7 @@ _PO_RISK_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "ppv_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t6",
@@ -277,7 +277,7 @@ _PO_RISK_DAG = [
         "depends_on": ["t3"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "compliance_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t7",
@@ -287,7 +287,7 @@ _PO_RISK_DAG = [
         "depends_on": ["t4", "t5", "t6"],
         "inputs": {"scenario": "采购订单 {po_number} 综合风险分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -304,7 +304,7 @@ _SUPPLIER_RISK_DAG = [
         "depends_on": [],
         "inputs": {"vendor_ids": "{supplier_id}"},
         "output_key": "vendor_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -314,7 +314,7 @@ _SUPPLIER_RISK_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "period": "近{days}天"},
         "output_key": "kpi_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t3",
@@ -324,7 +324,7 @@ _SUPPLIER_RISK_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "ppv_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t4",
@@ -334,7 +334,7 @@ _SUPPLIER_RISK_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "compliance_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t5",
@@ -344,7 +344,7 @@ _SUPPLIER_RISK_DAG = [
         "depends_on": ["t2", "t3", "t4"],
         "inputs": {"scenario": "供应商 {supplier_id} 综合风险分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -361,7 +361,7 @@ _PAYMENT_SINGLE_DAG = [
         "depends_on": [],
         "inputs": {"payment_number": "{payment_number}", "invoice_number": "{invoice_number}", "supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "payment_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -371,7 +371,7 @@ _PAYMENT_SINGLE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "invoice_number": "{invoice_number}", "po_number": "{po_number}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -381,7 +381,7 @@ _PAYMENT_SINGLE_DAG = [
         "depends_on": ["t1", "t2"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "compliance_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t4",
@@ -391,7 +391,7 @@ _PAYMENT_SINGLE_DAG = [
         "depends_on": ["t3"],
         "inputs": {"scenario": "付款单 {payment_number} 合规分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -408,7 +408,7 @@ _INVOICE_SINGLE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "invoice_number": "{invoice_number}", "po_number": "{po_number}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -418,7 +418,7 @@ _INVOICE_SINGLE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -428,7 +428,7 @@ _INVOICE_SINGLE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "gr_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t4",
@@ -438,7 +438,7 @@ _INVOICE_SINGLE_DAG = [
         "depends_on": ["t1", "t2", "t3"],
         "inputs": {"po_number": "{po_number}"},
         "output_key": "match_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t5",
@@ -448,7 +448,7 @@ _INVOICE_SINGLE_DAG = [
         "depends_on": ["t4"],
         "inputs": {"scenario": "发票 {invoice_number} 综合分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -464,7 +464,7 @@ _SPEND_ANALYSIS_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -474,7 +474,7 @@ _SPEND_ANALYSIS_DAG = [
         "depends_on": ["t1"],
         "inputs": {"group_by": "category", "days": "{days}"},
         "output_key": "spend_by_category",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -484,7 +484,7 @@ _SPEND_ANALYSIS_DAG = [
         "depends_on": ["t1"],
         "inputs": {"group_by": "supplier", "days": "{days}"},
         "output_key": "spend_by_supplier",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t4",
@@ -494,7 +494,7 @@ _SPEND_ANALYSIS_DAG = [
         "depends_on": ["t2", "t3"],
         "inputs": {"scenario": "采购支出分析（近{days}天）"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -510,7 +510,7 @@ _RECEIPT_ANOMALY_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -520,7 +520,7 @@ _RECEIPT_ANOMALY_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}", "po_number": "{po_number}"},
         "output_key": "gr_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -530,7 +530,7 @@ _RECEIPT_ANOMALY_DAG = [
         "depends_on": ["t1", "t2"],
         "inputs": {"supplier_id": "{supplier_id}", "po_number": "{po_number}", "days": "{days}"},
         "output_key": "anomaly_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t4",
@@ -540,7 +540,7 @@ _RECEIPT_ANOMALY_DAG = [
         "depends_on": ["t3"],
         "inputs": {"scenario": "收货异常分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -556,7 +556,7 @@ _INVOICE_DUPLICATE_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -566,7 +566,7 @@ _INVOICE_DUPLICATE_DAG = [
         "depends_on": ["t1"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "duplicate_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t3",
@@ -576,7 +576,7 @@ _INVOICE_DUPLICATE_DAG = [
         "depends_on": ["t2"],
         "inputs": {"scenario": "发票重复检测"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -592,7 +592,7 @@ _DISCOUNT_UTILIZATION_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "invoice_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -602,7 +602,7 @@ _DISCOUNT_UTILIZATION_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "payment_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -612,7 +612,7 @@ _DISCOUNT_UTILIZATION_DAG = [
         "depends_on": ["t1", "t2"],
         "inputs": {"supplier_id": "{supplier_id}", "days": "{days}"},
         "output_key": "discount_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t4",
@@ -622,7 +622,7 @@ _DISCOUNT_UTILIZATION_DAG = [
         "depends_on": ["t3"],
         "inputs": {"scenario": "早付折扣利用率分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -638,7 +638,7 @@ _PO_CYCLE_TIME_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -648,7 +648,7 @@ _PO_CYCLE_TIME_DAG = [
         "depends_on": ["t1"],
         "inputs": {"days": "{days}", "supplier_id": "{supplier_id}"},
         "output_key": "cycle_result",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
     {
         "task_id": "t3",
@@ -658,7 +658,7 @@ _PO_CYCLE_TIME_DAG = [
         "depends_on": ["t2"],
         "inputs": {"scenario": "采购订单全流程周期分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 
@@ -674,7 +674,7 @@ _VENDOR_CONCENTRATION_DAG = [
         "depends_on": [],
         "inputs": {"days": "{days}"},
         "output_key": "po_data",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t2",
@@ -684,7 +684,7 @@ _VENDOR_CONCENTRATION_DAG = [
         "depends_on": ["t1"],
         "inputs": {"days": "{days}"},
         "output_key": "concentration_result",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t3",
@@ -694,7 +694,7 @@ _VENDOR_CONCENTRATION_DAG = [
         "depends_on": ["t1"],
         "inputs": {"group_by": "supplier", "days": "{days}"},
         "output_key": "spend_by_supplier",
-        "timeout_sec": 30,
+        "timeout_sec": 60,
     },
     {
         "task_id": "t4",
@@ -704,7 +704,7 @@ _VENDOR_CONCENTRATION_DAG = [
         "depends_on": ["t2", "t3"],
         "inputs": {"scenario": "供应商集中度与采购依赖风险分析"},
         "output_key": "report",
-        "timeout_sec": 60,
+        "timeout_sec": 780,
     },
 ]
 

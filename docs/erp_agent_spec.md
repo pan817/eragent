@@ -349,9 +349,9 @@ eragent/
 | 维度 | 说明 |
 |------|------|
 | 框架 | FastAPI |
-| 核心接口 | `POST /api/v1/analyze`，接收自然语言查询，返回结构化分析报告 |
+| 核心接口 | `POST /api/v1/ptp-agent/analyze`，接收自然语言查询，返回结构化分析报告 |
 | 响应格式 | JSON（含结构化数据 + Markdown 报告字段） |
-| 流式支持 | 预留 `GET /api/v1/analyze/stream` SSE 流式接口扩展点 |
+| 流式支持 | 预留 `GET /api/v1/ptp-agent/analyze/stream` SSE 流式接口扩展点 |
 
 ---
 
@@ -719,7 +719,7 @@ eragent/
 - Chroma RAG 双路索引（本体知识语义检索）
 - GLM-4 驱动的 P2P Agent（配置化模型）
 - 多轮会话（短期记忆摘要压缩 + 长期记忆 PostgreSQL）
-- FastAPI REST API（`POST /api/v1/analyze`）
+- FastAPI REST API（`POST /api/v1/ptp-agent/analyze`）
 - 模拟数据生成器（低异常率，覆盖全部异常场景）
 - 结构化错误响应 + 自动重试
 - structlog 结构化日志

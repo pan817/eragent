@@ -1,6 +1,6 @@
 # Analyze API 正常测试用例汇总
 
-汇总 `tests/http/test_api.http` 和 `tests/http/test_orchestrator.http` 中所有 `/api/v1/analyze` 的正常测试用例（排除边界/异常输入），按路由路径和业务场景分类。
+汇总 `tests/http/test_api.http` 和 `tests/http/test_orchestrator.http` 中所有 `/api/v1/ptp-agent/analyze` 的正常测试用例（排除边界/异常输入），按路由路径和业务场景分类。
 
 ---
 

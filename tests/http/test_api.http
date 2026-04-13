@@ -18,13 +18,13 @@ GET {{host}}/health
 ### ----- 数据初始化 -----
 
 ### 1.5 初始化模拟数据（清空并重新生成，条数由 config.yaml mock_data.record_count 决定）
-POST {{host}}/api/v1/init-data
+POST {{host}}/api/v1/ptp-agent/init-data
 
 
 ### ----- 三路匹配分析 -----
 
 ### 2. 三路匹配异常分析（自动识别意图）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -33,7 +33,7 @@ Content-Type: application/json
 }
 
 ### 3. 三路匹配 - 指定分析类型
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -46,7 +46,7 @@ Content-Type: application/json
 ### ----- 价格差异分析 -----
 
 ### 4. 全量价格差异分析
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -55,7 +55,7 @@ Content-Type: application/json
 }
 
 ### 5. 指定供应商的价格差异
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -68,7 +68,7 @@ Content-Type: application/json
 ### ----- 付款合规检查 -----
 
 ### 6. 付款合规性检查（逾期、提前付款）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -77,7 +77,7 @@ Content-Type: application/json
 }
 
 ### 7. 付款合规 - 自定义时间范围
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -90,7 +90,7 @@ Content-Type: application/json
 ### ----- 供应商绩效 KPI -----
 
 ### 8. 华为科技绩效评估
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -99,7 +99,7 @@ Content-Type: application/json
 }
 
 ### 9. 中兴通讯绩效评估
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -109,7 +109,7 @@ Content-Type: application/json
 }
 
 ### 10. 比亚迪电子绩效评估
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -121,7 +121,7 @@ Content-Type: application/json
 ### ----- 综合分析 -----
 
 ### 11. 全面综合分析
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -130,7 +130,7 @@ Content-Type: application/json
 }
 
 ### 12. 模糊查询（系统自动判断）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -142,7 +142,7 @@ Content-Type: application/json
 ### ----- 参数组合测试 -----
 
 ### 13. 完整参数请求
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -154,7 +154,7 @@ Content-Type: application/json
 }
 
 ### 14. 仅必填字段
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -165,7 +165,7 @@ Content-Type: application/json
 ### ----- 边界 & 异常测试 -----
 
 ### 15. 空查询（应返回 422）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -173,7 +173,7 @@ Content-Type: application/json
 }
 
 ### 16. 非法时间范围（应返回 422）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -182,7 +182,7 @@ Content-Type: application/json
 }
 
 ### 17. 超长时间范围（应返回 422）
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -194,7 +194,7 @@ Content-Type: application/json
 ### ============================================================
 ### 全链路监控（Observability / Trace）
 ### 说明：
-###   - 每次 /api/v1/analyze 调用都会生成一条 trace（agent root span +
+###   - 每次 /api/v1/ptp-agent/analyze 调用都会生成一条 trace（agent root span +
 ###     若干 model / tool 子 span），由 ObservabilityMiddleware 异步落盘。
 ###   - 推荐先跑一次 #18 拿到 trace_id，再用 @trace_id 变量去查 #20 / #21 / #22。
 ###   - REST Client 支持把上一次响应的 JSON 字段抽取为变量（@name = response.body.*）。
@@ -202,7 +202,7 @@ Content-Type: application/json
 
 ### 18. 触发一次分析以生成 trace（捕获 trace_id / session_id 给后续用例复用）
 # @name analyzeForTrace
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -222,67 +222,67 @@ Content-Type: application/json
 ### ----- Trace 列表查询 -----
 
 ### 19. 列出最近 trace（默认 limit=50）
-GET {{host}}/api/v1/traces
+GET {{host}}/api/v1/ptp-agent/traces
 
 ### 19.1 按 session_id 过滤
-GET {{host}}/api/v1/traces?session_id={{session_id}}
+GET {{host}}/api/v1/ptp-agent/traces?session_id={{session_id}}
 
 ### 19.2 按 user_id 过滤 + 分页
-GET {{host}}/api/v1/traces?user_id={{user_id}}&limit=10&offset=0
+GET {{host}}/api/v1/ptp-agent/traces?user_id={{user_id}}&limit=10&offset=0
 
 ### 19.3 按时间过滤（since，ISO8601）
-GET {{host}}/api/v1/traces?since=2026-01-01T00:00:00Z&limit=20
+GET {{host}}/api/v1/ptp-agent/traces?since=2026-01-01T00:00:00Z&limit=20
 
 ### 19.4 组合过滤：用户 + 会话 + 时间窗口
-GET {{host}}/api/v1/traces?user_id={{user_id}}&session_id={{session_id}}&since=2026-01-01T00:00:00Z&limit=50
+GET {{host}}/api/v1/ptp-agent/traces?user_id={{user_id}}&session_id={{session_id}}&since=2026-01-01T00:00:00Z&limit=50
 
 ### 19.5 limit 边界（应返回 422，limit 最大 500）
-GET {{host}}/api/v1/traces?limit=1000
+GET {{host}}/api/v1/ptp-agent/traces?limit=1000
 
 
 ### ----- Trace 详情查询 -----
 
 ### 20. 获取 trace 详情（包含全部 span 树）
-GET {{host}}/api/v1/traces/{{trace_id}}
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id}}
 
 ### 20.1 不存在的 trace（应返回 404）
-GET {{host}}/api/v1/traces/00000000-0000-0000-0000-000000000000
+GET {{host}}/api/v1/ptp-agent/traces/00000000-0000-0000-0000-000000000000
 
 
 ### ----- Trace 输入输出查询 -----
 
 ### 21. 查询某次 trace 的全部 model + tool 输入输出
-GET {{host}}/api/v1/traces/{{trace_id}}/io
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id}}/io
 
 ### 21.1 仅看 LLM model 调用的 IO
-GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=model
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id}}/io?span_type=model
 
 ### 21.2 仅看 tool 工具调用的 IO
-GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=tool
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id}}/io?span_type=tool
 
 ### 21.3 非法 span_type（应返回 422）
-GET {{host}}/api/v1/traces/{{trace_id}}/io?span_type=invalid
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id}}/io?span_type=invalid
 
 ### 21.4 不存在的 trace IO（应返回 404）
-GET {{host}}/api/v1/traces/00000000-0000-0000-0000-000000000000/io
+GET {{host}}/api/v1/ptp-agent/traces/00000000-0000-0000-0000-000000000000/io
 
 
 ### ----- Trace 聚合统计 -----
 
 ### 22. 按工具名聚合统计（默认）
-GET {{host}}/api/v1/traces/stats
+GET {{host}}/api/v1/ptp-agent/traces/stats
 
 ### 22.1 按 tool_name 显式聚合
-GET {{host}}/api/v1/traces/stats?group_by=tool_name
+GET {{host}}/api/v1/ptp-agent/traces/stats?group_by=tool_name
 
 ### 22.2 按 span_type 聚合（model / tool / agent / chain ...）
-GET {{host}}/api/v1/traces/stats?group_by=span_type
+GET {{host}}/api/v1/ptp-agent/traces/stats?group_by=span_type
 
 ### 22.3 仅统计某时间点之后的 span
-GET {{host}}/api/v1/traces/stats?group_by=tool_name&since=2026-01-01T00:00:00Z
+GET {{host}}/api/v1/ptp-agent/traces/stats?group_by=tool_name&since=2026-01-01T00:00:00Z
 
 ### 22.4 非法 group_by（应返回 422）
-GET {{host}}/api/v1/traces/stats?group_by=invalid
+GET {{host}}/api/v1/ptp-agent/traces/stats?group_by=invalid
 
 
 ### ----- 全链路联动场景 -----
@@ -290,7 +290,7 @@ GET {{host}}/api/v1/traces/stats?group_by=invalid
 ### 23. 分析 → 立刻按 session_id 拉 trace 列表 → 取 trace 详情
 ###     人工流程：先 Send #23，再 Send #23.1 / #23.2
 # @name analyzeAndTrace
-POST {{host}}/api/v1/analyze
+POST {{host}}/api/v1/ptp-agent/analyze
 Content-Type: application/json
 
 {
@@ -303,13 +303,13 @@ Content-Type: application/json
 @trace_id_2 = {{analyzeAndTrace.response.body.trace_id}}
 
 ### 23.1 立即列出该 session 的 trace
-GET {{host}}/api/v1/traces?session_id=ops-session-trace&limit=5
+GET {{host}}/api/v1/ptp-agent/traces?session_id=ops-session-trace&limit=5
 
 ### 23.2 取最新 trace 详情
-GET {{host}}/api/v1/traces/{{trace_id_2}}
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id_2}}
 
 ### 23.3 看这次分析触发的 LLM 调用 IO
-GET {{host}}/api/v1/traces/{{trace_id_2}}/io?span_type=model
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id_2}}/io?span_type=model
 
 ### 23.4 看这次分析触发的工具调用 IO
-GET {{host}}/api/v1/traces/{{trace_id_2}}/io?span_type=tool
+GET {{host}}/api/v1/ptp-agent/traces/{{trace_id_2}}/io?span_type=tool

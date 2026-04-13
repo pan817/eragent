@@ -31,7 +31,7 @@
 
 - **零前端功能回退**：`useChatSessions` hook 当前对外暴露的所有能力都要由后端支撑，前端改造后用户体感无差别。
 - **多端同步**：同一 `user_id` 在任何设备登录后能看到完整历史。
-- **与 `/analyze` 无侵入集成**：现有 `POST /api/v1/analyze` 的请求体已经携带 `session_id`，后端只需在接收到查询时自动落库 user / assistant 两条消息。
+- **与 `/analyze` 无侵入集成**：现有 `POST /api/v1/ptp-agent/analyze` 的请求体已经携带 `session_id`，后端只需在接收到查询时自动落库 user / assistant 两条消息。
 - **向后兼容**：未登录用户（guest）仍可走前端 localStorage，不强制调接口；接口层仅为登录态用户启用。
 
 ### 非目标
@@ -171,7 +171,7 @@ interface ChatMessage {
 
 ## 4. 接口列表
 
-### 4.1 列出会话 `GET /api/v1/sessions`
+### 4.1 列出会话 `GET /api/v1/ptp-agent/sessions`
 
 对应前端 `loadFromStorage` 初始化路径。返回**不含消息体**的会话概览列表，按 `updated_at DESC` 排序。
 
@@ -185,7 +185,7 @@ interface ChatMessage {
 **请求示例：**
 
 ```http
-GET /api/v1/sessions?limit=20 HTTP/1.1
+GET /api/v1/ptp-agent/sessions?limit=20 HTTP/1.1
 X-User-Id: alice
 ```
 
@@ -218,7 +218,7 @@ X-User-Id: alice
 
 ---
 
-### 4.2 创建会话 `POST /api/v1/sessions`
+### 4.2 创建会话 `POST /api/v1/ptp-agent/sessions`
 
 对应前端 `newChat()`。
 
@@ -259,7 +259,7 @@ X-User-Id: alice
 
 ---
 
-### 4.3 获取会话详情 `GET /api/v1/sessions/{session_id}`
+### 4.3 获取会话详情 `GET /api/v1/ptp-agent/sessions/{session_id}`
 
 对应前端 `switchTo(id)` —— 点击历史项时加载该会话的全部消息。
 
@@ -324,7 +324,7 @@ X-User-Id: alice
 
 ---
 
-### 4.4 更新会话标题 `PATCH /api/v1/sessions/{session_id}`
+### 4.4 更新会话标题 `PATCH /api/v1/ptp-agent/sessions/{session_id}`
 
 对应用户手动改标题的需求。前端当前 hook 没有此能力（标题完全自动推导），建议同步引入——用户双击标题编辑。
 
@@ -352,7 +352,7 @@ X-User-Id: alice
 
 ---
 
-### 4.5 删除会话 `DELETE /api/v1/sessions/{session_id}`
+### 4.5 删除会话 `DELETE /api/v1/ptp-agent/sessions/{session_id}`
 
 对应前端 `deleteSession(id)`。
 
@@ -365,7 +365,7 @@ X-User-Id: alice
 **请求示例：**
 
 ```http
-DELETE /api/v1/sessions/b2e4c1d8-... HTTP/1.1
+DELETE /api/v1/ptp-agent/sessions/b2e4c1d8-... HTTP/1.1
 X-User-Id: alice
 ```
 
@@ -381,14 +381,14 @@ X-User-Id: alice
 
 ---
 
-### 4.6 清空用户全部会话 `DELETE /api/v1/sessions`
+### 4.6 清空用户全部会话 `DELETE /api/v1/ptp-agent/sessions`
 
 对应前端 `clearAll()`。
 
 **请求示例：**
 
 ```http
-DELETE /api/v1/sessions HTTP/1.1
+DELETE /api/v1/ptp-agent/sessions HTTP/1.1
 X-User-Id: alice
 ```
 
@@ -415,7 +415,7 @@ X-User-Id: alice
 
 ---
 
-### 4.7 追加消息 `POST /api/v1/sessions/{session_id}/messages`
+### 4.7 追加消息 `POST /api/v1/ptp-agent/sessions/{session_id}/messages`
 
 **这是本次方案里最关键的接口**，直接对应前端 `setMessages(prev => [...prev, userMsg, assistantPlaceholder])` 的等价物。
 
@@ -532,7 +532,7 @@ X-User-Id: alice
 
 ---
 
-### 4.8 更新消息 `PATCH /api/v1/sessions/{session_id}/messages/{message_id}`
+### 4.8 更新消息 `PATCH /api/v1/ptp-agent/sessions/{session_id}/messages/{message_id}`
 
 对应前端 `handleRegenerate` 场景 —— 用户对某条 assistant 回答点"重新生成"，需要把旧的 assistant 消息替换成新内容。
 
@@ -574,7 +574,7 @@ X-User-Id: alice
 
 ---
 
-### 4.9 搜索会话 `GET /api/v1/sessions/search`
+### 4.9 搜索会话 `GET /api/v1/ptp-agent/sessions/search`
 
 对应前端 `filteredSessions`（`state.sessions.filter(...)` 按 title 和消息内容模糊匹配）。
 
@@ -589,7 +589,7 @@ X-User-Id: alice
 **请求示例：**
 
 ```http
-GET /api/v1/sessions/search?q=SUP-001&limit=20 HTTP/1.1
+GET /api/v1/ptp-agent/sessions/search?q=SUP-001&limit=20 HTTP/1.1
 X-User-Id: alice
 ```
 
@@ -637,11 +637,11 @@ X-User-Id: alice
 
 ### 5.1 现状
 
-[src/services/api.ts](../src/services/api.ts) 中的 `analyzeQuery` 当前只负责把 `{query, user_id, session_id}` 发给 `/api/v1/analyze`，拿到 `report_markdown` 后由前端自己塞进 `messages` 数组。后端完全**不知道**会话历史这回事。
+[src/services/api.ts](../src/services/api.ts) 中的 `analyzeQuery` 当前只负责把 `{query, user_id, session_id}` 发给 `/api/v1/ptp-agent/analyze`，拿到 `report_markdown` 后由前端自己塞进 `messages` 数组。后端完全**不知道**会话历史这回事。
 
 ### 5.2 推荐改造：`/analyze` 自动落库
 
-在后端引入会话表后，`/api/v1/analyze` 的职责扩展为：
+在后端引入会话表后，`/api/v1/ptp-agent/analyze` 的职责扩展为：
 
 1. **前置**：校验 `session_id` 属于当前 `user_id`；不存在时报 `404`（或 auto-create，取决于业务选择）
 2. **落库 user 消息**：在 analysis pipeline 启动前写入 user 消息，状态 `success`
@@ -867,16 +867,16 @@ CREATE INDEX idx_idempotency_expiry
 
 | # | Method | Path | 说明 | 对应前端 |
 |---|---|---|---|---|
-| 4.1 | `GET` | `/api/v1/sessions` | 列出会话 | 初始化 |
-| 4.2 | `POST` | `/api/v1/sessions` | 创建会话 | `newChat()` |
-| 4.3 | `GET` | `/api/v1/sessions/{id}` | 会话详情 | `switchTo()` |
-| 4.4 | `PATCH` | `/api/v1/sessions/{id}` | 更新标题 | 未来手动编辑 |
-| 4.5 | `DELETE` | `/api/v1/sessions/{id}` | 删除单会话 | `deleteSession()` |
-| 4.6 | `DELETE` | `/api/v1/sessions` | 清空 | `clearAll()` |
-| 4.7 | `POST` | `/api/v1/sessions/{id}/messages` | 追加消息 | 补偿通道 |
-| 4.8 | `PATCH` | `/api/v1/sessions/{id}/messages/{mid}` | 更新消息 | regenerate |
-| 4.9 | `GET` | `/api/v1/sessions/search` | 搜索会话 | `filteredSessions` |
-| 5.2 | `POST` | `/api/v1/analyze`（改造） | 分析 + 代写消息 | `handleSend` |
+| 4.1 | `GET` | `/api/v1/ptp-agent/sessions` | 列出会话 | 初始化 |
+| 4.2 | `POST` | `/api/v1/ptp-agent/sessions` | 创建会话 | `newChat()` |
+| 4.3 | `GET` | `/api/v1/ptp-agent/sessions/{id}` | 会话详情 | `switchTo()` |
+| 4.4 | `PATCH` | `/api/v1/ptp-agent/sessions/{id}` | 更新标题 | 未来手动编辑 |
+| 4.5 | `DELETE` | `/api/v1/ptp-agent/sessions/{id}` | 删除单会话 | `deleteSession()` |
+| 4.6 | `DELETE` | `/api/v1/ptp-agent/sessions` | 清空 | `clearAll()` |
+| 4.7 | `POST` | `/api/v1/ptp-agent/sessions/{id}/messages` | 追加消息 | 补偿通道 |
+| 4.8 | `PATCH` | `/api/v1/ptp-agent/sessions/{id}/messages/{mid}` | 更新消息 | regenerate |
+| 4.9 | `GET` | `/api/v1/ptp-agent/sessions/search` | 搜索会话 | `filteredSessions` |
+| 5.2 | `POST` | `/api/v1/ptp-agent/analyze`（改造） | 分析 + 代写消息 | `handleSend` |
 
 
 

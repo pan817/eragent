@@ -152,21 +152,71 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
 
 
 def create_tables(engine: Engine) -> None:
-    """仅建表（不灌数据），服务启动时调用。
+    """建表入口，服务启动时调用。
 
-    创建两组表：
-    - Base.metadata：ORM Declarative 表（业务模型 + 可观测性）
-    - metadata_obj：Core Table 表（memories / reports / dag_cases / chat_sessions / chat_messages）
+    PostgreSQL：通过 ``alembic upgrade head`` 执行迁移（幂等），由 alembic
+    版本追踪保证不会重复创建已有表/类型。
+    SQLite：直接使用 ``metadata.create_all``（测试场景，无 alembic 迁移历史）。
 
     Args:
         engine: SQLAlchemy Engine。
     """
-    from core.memory.tables import metadata_obj
-    import core.chat.tables  # noqa: F401 — 确保 chat 表注册到 metadata_obj
-    import core.orchestrator.dag.tables  # noqa: F401 — 确保 dag 表注册到 metadata_obj
+    if engine.dialect.name == "sqlite":
+        # 测试用 SQLite 内存库，直接 create_all
+        from core.memory.tables import metadata_obj
+        import core.chat.tables  # noqa: F401
+        import core.orchestrator.dag.tables  # noqa: F401
 
-    Base.metadata.create_all(engine)
-    metadata_obj.create_all(engine)
+        Base.metadata.create_all(engine)
+        metadata_obj.create_all(engine)
+        return
+
+    # PostgreSQL：走 alembic 迁移（advisory lock 在 env.py 中实现）
+    import logging
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    alembic_ini = project_root / "alembic.ini"
+    alembic_cfg = Config(str(alembic_ini))
+    alembic_cfg.set_main_option(
+        "script_location", str(project_root / "migrations")
+    )
+    alembic_cfg.set_main_option("sqlalchemy.url", str(engine.url))
+
+    # 兼容存量数据库：表已由之前的 create_all 创建，但 alembic_version 未标记。
+    # 直接 upgrade 会导致 baseline 迁移尝试重建已有表/类型而失败。
+    # 检测到此情况后先 stamp head，跳过所有历史迁移。
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    has_business_tables = "ap_suppliers" in existing_tables
+    has_alembic_version = "alembic_version" in existing_tables
+
+    if has_business_tables and not has_alembic_version:
+        logger.info(
+            "Existing database detected without alembic_version — "
+            "stamping current state as head."
+        )
+        command.stamp(alembic_cfg, "head")
+    elif has_business_tables and has_alembic_version:
+        # alembic_version 表存在但可能为空（上次迁移失败回滚）
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT version_num FROM alembic_version")).first()
+            if row is None:
+                logger.info(
+                    "alembic_version table is empty — "
+                    "stamping current state as head."
+                )
+                command.stamp(alembic_cfg, "head")
+
+    logger.info("Running alembic upgrade head ...")
+    command.upgrade(alembic_cfg, "head")
+    logger.info("Alembic migrations applied successfully.")
 
 
 def reset_and_seed(engine: Engine, seed: int = 42, count: int = 500) -> dict[str, int]:

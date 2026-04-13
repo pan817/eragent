@@ -129,9 +129,18 @@ class TraceStore:
             with self._dropped_lock:
                 self._dropped_count += 1
                 dropped = self._dropped_count
+            event_desc = (
+                f"span({getattr(event, 'span_type', '?')}/{getattr(event, 'name', '?')})"
+                if isinstance(event, SpanEvent)
+                else f"run({getattr(event, 'trace_id', '?')})"
+            )
             if dropped == 1 or dropped % 100 == 0:
                 _logger.warning(
-                    "trace-store queue full, dropped %d events so far", dropped
+                    "trace-store queue full, dropped %d events so far "
+                    "(latest: %s, error=%s)",
+                    dropped,
+                    event_desc,
+                    getattr(event, "error", None) or "none",
                 )
 
     @property
@@ -279,18 +288,53 @@ class TraceStore:
             return run, spans
 
     def get_token_summary(self, trace_id: str) -> dict[str, Any] | None:
-        """从 agent span 的 attributes 中提取 token_summary。"""
+        """从 agent span 的 attributes 中提取 token_summary（单条查询）。"""
+        with self._session_factory() as session:
+            return self._fetch_token_summary_single(session, trace_id)
+
+    def batch_get_token_summaries(
+        self, trace_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """批量获取多条 trace 的 token_summary，消除 N+1 查询。
+
+        Args:
+            trace_ids: 需要查询的 trace_id 列表。
+
+        Returns:
+            {trace_id: token_summary_dict} 映射，无 summary 的 trace 不包含在内。
+        """
+        if not trace_ids:
+            return {}
         with self._session_factory() as session:
             stmt = (
-                select(TraceSpan.attributes)
-                .where(TraceSpan.trace_id == trace_id)
+                select(TraceSpan.trace_id, TraceSpan.attributes)
+                .where(TraceSpan.trace_id.in_(trace_ids))
                 .where(TraceSpan.span_type == "agent")
-                .limit(1)
+                .distinct(TraceSpan.trace_id)
             )
-            row = session.execute(stmt).scalar_one_or_none()
-            if row and isinstance(row, dict):
-                return row.get("token_summary")
-            return None
+            rows = session.execute(stmt).all()
+            result: dict[str, dict[str, Any]] = {}
+            for trace_id, attrs in rows:
+                if attrs and isinstance(attrs, dict):
+                    ts = attrs.get("token_summary")
+                    if ts is not None:
+                        result[trace_id] = ts
+            return result
+
+    @staticmethod
+    def _fetch_token_summary_single(
+        session: Session, trace_id: str
+    ) -> dict[str, Any] | None:
+        stmt = (
+            select(TraceSpan.attributes)
+            .where(TraceSpan.trace_id == trace_id)
+            .where(TraceSpan.span_type == "agent")
+            .limit(1)
+        )
+        row = session.execute(stmt).scalar_one_or_none()
+        if row and isinstance(row, dict):
+            return row.get("token_summary")
+        return None
 
     def stats(
         self,

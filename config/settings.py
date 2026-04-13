@@ -30,17 +30,61 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _strip_env_overrides(
+    data: dict[str, Any],
+    model_cls: type[BaseSettings],
+) -> dict[str, Any]:
+    """从 data 中移除已被环境变量覆盖的字段。
+
+    pydantic-settings 的优先级：init 参数 > 环境变量 > 默认值。
+    ``from_yaml`` 把 YAML 值作为 init 参数传入，会压死环境变量。
+    本函数在传入前，将已有对应环境变量的字段从 dict 中删除，
+    让 pydantic-settings 自动从环境变量读取，确保 .env 为权威源。
+
+    对嵌套 BaseSettings 子模型递归处理。
+    """
+    if not data:
+        return data
+
+    env_prefix = (model_cls.model_config.get("env_prefix") or "").upper()
+    result = dict(data)
+
+    for field_name, field_info in model_cls.model_fields.items():
+        if field_name not in result:
+            continue
+
+        # 判断字段类型是否为嵌套 BaseSettings 子模型
+        field_type = field_info.annotation
+        if (
+            field_type is not None
+            and isinstance(field_type, type)
+            and issubclass(field_type, BaseSettings)
+        ):
+            # 嵌套模型：递归处理
+            if isinstance(result[field_name], dict):
+                result[field_name] = _strip_env_overrides(
+                    result[field_name], field_type
+                )
+        else:
+            # 标量字段：环境变量已设置则从 dict 移除
+            env_var = f"{env_prefix}{field_name}".upper()
+            if env_var in os.environ:
+                del result[field_name]
+
+    return result
+
+
 class LLMSettings(BaseSettings):
     """LLM 模型配置。"""
 
-    provider: str = "zhipu"
-    model: str = "glm-4"
-    api_base: str = "https://open.bigmodel.cn/api/paas/v4"
+    provider: str = "qwen"
+    model: str = "qwen3-max"
+    api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: str = Field(default="", alias="LLM_API_KEY")
     temperature: float = 0.1
     max_tokens: int = 4096
-    timeout: int = 30
-    max_retries: int = 3
+    timeout: int = 240
+    max_retries: int = 2
     # 是否让 LLM HTTP 客户端读取系统代理环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）。
     # False 时强制直连，忽略系统代理；True 时遵循环境变量。
     use_system_proxy: bool = False
@@ -109,10 +153,10 @@ class PostgreSQLSettings(BaseSettings):
     host: str = "localhost"
     port: int = 5432
     database: str = "eragent"
-    username: str = "postgres"
+    username: str = "dev"
     password: str = Field(default="", alias="POSTGRES_PASSWORD")
-    pool_size: int = 5
-    max_overflow: int = 10
+    pool_size: int = 20
+    max_overflow: int = 30
 
     model_config = {"populate_by_name": True, "env_prefix": "POSTGRES_"}
 
@@ -148,7 +192,7 @@ class AnalysisSettings(BaseSettings):
     default_time_range_days: int = 30
     max_time_range_days: int = 365
     # Agent + LLM 首次冷启动可能数十秒，5s 过短，调到 60s
-    response_timeout_seconds: float = 60.0
+    response_timeout_seconds: float = 900.0  # 需覆盖 LLM 含重试最坏情况(240s×3=720s) + 编排开销
     # 数据库 I/O 在线程池里执行，单次操作的硬超时
     db_io_timeout_seconds: float = 30.0
     # 实体编号正则模式（按客户 EBS 编号规则配置）
@@ -193,8 +237,12 @@ class ThreeWayMatchSettings(BaseSettings):
     default_tolerance_pct: float = 5.0
     max_tolerance_pct: float = 10.0
     supplier_tolerances: dict[str, float] = Field(default_factory=dict)
-    category_tolerances: dict[str, float] = Field(default_factory=dict)
-    amount_thresholds: list[dict[str, Any]] = Field(default_factory=list)
+    category_tolerances: dict[str, float] = Field(
+        default_factory=lambda: {"RAW_MATERIAL": 10.0}
+    )
+    amount_thresholds: list[dict[str, Any]] = Field(
+        default_factory=lambda: [{"min_amount": 1000000, "tolerance_pct": 2.0}]
+    )
 
     model_config = {"env_prefix": "THREE_WAY_MATCH_"}
 
@@ -257,7 +305,7 @@ class MemorySettings(BaseSettings):
     long_term_enabled: bool = True
     long_term_max_retrieved: int = 5
     long_term_fusion_k: int = 60
-    long_term_max_per_user: int = 0  # 0 表示不限制
+    long_term_max_per_user: int = 200  # 每用户保留的最大记忆条数（0 表示不限制）
     long_term_min_content_len: int = 50           # 短内容过滤阈值（0 关闭）
     long_term_dedupe_window_seconds: int = 900    # 内容指纹去重窗口（0 关闭）
     long_term_skip_empty_conclusions: bool = False  # 跳过 anomaly_count=0 且 summary 空的结论
@@ -357,7 +405,7 @@ class Settings(BaseSettings):
                 "long_term_enabled": long_term.get("enabled", True),
                 "long_term_max_retrieved": long_term.get("max_retrieved", 5),
                 "long_term_fusion_k": long_term.get("fusion_k", 60),
-                "long_term_max_per_user": long_term.get("max_per_user", 0),
+                "long_term_max_per_user": long_term.get("max_per_user", 200),
                 "long_term_min_content_len": long_term.get("min_content_len", 50),
                 "long_term_dedupe_window_seconds": long_term.get("dedupe_window_seconds", 900),
                 "long_term_skip_empty_conclusions": long_term.get(
@@ -366,6 +414,10 @@ class Settings(BaseSettings):
                 "long_term_context_trim_enabled": long_term.get("context_trim_enabled", True),
                 "long_term_context_max_tokens_pct": long_term.get("context_max_tokens_pct", 10),
             }
+
+        # 环境变量优先：移除 YAML dict 中已被环境变量覆盖的字段，
+        # 让 pydantic-settings 自动从环境变量读取，确保 .env 为权威源。
+        merged = _strip_env_overrides(merged, cls)
 
         # 环境变量注入敏感字段（支持明文和加密两种模式）
         # 规则：

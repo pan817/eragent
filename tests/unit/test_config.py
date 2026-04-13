@@ -46,15 +46,24 @@ class TestChromaSettings:
 class TestDefaultSettings:
     """测试 Settings 默认配置值。"""
 
-    def test_default_settings(self) -> None:
-        """默认 Settings 应包含预设的 app_name、版本和子配置。"""
+    def test_default_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """默认 Settings 应包含预设的 app_name、版本和子配置。
+
+        清除可能存在的环境变量，确保测试的是硬编码默认值。
+        """
+        for env_var in (
+            "LLM_PROVIDER", "LLM_MODEL", "LLM_API_BASE", "LLM_TIMEOUT",
+            "POSTGRES_USERNAME",
+        ):
+            monkeypatch.delenv(env_var, raising=False)
+
         s = Settings()
         assert s.app_name == "ERP Analysis Agent"
         assert s.app_version == "0.1.0"
         assert s.debug is False
         assert s.language == "zh"
-        assert s.llm.provider == "zhipu"
-        assert s.llm.model == "glm-4"
+        assert s.llm.provider == "qwen"
+        assert s.llm.model == "qwen3-max"
         assert s.neo4j.uri == "bolt://localhost:7687"
         assert s.postgresql.port == 5432
         assert s.memory.short_term_max_messages == 20
@@ -76,8 +85,25 @@ class TestDefaultSettings:
 class TestFromYaml:
     """测试 Settings.from_yaml 加载能力。"""
 
-    def test_from_yaml(self, tmp_path: Path) -> None:
-        """从合法 YAML 文件加载配置应正确覆盖默认值。"""
+    def test_from_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """从合法 YAML 文件加载配置应正确覆盖默认值。
+
+        禁用 load_dotenv 并清除环境变量，确保仅验证 YAML 加载逻辑。
+        """
+        import dotenv
+
+        monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **kw: None)
+        # 清除可能干扰的环境变量
+        for env_var in (
+            "APP_APP_NAME", "APP_APP_VERSION", "APP_DEBUG", "APP_LANGUAGE",
+            "LLM_PROVIDER", "LLM_MODEL",
+            "THREE_WAY_MATCH_DEFAULT_TOLERANCE_PCT",
+            "MEMORY_SHORT_TERM_MAX_MESSAGES", "MEMORY_LONG_TERM_MAX_RETRIEVED",
+        ):
+            monkeypatch.delenv(env_var, raising=False)
+
         yaml_content = {
             "app": {
                 "name": "Test App",
@@ -112,6 +138,23 @@ class TestFromYaml:
         assert s.llm.provider == "openai"
         assert s.p2p.three_way_match.default_tolerance_pct == 3.0
         assert s.memory.short_term_max_messages == 30
+
+    def test_env_overrides_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """环境变量应覆盖 YAML 中的同名配置（.env 为权威源）。"""
+        yaml_content = {
+            "llm": {"provider": "openai", "model": "gpt-4"},
+        }
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(yaml_content), encoding="utf-8")
+
+        monkeypatch.setenv("LLM_PROVIDER", "zhipu")
+        monkeypatch.setenv("LLM_MODEL", "glm-4")
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.llm.provider == "zhipu"
+        assert s.llm.model == "glm-4"
 
     def test_from_yaml_nonexistent_file(self, tmp_path: Path) -> None:
         """YAML 文件不存在时应使用全部默认值。"""

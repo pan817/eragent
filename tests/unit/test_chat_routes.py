@@ -16,7 +16,7 @@ from api.routes.sessions import router, init_chat_repo
 
 def _make_app(mock_repo: MagicMock) -> FastAPI:
     app = FastAPI()
-    app.include_router(router, prefix="/api/v1")
+    app.include_router(router, prefix="/api/v1/ptp-agent")
     init_chat_repo(mock_repo)
     return app
 
@@ -79,14 +79,14 @@ class TestListSessions:
             "next_cursor": None,
             "total": 1,
         }
-        resp = client.get("/api/v1/sessions", headers=HEADERS)
+        resp = client.get("/api/v1/ptp-agent/sessions", headers=HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 1
         assert len(data["sessions"]) == 1
 
     def test_unauthorized(self, client) -> None:
-        resp = client.get("/api/v1/sessions")
+        resp = client.get("/api/v1/ptp-agent/sessions")
         assert resp.status_code == 401
 
 
@@ -98,13 +98,13 @@ class TestListSessions:
 class TestCreateSession:
     def test_ok(self, client, mock_repo) -> None:
         mock_repo.create_session.return_value = _session_dict()
-        resp = client.post("/api/v1/sessions", headers=HEADERS, json={"title": "新对话"})
+        resp = client.post("/api/v1/ptp-agent/sessions", headers=HEADERS, json={"title": "新对话"})
         assert resp.status_code == 201
         assert resp.json()["session"]["id"] == "s-001"
 
     def test_no_body(self, client, mock_repo) -> None:
         mock_repo.create_session.return_value = _session_dict()
-        resp = client.post("/api/v1/sessions", headers=HEADERS)
+        resp = client.post("/api/v1/ptp-agent/sessions", headers=HEADERS)
         assert resp.status_code == 201
 
 
@@ -116,12 +116,12 @@ class TestCreateSession:
 class TestSearchSessions:
     def test_ok(self, client, mock_repo) -> None:
         mock_repo.search_sessions.return_value = [_session_dict(title="三路匹配")]
-        resp = client.get("/api/v1/sessions/search?q=三路", headers=HEADERS)
+        resp = client.get("/api/v1/ptp-agent/sessions/search?q=三路", headers=HEADERS)
         assert resp.status_code == 200
         assert len(resp.json()["sessions"]) == 1
 
     def test_empty_q(self, client) -> None:
-        resp = client.get("/api/v1/sessions/search?q=", headers=HEADERS)
+        resp = client.get("/api/v1/ptp-agent/sessions/search?q=", headers=HEADERS)
         assert resp.status_code == 422  # validation error
 
 
@@ -137,14 +137,14 @@ class TestGetSessionDetail:
             "messages": [_message_dict()],
             "has_more_messages": False,
         }
-        resp = client.get("/api/v1/sessions/s-001", headers=HEADERS)
+        resp = client.get("/api/v1/ptp-agent/sessions/s-001", headers=HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["messages"]) == 1
 
     def test_not_found(self, client, mock_repo) -> None:
         mock_repo.get_session_with_messages.return_value = None
-        resp = client.get("/api/v1/sessions/no-id", headers=HEADERS)
+        resp = client.get("/api/v1/ptp-agent/sessions/no-id", headers=HEADERS)
         assert resp.status_code == 404
 
 
@@ -157,7 +157,7 @@ class TestUpdateTitle:
     def test_ok(self, client, mock_repo) -> None:
         mock_repo.update_title.return_value = _session_dict(title="新标题", title_auto=False)
         resp = client.patch(
-            "/api/v1/sessions/s-001",
+            "/api/v1/ptp-agent/sessions/s-001",
             headers=HEADERS,
             json={"title": "新标题"},
         )
@@ -167,7 +167,7 @@ class TestUpdateTitle:
     def test_not_found(self, client, mock_repo) -> None:
         mock_repo.update_title.return_value = None
         resp = client.patch(
-            "/api/v1/sessions/no-id",
+            "/api/v1/ptp-agent/sessions/no-id",
             headers=HEADERS,
             json={"title": "x"},
         )
@@ -182,12 +182,12 @@ class TestUpdateTitle:
 class TestDeleteSession:
     def test_ok(self, client, mock_repo) -> None:
         mock_repo.delete_session.return_value = True
-        resp = client.delete("/api/v1/sessions/s-001", headers=HEADERS)
+        resp = client.delete("/api/v1/ptp-agent/sessions/s-001", headers=HEADERS)
         assert resp.status_code == 204
 
     def test_not_found(self, client, mock_repo) -> None:
         mock_repo.delete_session.return_value = False
-        resp = client.delete("/api/v1/sessions/no-id", headers=HEADERS)
+        resp = client.delete("/api/v1/ptp-agent/sessions/no-id", headers=HEADERS)
         assert resp.status_code == 404
 
 
@@ -201,7 +201,7 @@ class TestClearAll:
         mock_repo.delete_all_sessions.return_value = 5
         resp = client.request(
             "DELETE",
-            "/api/v1/sessions",
+            "/api/v1/ptp-agent/sessions",
             headers=HEADERS,
             json={"confirm": "DELETE_ALL"},
         )
@@ -211,7 +211,7 @@ class TestClearAll:
     def test_missing_confirm(self, client, mock_repo) -> None:
         resp = client.request(
             "DELETE",
-            "/api/v1/sessions",
+            "/api/v1/ptp-agent/sessions",
             headers=HEADERS,
             json={"confirm": "wrong"},
         )
@@ -230,7 +230,7 @@ class TestAppendMessages:
             "session": _session_dict(message_count=1),
         }
         resp = client.post(
-            "/api/v1/sessions/s-001/messages",
+            "/api/v1/ptp-agent/sessions/s-001/messages",
             headers=HEADERS,
             json={"messages": [{"role": "user", "content": "hello"}]},
         )
@@ -240,7 +240,7 @@ class TestAppendMessages:
     def test_not_found(self, client, mock_repo) -> None:
         mock_repo.append_messages.return_value = None
         resp = client.post(
-            "/api/v1/sessions/no-id/messages",
+            "/api/v1/ptp-agent/sessions/no-id/messages",
             headers=HEADERS,
             json={"messages": [{"role": "user", "content": "x"}]},
         )
@@ -249,7 +249,7 @@ class TestAppendMessages:
     def test_session_full(self, client, mock_repo) -> None:
         mock_repo.append_messages.side_effect = ValueError("SESSION_FULL: 超限")
         resp = client.post(
-            "/api/v1/sessions/s-001/messages",
+            "/api/v1/ptp-agent/sessions/s-001/messages",
             headers=HEADERS,
             json={"messages": [{"role": "user", "content": "x"}]},
         )
@@ -258,7 +258,7 @@ class TestAppendMessages:
     def test_content_too_large(self, client, mock_repo) -> None:
         mock_repo.append_messages.side_effect = ValueError("CONTENT_TOO_LARGE: 超限")
         resp = client.post(
-            "/api/v1/sessions/s-001/messages",
+            "/api/v1/ptp-agent/sessions/s-001/messages",
             headers=HEADERS,
             json={"messages": [{"role": "user", "content": "x"}]},
         )
@@ -266,7 +266,7 @@ class TestAppendMessages:
 
     def test_invalid_role(self, client, mock_repo) -> None:
         resp = client.post(
-            "/api/v1/sessions/s-001/messages",
+            "/api/v1/ptp-agent/sessions/s-001/messages",
             headers=HEADERS,
             json={"messages": [{"role": "system", "content": "x"}]},
         )
@@ -282,7 +282,7 @@ class TestUpdateMessage:
     def test_ok(self, client, mock_repo) -> None:
         mock_repo.update_message.return_value = _message_dict(content="updated")
         resp = client.patch(
-            "/api/v1/sessions/s-001/messages/m-001",
+            "/api/v1/ptp-agent/sessions/s-001/messages/m-001",
             headers=HEADERS,
             json={"content": "updated"},
         )
@@ -292,7 +292,7 @@ class TestUpdateMessage:
     def test_not_found(self, client, mock_repo) -> None:
         mock_repo.update_message.return_value = None
         resp = client.patch(
-            "/api/v1/sessions/s-001/messages/no-mid",
+            "/api/v1/ptp-agent/sessions/s-001/messages/no-mid",
             headers=HEADERS,
             json={"content": "x"},
         )

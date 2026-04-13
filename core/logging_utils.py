@@ -23,7 +23,8 @@ def _configure() -> None:
             from config.settings import get_settings
 
             level_name = get_settings().logging.level
-        except Exception:
+        except Exception as exc:
+            print(f"[eragent] logging config load failed, defaulting to INFO: {exc}", file=sys.stderr)
             level_name = "INFO"
         level = getattr(logging, level_name.upper(), logging.INFO)
         root = logging.getLogger("eragent")

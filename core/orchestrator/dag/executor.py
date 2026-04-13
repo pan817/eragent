@@ -64,7 +64,7 @@ class DAGExecutor:
         async def run_task(task: dict[str, Any]) -> None:
             task_id = task["task_id"]
             tool_name = task.get("tool_name", "")
-            timeout_sec = task.get("timeout_sec", 60)
+            timeout_sec = task.get("timeout_sec", 780)
 
             with record_span("dag.task", f"{task_id}:{tool_name}") as span_attrs:
                 span_attrs["task_id"] = task_id

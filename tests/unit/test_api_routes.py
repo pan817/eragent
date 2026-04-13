@@ -80,7 +80,7 @@ class TestTracesRouter:
         run = _fake_run()
         mock_store = MagicMock()
         mock_store.list_runs.return_value = [run]
-        mock_store.get_token_summary.return_value = None
+        mock_store.batch_get_token_summaries.return_value = {}
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get("/traces")
         assert resp.status_code == 200
@@ -92,10 +92,12 @@ class TestTracesRouter:
         run = _fake_run()
         mock_store = MagicMock()
         mock_store.list_runs.return_value = [run]
-        mock_store.get_token_summary.return_value = {
-            "total_prompt_tokens": 5000,
-            "total_completion_tokens": 1000,
-            "peak_prompt_tokens": 3000,
+        mock_store.batch_get_token_summaries.return_value = {
+            run.trace_id: {
+                "total_prompt_tokens": 5000,
+                "total_completion_tokens": 1000,
+                "peak_prompt_tokens": 3000,
+            },
         }
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get("/traces")
@@ -106,7 +108,7 @@ class TestTracesRouter:
     def test_list_traces_with_filters(self, traces_client):
         mock_store = MagicMock()
         mock_store.list_runs.return_value = []
-        mock_store.get_token_summary.return_value = None
+        mock_store.batch_get_token_summaries.return_value = {}
         with patch("api.routes.traces.get_trace_store", return_value=mock_store):
             resp = traces_client.get("/traces?session_id=sess1&user_id=u1&limit=10&offset=5")
         assert resp.status_code == 200

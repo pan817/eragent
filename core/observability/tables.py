@@ -38,7 +38,11 @@ class TraceRun(Base):
         order_by="TraceSpan.started_at",
     )
 
-    __table_args__ = (Index("ix_trace_runs_started_at_desc", started_at.desc()),)
+    __table_args__ = (
+        Index("ix_trace_runs_started_at_desc", started_at.desc()),
+        Index("ix_trace_runs_session_started", "session_id", started_at.desc()),
+        Index("ix_trace_runs_user_started", "user_id", started_at.desc()),
+    )
 
 
 class TraceSpan(Base):
@@ -65,4 +69,5 @@ class TraceSpan(Base):
     __table_args__ = (
         Index("ix_trace_spans_trace_started", "trace_id", "started_at"),
         Index("ix_trace_spans_type_name", "span_type", "name"),
+        Index("ix_trace_spans_trace_type", "trace_id", "span_type"),
     )

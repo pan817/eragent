@@ -584,3 +584,253 @@ def test_token_summary_mixed_span_styles(store):
     assert ts["total_prompt_tokens"] == 1800   # 1000 + 800
     assert ts["total_completion_tokens"] == 450  # 300 + 150
     assert ts["peak_prompt_tokens"] == 1000
+
+
+# ============================================================
+# _classify_llm_error
+# ============================================================
+
+
+def test_classify_llm_error_timeout():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(TimeoutError("timed out")) == "timeout"
+    assert _classify_llm_error(OSError("connect timeout")) == "timeout"
+
+
+def test_classify_llm_error_timeout_in_message():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(RuntimeError("request timed out")) == "timeout"
+
+
+def test_classify_llm_error_connection():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(RuntimeError("Connection refused")) == "connection_error"
+
+
+def test_classify_llm_error_rate_limit():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(RuntimeError("Rate limit exceeded")) == "rate_limit"
+    assert _classify_llm_error(RuntimeError("Error 429: too many requests")) == "rate_limit"
+
+
+def test_classify_llm_error_auth():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(RuntimeError("Authentication failed")) == "auth_error"
+    assert _classify_llm_error(RuntimeError("Error 401")) == "auth_error"
+
+
+def test_classify_llm_error_server():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(RuntimeError("HTTP 500 Internal Server Error")) == "server_error"
+    assert _classify_llm_error(RuntimeError("502 Bad Gateway")) == "server_error"
+    assert _classify_llm_error(RuntimeError("503 Service Unavailable")) == "server_error"
+
+
+def test_classify_llm_error_generic():
+    from core.observability.middleware import _classify_llm_error
+
+    assert _classify_llm_error(ValueError("bad value")) == "ValueError"
+
+
+# ============================================================
+# console.py format_io_panel
+# ============================================================
+
+
+def test_format_io_panel_model():
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="model", name="qwen3-max", status="ok",
+        started_at=None, finished_at=None, duration_ms=100.0,
+        attributes={
+            "input": [{"role": "user", "content": "你好"}],
+            "output": {"content": "回复内容", "tool_calls": None, "usage": {"tokens": 10}},
+        },
+        error=None,
+    )
+    result = format_io_panel(span)
+    assert "model" in result
+    assert "qwen3-max" in result
+    assert "你好" in result
+    assert "回复内容" in result
+
+
+def test_format_io_panel_tool():
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="tool", name="query_data", status="ok",
+        started_at=None, finished_at=None, duration_ms=50.0,
+        attributes={"input": "args here", "output": "result here"},
+        error=None,
+    )
+    result = format_io_panel(span)
+    assert "tool" in result
+    assert "query_data" in result
+    assert "args here" in result
+    assert "result here" in result
+
+
+def test_format_io_panel_with_error():
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="model", name="test", status="error",
+        started_at=None, finished_at=None, duration_ms=10.0,
+        attributes={"input": [], "output": {}},
+        error="TimeoutError: timed out",
+    )
+    result = format_io_panel(span)
+    assert "error" in result.lower()
+    assert "TimeoutError" in result
+
+
+def test_format_io_panel_non_io_span():
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="memory", name="memory.read", status="ok",
+        started_at=None, finished_at=None, duration_ms=5.0,
+        attributes={}, error=None,
+    )
+    assert format_io_panel(span) == ""
+
+
+def test_format_io_panel_model_string_output():
+    """model output 为非 dict 时也能正常输出。"""
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="model", name="test", status="ok",
+        started_at=None, finished_at=None, duration_ms=10.0,
+        attributes={"input": [], "output": "raw string output"},
+        error=None,
+    )
+    result = format_io_panel(span)
+    assert "raw string output" in result
+
+
+def test_format_io_panel_model_with_tool_calls():
+    """model output 包含 tool_calls 时应输出。"""
+    from core.observability.console import format_io_panel
+
+    span = SpanEvent(
+        trace_id="t1", span_id="s1", parent_span_id=None,
+        span_type="model", name="test", status="ok",
+        started_at=None, finished_at=None, duration_ms=10.0,
+        attributes={
+            "input": [],
+            "output": {
+                "content": "",
+                "tool_calls": [{"name": "query_data", "args": {}}],
+                "usage": {"tokens": 5},
+            },
+        },
+        error=None,
+    )
+    result = format_io_panel(span)
+    assert "tool_calls" in result
+    assert "usage" in result
+
+
+# ============================================================
+# middleware model span error_type on exception
+# ============================================================
+
+
+def test_model_span_error_type_on_exception(store):
+    """LLM 调用异常时 span 应包含 error_type 和 elapsed_ms。"""
+    mw = TimingMiddleware(agent_name="err_agent", store=store, print_console=False)
+    mw.start_run()
+
+    def bad_model_handler(req):
+        raise TimeoutError("request timed out")
+
+    with pytest.raises(TimeoutError):
+        mw.wrap_model_call(_FakeModelRequest(), bad_model_handler)
+
+    mw.finish_run(status="error", error="timeout")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    model_span = next(s for s in spans if s.span_type == "model")
+    assert model_span.status == "error"
+    assert model_span.attributes.get("error_type") == "timeout"
+    assert model_span.attributes.get("elapsed_ms") is not None
+    assert model_span.attributes["elapsed_ms"] >= 0
+
+
+# ============================================================
+# console.py format_tree / format_summary
+# ============================================================
+
+
+def test_format_tree():
+    from core.observability.console import format_tree
+    from datetime import datetime
+
+    now = datetime.utcnow()
+    spans = [
+        SpanEvent(
+            trace_id="t1", span_id="root", parent_span_id=None,
+            span_type="agent", name="p2p_agent", status="ok",
+            started_at=now, finished_at=now, duration_ms=100.0,
+            attributes={}, error=None,
+        ),
+        SpanEvent(
+            trace_id="t1", span_id="s1", parent_span_id="root",
+            span_type="tool", name="query_data", status="ok",
+            started_at=now, finished_at=now, duration_ms=50.0,
+            attributes={"args": {"days": 30}}, error=None,
+        ),
+        SpanEvent(
+            trace_id="t1", span_id="s2", parent_span_id="root",
+            span_type="model", name="qwen3-max", status="error",
+            started_at=now, finished_at=now, duration_ms=200.0,
+            attributes={"message_count": 5}, error="timeout",
+        ),
+    ]
+    result = format_tree(spans, "t1")
+    assert "trace t1" in result
+    assert "query_data" in result
+    assert "qwen3-max" in result
+    assert "[error]" in result
+    assert "args=" in result
+    assert "msgs=5" in result
+
+
+def test_format_summary():
+    from core.observability.console import format_summary
+    from datetime import datetime
+
+    now = datetime.utcnow()
+    spans = [
+        SpanEvent(
+            trace_id="t1", span_id="s1", parent_span_id=None,
+            span_type="model", name="m1", status="ok",
+            started_at=now, finished_at=now, duration_ms=100.0,
+            attributes={}, error=None,
+        ),
+        SpanEvent(
+            trace_id="t1", span_id="s2", parent_span_id=None,
+            span_type="tool", name="t1", status="ok",
+            started_at=now, finished_at=now, duration_ms=50.0,
+            attributes={}, error=None,
+        ),
+    ]
+    result = format_summary(spans, 200.0)
+    assert "model=1" in result
+    assert "tool=1" in result
+    assert "memory=0" in result

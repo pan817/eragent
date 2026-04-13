@@ -14,7 +14,7 @@
 
 ### 1.1 创建默认标题会话
 # @name createSession1
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -27,7 +27,7 @@ X-User-Id: {{user}}
 
 ### 1.2 创建自定义标题会话
 # @name createSession2
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -40,12 +40,12 @@ X-User-Id: {{user}}
 
 ### 1.3 不传 body 创建会话
 # @name createSession3
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
 ### 1.4 空会话去重：连续创建第 4 个空会话应返回已有的
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -54,7 +54,7 @@ X-User-Id: {{user}}
 }
 
 ### 1.5 未登录创建（应返回 401）
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 
 {
@@ -67,27 +67,27 @@ Content-Type: application/json
 ### ============================================================
 
 ### 2.1 列出全部会话
-GET {{host}}/api/v1/sessions?limit=20
+GET {{host}}/api/v1/ptp-agent/sessions?limit=20
 X-User-Id: {{user}}
 
 ### 2.2 分页：取第一页（limit=1）
 # @name listPage1
-GET {{host}}/api/v1/sessions?limit=1
+GET {{host}}/api/v1/ptp-agent/sessions?limit=1
 X-User-Id: {{user}}
 
 ###
 @next_cursor = {{listPage1.response.body.next_cursor}}
 
 ### 2.3 分页：用 cursor 取第二页
-GET {{host}}/api/v1/sessions?limit=1&cursor={{next_cursor}}
+GET {{host}}/api/v1/ptp-agent/sessions?limit=1&cursor={{next_cursor}}
 X-User-Id: {{user}}
 
 ### 2.4 其他用户看不到（应返回空列表）
-GET {{host}}/api/v1/sessions?limit=20
+GET {{host}}/api/v1/ptp-agent/sessions?limit=20
 X-User-Id: other-user
 
 ### 2.5 未登录（应返回 401）
-GET {{host}}/api/v1/sessions
+GET {{host}}/api/v1/ptp-agent/sessions
 
 
 ### ============================================================
@@ -96,7 +96,7 @@ GET {{host}}/api/v1/sessions
 
 ### 3.1 向会话 1 追加一对消息
 # @name appendMsg1
-POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+POST {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -124,11 +124,11 @@ X-User-Id: {{user}}
 
 ### 3.2 追加后验证标题自动推导
 ### 预期：title 变为首条 user 消息前 24 字
-GET {{host}}/api/v1/sessions/{{session_id_1}}
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 X-User-Id: {{user}}
 
 ### 3.3 向会话 2 追加消息（带 metadata）
-POST {{host}}/api/v1/sessions/{{session_id_2}}/messages
+POST {{host}}/api/v1/ptp-agent/sessions/{{session_id_2}}/messages
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -146,7 +146,7 @@ X-User-Id: {{user}}
 }
 
 ### 3.4 向不存在的会话追加（应返回 404）
-POST {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000/messages
+POST {{host}}/api/v1/ptp-agent/sessions/00000000-0000-0000-0000-000000000000/messages
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -160,7 +160,7 @@ X-User-Id: {{user}}
 }
 
 ### 3.5 无效 role（应返回 422）
-POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+POST {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -174,7 +174,7 @@ X-User-Id: {{user}}
 }
 
 ### 3.6 空 content（应返回 422）
-POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+POST {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -188,7 +188,7 @@ X-User-Id: {{user}}
 }
 
 ### 3.7 其他用户追加（应返回 404）
-POST {{host}}/api/v1/sessions/{{session_id_1}}/messages
+POST {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages
 Content-Type: application/json
 X-User-Id: other-user
 
@@ -207,19 +207,19 @@ X-User-Id: other-user
 ### ============================================================
 
 ### 4.1 获取会话 1 详情（含消息）
-GET {{host}}/api/v1/sessions/{{session_id_1}}
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 X-User-Id: {{user}}
 
 ### 4.2 限制消息数
-GET {{host}}/api/v1/sessions/{{session_id_1}}?message_limit=1
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}?message_limit=1
 X-User-Id: {{user}}
 
 ### 4.3 不存在的会话（应返回 404）
-GET {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+GET {{host}}/api/v1/ptp-agent/sessions/00000000-0000-0000-0000-000000000000
 X-User-Id: {{user}}
 
 ### 4.4 其他用户访问（应返回 404，不是 403）
-GET {{host}}/api/v1/sessions/{{session_id_1}}
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 X-User-Id: other-user
 
 
@@ -228,7 +228,7 @@ X-User-Id: other-user
 ### ============================================================
 
 ### 5.1 手动更新标题
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -238,11 +238,11 @@ X-User-Id: {{user}}
 
 ### 5.2 验证 title_auto=false
 ### 预期：title_auto 为 false
-GET {{host}}/api/v1/sessions/{{session_id_1}}
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 X-User-Id: {{user}}
 
 ### 5.3 不存在的会话（应返回 404）
-PATCH {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+PATCH {{host}}/api/v1/ptp-agent/sessions/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -251,7 +251,7 @@ X-User-Id: {{user}}
 }
 
 ### 5.4 标题超长（应返回 422，max_length=80）
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -265,7 +265,7 @@ X-User-Id: {{user}}
 ### ============================================================
 
 ### 6.1 更新 assistant 消息内容（模拟 regenerate）
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages/{{message_id_asst}}
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -277,7 +277,7 @@ X-User-Id: {{user}}
 }
 
 ### 6.2 只更新 status
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages/{{message_id_asst}}
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -286,7 +286,7 @@ X-User-Id: {{user}}
 }
 
 ### 6.3 更新 metadata
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages/{{message_id_asst}}
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -298,7 +298,7 @@ X-User-Id: {{user}}
 }
 
 ### 6.4 不存在的消息（应返回 404）
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/00000000-0000-0000-0000-000000000000
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -307,7 +307,7 @@ X-User-Id: {{user}}
 }
 
 ### 6.5 其他用户更新（应返回 404）
-PATCH {{host}}/api/v1/sessions/{{session_id_1}}/messages/{{message_id_asst}}
+PATCH {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}/messages/{{message_id_asst}}
 Content-Type: application/json
 X-User-Id: other-user
 
@@ -321,31 +321,31 @@ X-User-Id: other-user
 ### ============================================================
 
 ### 7.1 搜索标题关键词
-GET {{host}}/api/v1/sessions/search?q=三路匹配
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=三路匹配
 X-User-Id: {{user}}
 
 ### 7.2 搜索消息内容关键词
-GET {{host}}/api/v1/sessions/search?q=SUP-001
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=SUP-001
 X-User-Id: {{user}}
 
 ### 7.3 仅搜标题
-GET {{host}}/api/v1/sessions/search?q=专项&scope=title
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=专项&scope=title
 X-User-Id: {{user}}
 
 ### 7.4 仅搜内容
-GET {{host}}/api/v1/sessions/search?q=匹配异常&scope=content
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=匹配异常&scope=content
 X-User-Id: {{user}}
 
 ### 7.5 无匹配结果
-GET {{host}}/api/v1/sessions/search?q=不存在的关键词xyz
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=不存在的关键词xyz
 X-User-Id: {{user}}
 
 ### 7.6 空搜索词（应返回 422）
-GET {{host}}/api/v1/sessions/search?q=
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=
 X-User-Id: {{user}}
 
 ### 7.7 其他用户搜索（应返回空）
-GET {{host}}/api/v1/sessions/search?q=三路匹配
+GET {{host}}/api/v1/ptp-agent/sessions/search?q=三路匹配
 X-User-Id: other-user
 
 
@@ -354,23 +354,23 @@ X-User-Id: other-user
 ### ============================================================
 
 ### 8.1 删除会话 2
-DELETE {{host}}/api/v1/sessions/{{session_id_2}}
+DELETE {{host}}/api/v1/ptp-agent/sessions/{{session_id_2}}
 X-User-Id: {{user}}
 
 ### 8.2 验证已删除（应返回 404）
-GET {{host}}/api/v1/sessions/{{session_id_2}}
+GET {{host}}/api/v1/ptp-agent/sessions/{{session_id_2}}
 X-User-Id: {{user}}
 
 ### 8.3 列表中不再出现
-GET {{host}}/api/v1/sessions
+GET {{host}}/api/v1/ptp-agent/sessions
 X-User-Id: {{user}}
 
 ### 8.4 删除不存在的会话（应返回 404）
-DELETE {{host}}/api/v1/sessions/00000000-0000-0000-0000-000000000000
+DELETE {{host}}/api/v1/ptp-agent/sessions/00000000-0000-0000-0000-000000000000
 X-User-Id: {{user}}
 
 ### 8.5 其他用户删除（应返回 404）
-DELETE {{host}}/api/v1/sessions/{{session_id_1}}
+DELETE {{host}}/api/v1/ptp-agent/sessions/{{session_id_1}}
 X-User-Id: other-user
 
 
@@ -379,7 +379,7 @@ X-User-Id: other-user
 ### ============================================================
 
 ### 9.1 缺少 confirm（应返回 400）
-DELETE {{host}}/api/v1/sessions
+DELETE {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -388,7 +388,7 @@ X-User-Id: {{user}}
 }
 
 ### 9.2 正确清空
-DELETE {{host}}/api/v1/sessions
+DELETE {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: {{user}}
 
@@ -397,12 +397,12 @@ X-User-Id: {{user}}
 }
 
 ### 9.3 验证已清空
-GET {{host}}/api/v1/sessions
+GET {{host}}/api/v1/ptp-agent/sessions
 X-User-Id: {{user}}
 
 ### 9.4 其他用户不受影响（先创建再验证）
 # @name createOtherSession
-POST {{host}}/api/v1/sessions
+POST {{host}}/api/v1/ptp-agent/sessions
 Content-Type: application/json
 X-User-Id: other-user
 
@@ -411,5 +411,5 @@ X-User-Id: other-user
 }
 
 ### 验证其他用户会话仍在
-GET {{host}}/api/v1/sessions
+GET {{host}}/api/v1/ptp-agent/sessions
 X-User-Id: other-user

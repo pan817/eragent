@@ -23,8 +23,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from core.logging_utils import get_logger
 from core.observability.middleware import TimingMiddleware, _current_trace
 from core.observability.store import SpanEvent
+
+_logger = get_logger(__name__)
 
 
 def _truncate(text: str, limit: int = 500) -> str:
@@ -36,14 +39,16 @@ def _truncate(text: str, limit: int = 500) -> str:
 def _thread_id(config: Any) -> str | None:
     try:
         return (config or {}).get("configurable", {}).get("thread_id")  # type: ignore[union-attr]
-    except Exception:
+    except Exception as exc:
+        _logger.debug("_thread_id extraction failed: %s", exc)
         return None
 
 
 def _checkpoint_id(config: Any) -> str | None:
     try:
         return (config or {}).get("configurable", {}).get("checkpoint_id")  # type: ignore[union-attr]
-    except Exception:
+    except Exception as exc:
+        _logger.debug("_checkpoint_id extraction failed: %s", exc)
         return None
 
 
@@ -67,8 +72,8 @@ def _summarize_tuple(result: Any) -> dict[str, Any]:
                 info["step"] = md.get("step")
             if "source" in md:
                 info["source"] = md.get("source")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("_summarize_tuple failed: %s", exc)
     return info
 
 
@@ -81,8 +86,8 @@ def _summarize_checkpoint(checkpoint: Any) -> dict[str, Any]:
             messages = channel_values.get("messages")
             if isinstance(messages, list):
                 info["n_messages"] = len(messages)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("_summarize_checkpoint failed: %s", exc)
     return info
 
 

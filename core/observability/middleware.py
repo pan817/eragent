@@ -24,8 +24,11 @@ from langchain.agents.middleware.types import (
     ToolCallRequest,
 )
 
+from core.logging_utils import get_logger
 from core.observability.console import format_io_panel, format_summary, format_tree
 from core.observability.store import RunEvent, SpanEvent, TraceStore, get_trace_store
+
+_logger = get_logger(__name__)
 
 
 # 单条 input/output 文本的最大长度。超出截断，避免 attributes JSON 膨胀。
@@ -41,7 +44,8 @@ def _max_io_text() -> int:
         from config.settings import get_settings
 
         return get_settings().observability.max_io_text
-    except Exception:
+    except Exception as exc:
+        _logger.debug("failed to load observability.max_io_text, using default: %s", exc)
         return _MAX_IO_TEXT_DEFAULT
 
 
@@ -50,8 +54,46 @@ def _token_estimate_ratio() -> float:
         from config.settings import get_settings
 
         return get_settings().llm.token_estimate_ratio
-    except Exception:
+    except Exception as exc:
+        _logger.debug("failed to load llm.token_estimate_ratio, using default: %s", exc)
         return _DEFAULT_TOKEN_RATIO
+
+
+def _classify_llm_error(exc: BaseException) -> str:
+    """将 LLM 调用异常分类为可读的错误类型标签。"""
+    exc_type = type(exc).__name__
+    exc_module = type(exc).__module__ or ""
+    exc_str = str(exc).lower()
+
+    # 超时类
+    if isinstance(exc, (TimeoutError, OSError)) or "timeout" in exc_type.lower():
+        return "timeout"
+    if "timeout" in exc_str or "timed out" in exc_str:
+        return "timeout"
+
+    # 连接类
+    if "connect" in exc_str or "connection" in exc_type.lower():
+        return "connection_error"
+
+    # 速率限制
+    if "rate" in exc_str and "limit" in exc_str:
+        return "rate_limit"
+    if "429" in exc_str or "ratelimit" in exc_type.lower():
+        return "rate_limit"
+
+    # 认证
+    if "auth" in exc_str or "401" in exc_str or "apikey" in exc_str:
+        return "auth_error"
+
+    # 模型服务端错误
+    if any(code in exc_str for code in ("500", "502", "503", "504")):
+        return "server_error"
+
+    # openai / httpx 系异常
+    if "openai" in exc_module or "httpx" in exc_module:
+        return f"api_error.{exc_type}"
+
+    return exc_type
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -344,6 +386,8 @@ class TimingMiddleware(AgentMiddleware):
             return result
         except BaseException as exc:
             status = "error"
+            attrs["error_type"] = _classify_llm_error(exc)
+            attrs["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 2)
             error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
             raise
         finally:
@@ -373,6 +417,8 @@ class TimingMiddleware(AgentMiddleware):
             return result
         except BaseException as exc:
             status = "error"
+            attrs["error_type"] = _classify_llm_error(exc)
+            attrs["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 2)
             error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
             raise
         finally:
@@ -424,8 +470,12 @@ class TimingMiddleware(AgentMiddleware):
                     tool_schema_chars += len(
                         json.dumps(schema.schema(), ensure_ascii=False)
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.warning(
+                        "tool schema serialization failed for %s: %s",
+                        getattr(t, "name", "unknown"),
+                        exc,
+                    )
 
         return {
             "model": str(model_name),
@@ -457,6 +507,7 @@ class TimingMiddleware(AgentMiddleware):
     @staticmethod
     def _serialize_model_output(result: Any) -> dict[str, Any]:
         # LangChain 1.2 模型节点返回 {"messages": [AIMessage(...)]} 或类似结构
+        # 也可能返回 ModelResponse(result=[AIMessage(...)]) dataclass
         msg: Any = result
         if isinstance(result, dict):
             msgs = result.get("messages") or result.get("result")
@@ -466,6 +517,11 @@ class TimingMiddleware(AgentMiddleware):
                 msg = msgs
         elif isinstance(result, list) and result:
             msg = result[-1]
+        else:
+            # LangChain 1.2 ModelResponse dataclass: result 属性为 list[BaseMessage]
+            result_list = getattr(result, "result", None)
+            if isinstance(result_list, list) and result_list:
+                msg = result_list[-1]
 
         content = getattr(msg, "content", None)
         tool_calls = getattr(msg, "tool_calls", None)
@@ -574,7 +630,8 @@ def _truncate_text(value: Any, max_len: int | None = None) -> str:
             import json
 
             value = json.dumps(value, ensure_ascii=False, default=str)
-        except Exception:
+        except Exception as exc:
+            _logger.debug("_truncate_text json serialization failed, falling back to str(): %s", exc)
             value = str(value)
     if len(value) > max_len:
         return value[: max_len - 3] + "..."
@@ -702,8 +759,10 @@ def _safe_jsonable(value: Any) -> Any:
     try:
         json.dumps(value, ensure_ascii=False, default=str)
         return value
-    except Exception:
+    except Exception as exc:
+        _logger.debug("_safe_jsonable first-pass failed: %s", exc)
         try:
             return json.loads(json.dumps(value, ensure_ascii=False, default=str))
-        except Exception:
+        except Exception as exc2:
+            _logger.debug("_safe_jsonable second-pass failed, falling back to str(): %s", exc2)
             return str(value)

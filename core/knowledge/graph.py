@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from core.logging_utils import get_logger
+
+_logger = get_logger(__name__)
+
 try:  # neo4j 为可选依赖：开关关闭或包未安装时不阻塞模块导入
     from neo4j import GraphDatabase, Driver, Session  # type: ignore[import-untyped]
 except Exception:  # pragma: no cover - 包缺失场景
@@ -124,8 +128,8 @@ class KnowledgeGraph:
         if self._driver is not None:
             try:
                 self._driver.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.debug("neo4j driver close failed: %s", exc)
             finally:
                 self._driver = None
 

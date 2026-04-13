@@ -1038,3 +1038,300 @@ class TestSessionContextTrim:
         )
         assert estimate_tokens(summary) <= max_tokens + 1
         assert len(summary) < len(long_response)
+
+
+# ============================================================
+# _resolve_time_range
+# ============================================================
+
+
+class TestResolveTimeRange:
+    """时间范围解析测试。"""
+
+    def test_none_returns_none(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        assert _resolve_time_range(None) is None
+
+    def test_empty_returns_none(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        assert _resolve_time_range("") is None
+
+    def test_nd_format(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        assert _resolve_time_range("7d") == 7
+        assert _resolve_time_range("30d") == 30
+        assert _resolve_time_range("365d") == 365
+
+    def test_this_month(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        result = _resolve_time_range("this_month")
+        assert result is not None
+        assert 1 <= result <= 31
+
+    def test_last_month(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        result = _resolve_time_range("last_month")
+        assert result is not None
+        assert 28 <= result <= 62
+
+    def test_invalid_returns_none(self) -> None:
+        from core.orchestrator.orchestrator import _resolve_time_range
+
+        assert _resolve_time_range("abc") is None
+        assert _resolve_time_range("7days") is None
+
+
+# ============================================================
+# Orchestrator 超时测试
+# ============================================================
+
+
+class TestOrchestratorTimeout:
+    """整体超时测试。"""
+
+    @pytest.mark.asyncio
+    async def test_analyze_timeout_returns_failed(self, settings: Settings) -> None:
+        """Agent 执行超时应返回 RESPONSE_TIMEOUT。"""
+        import asyncio
+
+        settings.analysis.response_timeout_seconds = 0.1  # 100ms
+
+        orch = Orchestrator(settings=settings)
+
+        async def slow_inner(**kwargs):
+            await asyncio.sleep(5)
+
+        with patch.object(orch, "_analyze_inner", side_effect=slow_inner):
+            request = AnalysisRequest(query="超时测试")
+            result = await orch.analyze(request)
+
+        assert result.status == AnalysisStatus.FAILED
+        assert result.error is not None
+        assert result.error.code == "RESPONSE_TIMEOUT"
+
+
+# ============================================================
+# Orchestrator checkpointer 生命周期
+# ============================================================
+
+
+class TestCheckpointerLifecycle:
+    """Checkpointer 初始化与关闭测试。"""
+
+    def test_ensure_checkpointer_failure_returns_none(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        with patch.object(orch, "_get_checkpointer", side_effect=RuntimeError("pg down")):
+            result = orch._ensure_checkpointer()
+        assert result is None
+
+    def test_close_checkpointer_exception(self, settings: Settings) -> None:
+        """关闭 checkpointer 异常不应阻塞。"""
+        orch = Orchestrator(settings=settings)
+        mock_cm = MagicMock()
+        mock_cm.__exit__ = MagicMock(side_effect=RuntimeError("close error"))
+        orch._checkpointer_cm = mock_cm
+        orch._checkpointer = MagicMock()
+
+        orch._close_checkpointer()
+        assert orch._checkpointer is None
+        assert orch._checkpointer_cm is None
+
+    def test_close_checkpointer_idempotent(self, settings: Settings) -> None:
+        """重复关闭不应报错。"""
+        orch = Orchestrator(settings=settings)
+        orch._close_checkpointer()  # cm 为 None，应静默返回
+
+
+# ============================================================
+# Orchestrator _persist_report 测试
+# ============================================================
+
+
+class TestPersistReport:
+    def test_persist_report_failure_logged(self, settings: Settings) -> None:
+        """持久化失败不应抛异常。"""
+        from api.schemas.analysis import AnalysisResult, AnalysisStatus, AnalysisType
+
+        orch = Orchestrator(settings=settings)
+        result = AnalysisResult(
+            report_id="r1", status=AnalysisStatus.SUCCESS,
+            analysis_type=AnalysisType.COMPREHENSIVE,
+            query="测试", user_id="u1", session_id="s1",
+            time_range="30d",
+        )
+        with patch("core.memory.get_long_term_memory", side_effect=RuntimeError("db")):
+            orch._persist_report(result)  # 不应抛异常
+
+
+# ============================================================
+# _validate_entities
+# ============================================================
+
+
+class TestValidateEntities:
+    """实体 DB 验证测试。"""
+
+    @pytest.mark.asyncio
+    async def test_po_not_found_discarded(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_purchase_orders.return_value = []
+        params = {"po_number": "PO-9999", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert "po_number" not in params
+
+    @pytest.mark.asyncio
+    async def test_po_found_kept(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_purchase_orders.return_value = [{"po_number": "PO-001"}]
+        params = {"po_number": "PO-001", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert params["po_number"] == "PO-001"
+
+    @pytest.mark.asyncio
+    async def test_supplier_not_found_discarded(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_purchase_orders.return_value = []
+        params = {"supplier_id": "SUP-999", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert "supplier_id" not in params
+
+    @pytest.mark.asyncio
+    async def test_invoice_not_found_discarded(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_invoices.return_value = [{"invoice_number": "INV-OTHER"}]
+        params = {"invoice_number": "INV-999", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert "invoice_number" not in params
+
+    @pytest.mark.asyncio
+    async def test_payment_not_found_discarded(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_payments.return_value = []
+        params = {"payment_number": "PAY-999", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert "payment_number" not in params
+
+    @pytest.mark.asyncio
+    async def test_receipt_not_found_discarded(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_receipts.return_value = [{"receipt_id": "RCV-OTHER"}]
+        params = {"receipt_number": "RCV-999", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert "receipt_number" not in params
+
+    @pytest.mark.asyncio
+    async def test_db_error_non_blocking(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_purchase_orders.side_effect = RuntimeError("db error")
+        params = {"po_number": "PO-001", "days": 30}
+
+        await orch._validate_entities(mock_repo, params)
+        assert params["po_number"] == "PO-001"  # 验证失败保留实体
+
+
+# ============================================================
+# _enrich_entities
+# ============================================================
+
+
+class TestEnrichEntities:
+    """实体关联补充测试。"""
+
+    @pytest.mark.asyncio
+    async def test_payment_to_invoice(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_payments.return_value = [{"invoice_number": "INV-001"}]
+        mock_repo.query_purchase_orders.return_value = []
+        mock_repo.query_invoices.return_value = []
+        mock_repo.query_receipts.return_value = []
+
+        params = {"payment_number": "PAY-001", "days": 30}
+
+        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
+            await orch._enrich_entities(params)
+
+        assert params.get("invoice_number") == "INV-001"
+
+    @pytest.mark.asyncio
+    async def test_po_to_supplier(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_purchase_orders.return_value = [{"supplier_id": "SUP-001"}]
+        mock_repo.query_invoices.return_value = []
+        mock_repo.query_receipts.return_value = []
+        mock_repo.query_payments.return_value = []
+
+        params = {"po_number": "PO-001", "days": 30}
+
+        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
+            await orch._enrich_entities(params)
+
+        assert params.get("supplier_id") == "SUP-001"
+
+    @pytest.mark.asyncio
+    async def test_receipt_to_po_and_supplier(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_receipts.return_value = [
+            {"receipt_id": "RCV-001", "po_number": "PO-001", "supplier_id": "SUP-001"}
+        ]
+        mock_repo.query_purchase_orders.return_value = []
+        mock_repo.query_invoices.return_value = []
+        mock_repo.query_payments.return_value = []
+
+        params = {"receipt_number": "RCV-001", "days": 30}
+
+        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
+            await orch._enrich_entities(params)
+
+        assert params.get("po_number") == "PO-001"
+        assert params.get("supplier_id") == "SUP-001"
+
+    @pytest.mark.asyncio
+    async def test_invoice_to_po_and_supplier(self, settings: Settings) -> None:
+        orch = Orchestrator(settings=settings)
+        mock_repo = MagicMock()
+        mock_repo.query_invoices.return_value = [
+            {"invoice_number": "INV-001", "po_number": "PO-002", "supplier_id": "SUP-002"}
+        ]
+        mock_repo.query_purchase_orders.return_value = []
+        mock_repo.query_receipts.return_value = []
+        mock_repo.query_payments.return_value = []
+
+        params = {"invoice_number": "INV-001", "days": 30}
+
+        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
+            await orch._enrich_entities(params)
+
+        assert params.get("po_number") == "PO-002"
+        assert params.get("supplier_id") == "SUP-002"
+
+    @pytest.mark.asyncio
+    async def test_repo_init_failure(self, settings: Settings) -> None:
+        """_get_repository 失败不阻塞。"""
+        orch = Orchestrator(settings=settings)
+        params = {"po_number": "PO-001", "days": 30}
+
+        with patch("modules.p2p.tools._get_repository", side_effect=RuntimeError("no repo")):
+            await orch._enrich_entities(params)
+
+        assert params["po_number"] == "PO-001"  # 原样保留

@@ -35,10 +35,12 @@ def list_traces(
         limit=limit,
         offset=offset,
     )
+    # 批量获取 token_summary，消除 N+1（50 条记录从 51 次查询降为 2 次）
+    summaries = store.batch_get_token_summaries([r.trace_id for r in runs])
     result: list[RunOut] = []
     for r in runs:
         out = RunOut.model_validate(r)
-        out.token_summary = store.get_token_summary(r.trace_id)
+        out.token_summary = summaries.get(r.trace_id)
         result.append(out)
     return result
 
