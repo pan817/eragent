@@ -114,12 +114,12 @@ def test_middleware_tool_and_model_spans(store):
     )
     assert result == "tool-result"
 
-    mw.finish_run(status="success")
+    mw.finish_run(status="ok")
 
     _wait_flush(
         store,
         lambda: len(store.list_runs(limit=10)) == 1
-        and store.list_runs(limit=1)[0].status == "success",
+        and store.list_runs(limit=1)[0].status == "ok",
     )
 
     runs = store.list_runs(limit=10)
@@ -189,11 +189,11 @@ def test_record_memory_span_emits_span(store):
     ):
         time.sleep(0.01)
 
-    mw.finish_run(status="success")
+    mw.finish_run(status="ok")
 
     _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
     run = store.list_runs(limit=1)[0]
-    assert run.status == "success"
+    assert run.status == "ok"
 
     _, spans = store.get_run(run.trace_id)
     types = sorted(s.span_type for s in spans)
@@ -253,7 +253,7 @@ def test_record_span_emits_span(store):
         attrs["analysis_type"] = "three_way_match"
         time.sleep(0.01)
 
-    mw.finish_run(status="success")
+    mw.finish_run(status="ok")
 
     _wait_flush(store, lambda: len(store.list_runs(limit=10)) >= 1)
     runs = store.list_runs(limit=1)
@@ -584,6 +584,50 @@ def test_token_summary_mixed_span_styles(store):
     assert ts["total_prompt_tokens"] == 1800   # 1000 + 800
     assert ts["total_completion_tokens"] == 450  # 300 + 150
     assert ts["peak_prompt_tokens"] == 1000
+
+
+# ============================================================
+# record_span increments model_count / tool_count
+# ============================================================
+
+
+def test_record_span_increments_model_and_tool_counts(store):
+    """record_span("model"/"tool") should increment ctx counters
+    so that finish_run emits correct model_call_count / tool_call_count."""
+    from core.observability.middleware import record_span
+
+    mw = TimingMiddleware(agent_name="count_agent", store=store, print_console=False)
+    mw.start_run()
+
+    # 2 tool spans (simulating DAG executor)
+    with record_span("tool", "query_vendor_master") as attrs:
+        attrs["tool"] = "query_vendor_master"
+    with record_span("tool", "calculate_supplier_kpis") as attrs:
+        attrs["tool"] = "calculate_supplier_kpis"
+
+    # 1 model span (simulating ReportAgent)
+    with record_span("model", "qwen3-max") as attrs:
+        attrs["model"] = "qwen3-max"
+        attrs["output"] = "report"
+
+    mw.finish_run()
+
+    # Wait until run_end has been flushed (status changes from "running")
+    _wait_flush(
+        store,
+        lambda: (
+            store.list_runs(limit=1)
+            and store.list_runs(limit=1)[0].status != "running"
+        ),
+    )
+    run = store.list_runs(limit=1)[0]
+    assert run.model_call_count == 1
+    assert run.tool_call_count == 2
+
+    _, spans = store.get_run(run.trace_id)
+    agent_span = next(s for s in spans if s.span_type == "agent")
+    assert agent_span.attributes["model_calls"] == 1
+    assert agent_span.attributes["tool_calls"] == 2
 
 
 # ============================================================

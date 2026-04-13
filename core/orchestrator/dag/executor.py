@@ -41,14 +41,12 @@ class DAGExecutor:
     async def execute(
         self,
         tasks: list[dict[str, Any]],
-        long_term_context: str = "",
         output_mode_prompt: str = "",
     ) -> dict[str, Any]:
         """执行 DAG 任务列表，记录完整执行过程到 trace。
 
         Args:
             tasks: DAG 任务定义列表。
-            long_term_context: 长期记忆上下文文本，注入 ReportAgent 报告生成。
             output_mode_prompt: 输出模式格式指令，注入 ReportAgent。
         """
         start = time.monotonic()
@@ -90,7 +88,6 @@ class DAGExecutor:
                                 self._report_agent.generate(
                                     scenario=task.get("inputs", {}).get("scenario", "分析"),
                                     outputs=outputs,
-                                    long_term_context=long_term_context,
                                     output_mode_prompt=output_mode_prompt,
                                 ),
                                 timeout=timeout_sec,
@@ -98,15 +95,15 @@ class DAGExecutor:
                             output_key = task.get("output_key", task_id)
                             outputs[output_key] = report_text
                             completed.append(task_id)
-                            span_attrs["status"] = "completed"
+                            span_attrs["status"] = "ok"
                             span_attrs["output_length"] = len(report_text)
                         except Exception as exc:
                             failed[task_id] = str(exc)
-                            span_attrs["status"] = "failed"
+                            span_attrs["status"] = "error"
                             span_attrs["error"] = str(exc)
                     else:
                         completed.append(task_id)
-                        span_attrs["status"] = "skipped_no_report_agent"
+                        span_attrs["status"] = "skipped"
                     events[task_id].set()
                     return
 
@@ -114,7 +111,7 @@ class DAGExecutor:
                 tool_fn = self._registry.get(tool_name)
                 if tool_fn is None:
                     failed[task_id] = f"工具 '{tool_name}' 未注册"
-                    span_attrs["status"] = "failed"
+                    span_attrs["status"] = "error"
                     span_attrs["error"] = failed[task_id]
                     events[task_id].set()
                     return
@@ -141,18 +138,18 @@ class DAGExecutor:
                     output_key = task.get("output_key", task_id)
                     outputs[output_key] = result
                     completed.append(task_id)
-                    span_attrs["status"] = "completed"
+                    span_attrs["status"] = "ok"
                     span_attrs["output"] = _truncate_text(result)
                     _logger.debug("task %s completed: %s", task_id, tool_name)
 
                 except asyncio.TimeoutError:
                     failed[task_id] = f"工具 '{tool_name}' 超时（{timeout_sec}s）"
-                    span_attrs["status"] = "timeout"
+                    span_attrs["status"] = "error"
                     span_attrs["timeout_sec"] = timeout_sec
                     _logger.warning("task %s timeout: %s after %ds", task_id, tool_name, timeout_sec)
                 except Exception as exc:
                     failed[task_id] = f"{type(exc).__name__}: {exc}"
-                    span_attrs["status"] = "failed"
+                    span_attrs["status"] = "error"
                     span_attrs["error"] = str(exc)
                     _logger.warning("task %s failed: %s - %s", task_id, tool_name, exc)
                 finally:
@@ -169,11 +166,11 @@ class DAGExecutor:
             duration = time.monotonic() - start
 
             if not failed:
-                status = "completed"
+                status = "ok"
             elif completed:
-                status = "partial"
+                status = "warning"
             else:
-                status = "failed"
+                status = "error"
 
             dag_attrs["status"] = status
             dag_attrs["completed_tasks"] = completed

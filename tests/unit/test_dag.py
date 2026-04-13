@@ -307,7 +307,7 @@ class TestDAGExecutor:
             },
         ])
 
-        assert result["status"] == "completed"
+        assert result["status"] == "ok"
         assert "po_data" in result["outputs"]
         assert "t1" in result["completed_tasks"]
 
@@ -332,7 +332,7 @@ class TestDAGExecutor:
              "inputs": {}, "output_key": "out2", "timeout_sec": 10},
         ])
 
-        assert result["status"] == "completed"
+        assert result["status"] == "ok"
         assert len(result["completed_tasks"]) == 2
 
     @pytest.mark.asyncio
@@ -350,7 +350,7 @@ class TestDAGExecutor:
              "inputs": {}, "output_key": "out", "timeout_sec": 10},
         ])
 
-        assert result["status"] == "failed"
+        assert result["status"] == "error"
         assert "t1" in result["failed_tasks"]
 
     @pytest.mark.asyncio
@@ -397,7 +397,7 @@ class TestDAGExecutor:
              "inputs": {"scenario": "测试"}, "output_key": "report", "timeout_sec": 10},
         ])
 
-        assert result["status"] == "completed"
+        assert result["status"] == "ok"
         assert result["report"] == "# Report"
         mock_report.generate.assert_called_once()
 
@@ -439,7 +439,7 @@ class TestDAGCaseStore:
                 analysis_type="three_way_match",
                 dag=[{"task_id": "t1"}],
                 route_type="DAG",
-                exec_result={"status": "completed", "failed_tasks": {}, "duration_sec": 1.0},
+                exec_result={"status": "ok", "failed_tasks": {}, "duration_sec": 1.0},
             )
 
             mock_pg.assert_called_once()
@@ -456,7 +456,7 @@ class TestDAGCaseStore:
                 analysis_type="three_way_match",
                 dag=[],
                 route_type="DAG",
-                exec_result={"status": "failed", "failed_tasks": {"t1": "err"}},
+                exec_result={"status": "error", "failed_tasks": {"t1": "err"}},
             )
 
             mock_pg.assert_not_called()
@@ -472,7 +472,7 @@ class TestDAGCaseStore:
                 analysis_type="three_way_match",
                 dag=[],
                 route_type="DAG",
-                exec_result={"status": "completed", "failed_tasks": {"t2": "err"}},
+                exec_result={"status": "ok", "failed_tasks": {"t2": "err"}},
             )
 
             mock_pg.assert_not_called()
@@ -554,7 +554,7 @@ class TestDAGCaseStore:
                 analysis_type="price_variance",
                 dag=[{"task_id": "t1"}, {"task_id": "t2"}],
                 route_type="DAG",
-                exec_result={"status": "completed", "failed_tasks": {}, "duration_sec": 2.0},
+                exec_result={"status": "ok", "failed_tasks": {}, "duration_sec": 2.0},
             )
             mock_pg.assert_called_once()
             mock_chroma.assert_called_once()

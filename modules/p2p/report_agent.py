@@ -18,7 +18,7 @@ _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以�
 
 ## 分析场景
 {scenario}
-{long_term_section}
+
 ## 工具输出数据
 {outputs_text}
 
@@ -29,7 +29,6 @@ _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以�
 4. 提供具体数据支撑（单据号、金额、偏差比例）
 5. 给出可操作的改进建议
 6. 如果数据为空或工具返回空结果，说明无异常发现
-7. 如果有历史记忆参考，可结合历史分析结论做趋势对比
 
 请直接输出 Markdown 报告："""
 
@@ -45,14 +44,13 @@ class ReportAgent:
         if self._llm is not None:
             return self._llm
         from modules.p2p.model_factory import build_chat_model
-        self._llm = build_chat_model(self._settings.llm)
+        self._llm = build_chat_model(self._settings.llm, disable_thinking=True)
         return self._llm
 
     async def generate(
         self,
         scenario: str,
         outputs: dict[str, str],
-        long_term_context: str = "",
         output_mode_prompt: str = "",
     ) -> str:
         """根据 DAG 各节点输出生成 Markdown 报告。
@@ -60,7 +58,6 @@ class ReportAgent:
         Args:
             scenario: 分析场景描述。
             outputs: DAG 各节点的输出 {output_key: result_json_str}。
-            long_term_context: 长期记忆上下文（历史分析参考）。
             output_mode_prompt: 输出模式格式指令。
 
         Returns:
@@ -78,17 +75,8 @@ class ReportAgent:
 
         outputs_text = "\n\n".join(outputs_parts) if outputs_parts else "（无数据输出）"
 
-        long_term_section = ""
-        if long_term_context:
-            long_term_section = (
-                "\n## 历史记忆参考\n"
-                "以下是该用户与本次查询相关的历史分析记忆，可作为趋势对比参考：\n"
-                f"{long_term_context}\n\n"
-            )
-
         prompt = _REPORT_PROMPT.format(
             scenario=scenario,
-            long_term_section=long_term_section,
             outputs_text=outputs_text,
         )
         if output_mode_prompt:

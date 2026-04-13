@@ -13,6 +13,7 @@
   - 数据库变更走 alembic 迁移，不依赖 `create_all` 兜底。
   - 不写"调试用"分支或注释掉的代码。
   - 修改依赖时必须同步更新 `pyproject.toml` 和 `requirements.txt`，两者的依赖列表必须保持一致。
+  - `alembic.ini` 禁止包含非 ASCII 字符（如中文注释）。原因：Alembic 和 `logging.config.fileConfig` 使用 `configparser` 读取 ini 文件时采用系统 locale 编码，Windows 中文系统为 GBK，无法解码 UTF-8 中文，导致启动失败。注释一律使用英文。
 
 ## 技术栈
 | 组件 | 选型 |
@@ -50,8 +51,9 @@ eragent/
 │   │   ├── models.py            # Declarative Base
 │   │   ├── repository.py        # 通用 Repository
 │   │   └── init_db.py           # 建表入口
-│   ├── memory/                  # 长期记忆（拆包）
+│   ├── memory/                  # 记忆管理
 │   │   ├── long_term.py         # 跨会话长期记忆（按 user_id 隔离，PostgreSQL）
+│   │   ├── middleware.py        # MemoryMiddleware：ReAct 循环内 LLM 输入裁剪
 │   │   └── tables.py            # ORM 表定义
 │   ├── observability/           # 可观测性
 │   │   ├── checkpointer.py      # LangGraph PostgresSaver trace 补丁（幂等挂载）

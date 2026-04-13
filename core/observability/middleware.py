@@ -747,6 +747,10 @@ def record_span(span_type: str, name: str, **attributes: Any):
             error=error,
         )
         ctx.spans.append(sp)
+        if span_type == "model":
+            ctx.model_count += 1
+        elif span_type == "tool":
+            ctx.tool_count += 1
         active_store = ctx.store or get_trace_store()
         if active_store is not None:
             active_store.enqueue(sp)

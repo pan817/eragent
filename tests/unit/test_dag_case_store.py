@@ -32,7 +32,7 @@ class TestStoreSuccessfulCase:
         await store.store_successful_case(
             query="测试", analysis_type="three_way_match",
             dag=_SAMPLE_DAG, route_type="DAG",
-            exec_result={"status": "failed"},
+            exec_result={"status": "error"},
         )
         # 不应调用 _write_to_pg
 
@@ -42,7 +42,7 @@ class TestStoreSuccessfulCase:
         await store.store_successful_case(
             query="测试", analysis_type="three_way_match",
             dag=_SAMPLE_DAG, route_type="DAG",
-            exec_result={"status": "completed", "failed_tasks": ["t1"]},
+            exec_result={"status": "ok", "failed_tasks": ["t1"]},
         )
 
     @pytest.mark.asyncio
@@ -54,7 +54,7 @@ class TestStoreSuccessfulCase:
         await store.store_successful_case(
             query="分析三路匹配", analysis_type="three_way_match",
             dag=_SAMPLE_DAG, route_type="DAG",
-            exec_result={"status": "completed", "failed_tasks": [], "duration_sec": 1.5},
+            exec_result={"status": "ok", "failed_tasks": [], "duration_sec": 1.5},
         )
 
         store._write_to_pg.assert_called_once()

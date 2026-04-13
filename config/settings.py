@@ -312,6 +312,11 @@ class MemorySettings(BaseSettings):
     long_term_context_trim_enabled: bool = True    # 注入 LLM 前裁剪兜底开关
     long_term_context_max_tokens_pct: int = 10     # 长期记忆最大占 context_window 的百分比
 
+    # ReAct 循环内 LLM 输入裁剪（MemoryMiddleware）
+    react_trim_enabled: bool = True          # 总开关
+    react_keep_recent_rounds: int = 2        # 保留最近几轮完整对话
+    react_tool_content_max_chars: int = 500  # 早期 ToolMessage 截断字符数（0=清空）
+
     model_config = {"env_prefix": "MEMORY_"}
 
 

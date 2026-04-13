@@ -360,13 +360,22 @@ class P2PAgent:
             model = build_chat_model(self._settings.llm)
             tools = self._build_tools()
             system_prompt = build_system_prompt()
-            middleware = self.timing_middleware
+
+            from core.memory.middleware import MemoryMiddleware
+
+            mem_cfg = self._settings.memory
+            memory_middleware = MemoryMiddleware(
+                enabled=mem_cfg.react_trim_enabled,
+                keep_recent_rounds=mem_cfg.react_keep_recent_rounds,
+                tool_content_max_chars=mem_cfg.react_tool_content_max_chars,
+            )
+            # MemoryMiddleware 在前（外层裁剪），TimingMiddleware 在后（内层记录裁剪后 token）
             agent_kwargs: dict[str, Any] = dict(
                 model=model,
                 tools=tools,
                 system_prompt=system_prompt,
                 name="p2p_agent",
-                middleware=[middleware],
+                middleware=[memory_middleware, self.timing_middleware],
             )
             if self._checkpointer is not None:
                 agent_kwargs["checkpointer"] = self._checkpointer

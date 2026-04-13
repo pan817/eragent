@@ -50,6 +50,78 @@ class TestModelFactory:
             assert "http_client" not in kwargs
             assert "http_async_client" not in kwargs
 
+    def test_disable_thinking_qwen3(self) -> None:
+        """disable_thinking=True + qwen3 模型：应注入 extra_body。"""
+        settings = Settings()
+        settings.llm.provider = "qwen"
+        settings.llm.model = "qwen3-max"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"enable_thinking": False}
+
+    def test_disable_thinking_qwen_non_qwen3(self) -> None:
+        """disable_thinking=True + 非 qwen3 模型：不应注入 extra_body。"""
+        settings = Settings()
+        settings.llm.provider = "qwen"
+        settings.llm.model = "qwen-plus"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert "extra_body" not in kwargs
+
+    def test_disable_thinking_zhipu(self) -> None:
+        """disable_thinking=True + zhipu：应注入 thinking.type=disabled。"""
+        settings = Settings()
+        settings.llm.provider = "zhipu"
+        settings.llm.model = "glm-4.7"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_disable_thinking_minimax(self) -> None:
+        """disable_thinking=True + minimax：应注入 thinking.type=disabled。"""
+        settings = Settings()
+        settings.llm.provider = "minimax"
+        settings.llm.model = "MiniMax-M2.7"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_disable_thinking_unsupported_provider(self) -> None:
+        """disable_thinking=True + 不支持的 provider：不应注入 extra_body。"""
+        settings = Settings()
+        settings.llm.provider = "deepseek"
+        settings.llm.model = "deepseek-chat"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert "extra_body" not in kwargs
+
+    def test_disable_thinking_false_no_extra_body(self) -> None:
+        """disable_thinking=False（默认）：任何 provider 均不注入 extra_body。"""
+        settings = Settings()
+        settings.llm.provider = "qwen"
+        settings.llm.model = "qwen3-max"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=False)
+            kwargs = mock_chat.call_args.kwargs
+            assert "extra_body" not in kwargs
+
 
 class TestP2PAgentBuild:
     """P2P Agent 构建方法测试。"""

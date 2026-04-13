@@ -334,7 +334,7 @@ class Orchestrator:
             span_attrs["discarded"] = discarded
             if errors:
                 span_attrs["validation_errors"] = errors
-                span_attrs["status"] = "partial"
+                span_attrs["status"] = "warning"
             else:
                 span_attrs["status"] = "ok"
 
@@ -458,7 +458,7 @@ class Orchestrator:
             span_attrs["enriched"] = enriched_pairs
             if errors:
                 span_attrs["enrichment_errors"] = errors
-                span_attrs["status"] = "partial"
+                span_attrs["status"] = "warning"
             else:
                 span_attrs["status"] = "ok"
 
@@ -674,7 +674,7 @@ class Orchestrator:
         trace_id = timing_middleware.start_run(
             session_id=session_id, user_id=request.user_id
         )
-        trace_status: str = "success"
+        trace_status: str = "ok"
         trace_error: str | None = None
 
         timeout = self._settings.analysis.response_timeout_seconds
@@ -692,7 +692,7 @@ class Orchestrator:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            trace_status = "timeout"
+            trace_status = "error"
             duration_ms = (time.monotonic() - start_time) * 1000.0
             trace_error = (
                 f"TimeoutError: 分析响应超时 "
@@ -939,18 +939,11 @@ class Orchestrator:
             signal.confidence,
         )
 
-        # 长期记忆读取：检索历史记忆，注入 ReportAgent 上下文
-        long_term_context = await self._load_long_term_memory(user_id, query)
-
         # 记录 context_budget span（DAG 路径）
-        self._record_dag_context_budget(
-            long_term_context=long_term_context,
-            query=query,
-        )
+        self._record_dag_context_budget(query=query)
 
         dag_result = await executor.execute(
             dag_tasks,
-            long_term_context=long_term_context,
             output_mode_prompt=output_mode_prompt,
         )
         duration_ms = (time.monotonic() - start_time) * 1000.0
@@ -976,9 +969,9 @@ class Orchestrator:
         )
 
         status = AnalysisStatus.SUCCESS
-        if dag_result["status"] == "failed":
+        if dag_result["status"] == "error":
             status = AnalysisStatus.FAILED
-        elif dag_result["status"] == "partial":
+        elif dag_result["status"] == "warning":
             status = AnalysisStatus.PARTIAL_SUCCESS
 
         failed_list = [
@@ -1012,24 +1005,21 @@ class Orchestrator:
     def _record_dag_context_budget(
         self,
         *,
-        long_term_context: str,
         query: str,
     ) -> None:
         """记录 DAG 路径的 context_budget span。
 
         DAG 路径的 LLM 调用仅发生在 ReportAgent，其 prompt 由
-        报告模板 + 工具输出 + 长期记忆上下文组成。
-        此处记录长期记忆和查询的 token 估算，工具输出 token
+        报告模板 + 工具输出组成（不注入长期记忆）。
+        此处记录查询的 token 估算，工具输出 token
         在执行前未知，由 ReportAgent 的 model span 覆盖。
         """
         from core.observability.middleware import estimate_tokens, record_span
 
-        long_term_tokens = estimate_tokens(long_term_context)
         query_tokens = estimate_tokens(query)
-        # ReportAgent 的报告模板固定部分（_REPORT_PROMPT 去除变量约 350 字符）
         report_template_tokens = estimate_tokens("x" * 350)
 
-        total_inject_tokens = report_template_tokens + long_term_tokens + query_tokens
+        total_inject_tokens = report_template_tokens + query_tokens
         context_window = self._settings.llm.context_window
         budget_usage_pct = round(
             total_inject_tokens / context_window * 100, 1
@@ -1039,7 +1029,7 @@ class Orchestrator:
             "context_budget", "context_budget_dag",
             route_type="DAG",
             report_template_tokens=report_template_tokens,
-            long_term_memory_tokens=long_term_tokens,
+            long_term_memory_tokens=0,
             user_message_tokens=query_tokens,
             total_inject_tokens=total_inject_tokens,
             model_context_limit=context_window,
@@ -1047,43 +1037,6 @@ class Orchestrator:
             note="不含工具输出 token（执行前未知，见 model span）",
         ):
             pass
-
-    # ── DAG 长期记忆读取 ─────────────────────────────────────────────
-
-    async def _load_long_term_memory(
-        self, user_id: str, query: str
-    ) -> str:
-        """检索长期记忆，返回格式化的上下文文本。
-
-        与 P2PAgent 中的长期记忆读取逻辑对齐。
-        读取失败不阻塞主流程，返回空字符串。
-        """
-        if not self._settings.memory.long_term_enabled:
-            return ""
-
-        try:
-            from core.memory import get_long_term_memory
-            from modules.p2p.prompts import format_long_term_memory
-
-            ltm = get_long_term_memory()
-            max_retrieved = self._settings.memory.long_term_max_retrieved
-            snippets = await asyncio.to_thread(
-                ltm.search_memories,
-                user_id=user_id,
-                query=query,
-                limit=max_retrieved,
-            )
-            text = format_long_term_memory(snippets)
-            if text:
-                _logger.debug(
-                    "DAG long-term memory loaded: %d snippets for user=%s",
-                    len(snippets),
-                    user_id,
-                )
-            return text
-        except Exception as exc:
-            _logger.warning("DAG long-term memory retrieval skipped: %s", exc)
-            return ""
 
     # ── DAG 长期记忆写入 ─────────────────────────────────────────────
 

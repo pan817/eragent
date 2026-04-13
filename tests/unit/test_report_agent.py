@@ -31,6 +31,15 @@ class TestReportAgentInit:
         assert result is mock_llm
         assert agent._ensure_llm() is mock_llm  # 第二次直接返回缓存
 
+    def test_ensure_llm_passes_disable_thinking(self, settings: Settings) -> None:
+        """_ensure_llm 应传 disable_thinking=True 给 build_chat_model。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        agent = ReportAgent(settings=settings)
+        with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
+            agent._ensure_llm()
+            mock_build.assert_called_once_with(settings.llm, disable_thinking=True)
+
 
 class TestReportAgentGenerate:
     @pytest.mark.asyncio
@@ -54,7 +63,8 @@ class TestReportAgentGenerate:
         mock_llm.ainvoke.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_generate_with_long_term_context(self, settings: Settings) -> None:
+    async def test_generate_no_long_term_in_prompt(self, settings: Settings) -> None:
+        """报告生成 prompt 中不应包含历史记忆相关内容。"""
         from modules.p2p.report_agent import ReportAgent
 
         agent = ReportAgent(settings=settings)
@@ -69,12 +79,11 @@ class TestReportAgentGenerate:
         result = await agent.generate(
             scenario="价格差异",
             outputs={"price_data": "{}"},
-            long_term_context="历史记忆内容",
         )
         assert result == "# 报告"
         prompt = mock_llm.ainvoke.call_args[0][0]
-        assert "历史记忆参考" in prompt
-        assert "历史记忆内容" in prompt
+        assert "历史记忆" not in prompt
+        assert "趋势对比" not in prompt
 
     @pytest.mark.asyncio
     async def test_generate_with_output_mode(self, settings: Settings) -> None:

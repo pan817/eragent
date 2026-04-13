@@ -330,7 +330,7 @@ class TestOrchestratorSessionContext:
         # Mock DAG executor
         mock_executor = MagicMock()
         mock_executor.execute = AsyncMock(return_value={
-            "status": "completed",
+            "status": "ok",
             "outputs": {"report": "# PO Risk"},
             "completed_tasks": ["t1"],
             "failed_tasks": {},
@@ -429,7 +429,7 @@ class TestOrchestratorDAGPath:
         # Mock DAG executor
         mock_executor = MagicMock()
         mock_executor.execute = AsyncMock(return_value={
-            "status": "completed",
+            "status": "ok",
             "outputs": {"report": "# DAG Report"},
             "completed_tasks": ["t1", "t2", "t3"],
             "failed_tasks": {},
@@ -466,7 +466,7 @@ class TestOrchestratorDAGPath:
 
         mock_executor = MagicMock()
         mock_executor.execute = AsyncMock(return_value={
-            "status": "partial",
+            "status": "warning",
             "outputs": {},
             "completed_tasks": ["t1"],
             "failed_tasks": {"t2": "timeout"},
@@ -519,150 +519,6 @@ class TestOrchestratorDAGPath:
 # ============================================================
 # DAG 长期记忆读取 / 写入
 # ============================================================
-
-
-class TestOrchestratorDAGLongTermMemory:
-    """DAG 路径的长期记忆读取和写入覆盖测试。"""
-
-    @pytest.mark.asyncio
-    async def test_dag_loads_long_term_memory(self, settings: Settings) -> None:
-        """DAG 路径应在执行前读取长期记忆。"""
-        orch = Orchestrator(settings=settings)
-
-        mock_executor = MagicMock()
-        mock_executor.execute = AsyncMock(return_value={
-            "status": "completed",
-            "outputs": {"report": "# Report"},
-            "completed_tasks": ["t1"],
-            "failed_tasks": {},
-            "report": "# Report",
-            "duration_sec": 1.0,
-        })
-        mock_executor._registry = MagicMock()
-        orch._dag_executor = mock_executor
-
-        signal = QuerySignal(
-            raw_query="分析三路匹配",
-            keywords=[AnalysisType.THREE_WAY_MATCH.value],
-            entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
-        )
-
-        mock_ltm = MagicMock()
-        mock_ltm.search_memories.return_value = [
-            {"content": "历史记忆1", "attrs": {}},
-        ]
-
-        with (
-            patch.object(orch._intent_router, "route", return_value=signal),
-            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
-            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
-            patch("modules.p2p.prompts.format_long_term_memory", return_value="[历史] 记忆1"),
-        ):
-            MockValidator.return_value.validate.return_value = (True, None)
-            request = AnalysisRequest(query="分析三路匹配")
-            result = await orch.analyze(request)
-
-        # 验证 search_memories 被调用
-        mock_ltm.search_memories.assert_called_once()
-        # 验证 long_term_context 传入 executor.execute
-        call_kwargs = mock_executor.execute.call_args
-        assert call_kwargs.kwargs.get("long_term_context") == "[历史] 记忆1"
-
-    @pytest.mark.asyncio
-    async def test_dag_saves_long_term_memory(self, settings: Settings) -> None:
-        """DAG 路径应在执行后将结论写入长期记忆。"""
-        orch = Orchestrator(settings=settings)
-
-        mock_executor = MagicMock()
-        mock_executor.execute = AsyncMock(return_value={
-            "status": "completed",
-            "outputs": {"report": "# Report"},
-            "completed_tasks": ["t1"],
-            "failed_tasks": {},
-            "report": "# DAG 分析报告",
-            "duration_sec": 1.0,
-        })
-        mock_executor._registry = MagicMock()
-        orch._dag_executor = mock_executor
-
-        signal = QuerySignal(
-            raw_query="分析价格差异",
-            keywords=[AnalysisType.PRICE_VARIANCE.value],
-            entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
-        )
-
-        mock_ltm = MagicMock()
-        mock_ltm.search_memories.return_value = []
-
-        with (
-            patch.object(orch._intent_router, "route", return_value=signal),
-            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
-            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
-            patch("modules.p2p.prompts.format_long_term_memory", return_value=""),
-        ):
-            MockValidator.return_value.validate.return_value = (True, None)
-            request = AnalysisRequest(
-                query="分析价格差异", user_id="test-user"
-            )
-            result = await orch.analyze(request)
-
-        # 验证 save_memory 被调用
-        mock_ltm.save_memory.assert_called_once()
-        save_call = mock_ltm.save_memory.call_args
-        assert save_call.kwargs["user_id"] == "test-user"
-        assert save_call.kwargs["memory_type"] == "analysis_conclusion"
-        assert "价格差异" in save_call.kwargs["content"]
-
-    @pytest.mark.asyncio
-    async def test_dag_long_term_memory_failure_non_blocking(
-        self, settings: Settings
-    ) -> None:
-        """长期记忆读取/写入失败不应阻塞 DAG 执行。"""
-        orch = Orchestrator(settings=settings)
-
-        mock_executor = MagicMock()
-        mock_executor.execute = AsyncMock(return_value={
-            "status": "completed",
-            "outputs": {"report": "# Report"},
-            "completed_tasks": ["t1"],
-            "failed_tasks": {},
-            "report": "# Report OK",
-            "duration_sec": 1.0,
-        })
-        mock_executor._registry = MagicMock()
-        orch._dag_executor = mock_executor
-
-        signal = QuerySignal(
-            raw_query="分析付款合规",
-            keywords=[AnalysisType.PAYMENT_COMPLIANCE.value],
-            entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
-        )
-
-        mock_ltm = MagicMock()
-        mock_ltm.search_memories.side_effect = RuntimeError("DB down")
-        mock_ltm.save_memory.side_effect = RuntimeError("DB down")
-
-        with (
-            patch.object(orch._intent_router, "route", return_value=signal),
-            patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator,
-            patch("core.memory.get_long_term_memory", return_value=mock_ltm),
-        ):
-            MockValidator.return_value.validate.return_value = (True, None)
-            request = AnalysisRequest(query="分析付款合规")
-            result = await orch.analyze(request)
-
-        # 即使记忆操作失败，DAG 仍成功返回
-        assert result.status == AnalysisStatus.SUCCESS
-        assert result.report_markdown == "# Report OK"
 
 
 # ============================================================
@@ -847,41 +703,17 @@ class TestDAGContextBudget:
         mw._print = False
         mw.start_run()
 
-        orch._record_dag_context_budget(
-            long_term_context="历史分析结论：SUP-001 交货准时率下降",
-            query="分析价格差异",
-        )
+        orch._record_dag_context_budget(query="分析价格差异")
 
         ctx = _current_trace.get()
         budget_spans = [s for s in ctx.spans if s.span_type == "context_budget"]
         assert len(budget_spans) == 1
         attrs = budget_spans[0].attributes
         assert attrs["route_type"] == "DAG"
-        assert attrs["long_term_memory_tokens"] > 0
+        assert attrs["long_term_memory_tokens"] == 0
         assert attrs["user_message_tokens"] > 0
         assert attrs["model_context_limit"] == settings.llm.context_window
         assert 0 <= attrs["budget_usage_pct"] <= 100
-
-        mw.finish_run()
-
-    def test_record_dag_context_budget_no_memory(self, settings: Settings) -> None:
-        """无长期记忆时 long_term_memory_tokens 应为 0。"""
-        from core.observability.middleware import _current_trace
-
-        orch = Orchestrator(settings=settings)
-        mw = orch._timing_middleware
-        mw._print = False
-        mw.start_run()
-
-        orch._record_dag_context_budget(
-            long_term_context="",
-            query="分析三路匹配",
-        )
-
-        ctx = _current_trace.get()
-        budget_spans = [s for s in ctx.spans if s.span_type == "context_budget"]
-        assert len(budget_spans) == 1
-        assert budget_spans[0].attributes["long_term_memory_tokens"] == 0
 
         mw.finish_run()
 

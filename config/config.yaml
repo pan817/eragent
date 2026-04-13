@@ -146,6 +146,10 @@ memory:
     min_content_len: 50         # 短于该长度的内容直接 skip（0 关闭）
     dedupe_window_seconds: 900  # 同 user + 同 content_hash 的去重时间窗口（0 关闭）
     skip_empty_conclusions: false  # 跳过 anomaly_count=0 且 summary 空的结论
+  react:
+    trim_enabled: true              # ReAct 循环内 LLM 输入裁剪总开关
+    keep_recent_rounds: 2           # 保留最近几轮完整对话（含工具结果）
+    tool_content_max_chars: 500     # 早期 ToolMessage 截断字符数（0=清空内容）
 
 logging:
   level: "INFO"

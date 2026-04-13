@@ -74,7 +74,7 @@ class DAGCaseStore:
         """
         from core.observability.middleware import record_span
 
-        if exec_result.get("status") != "completed":
+        if exec_result.get("status") != "ok":
             return
         if exec_result.get("failed_tasks"):
             return
