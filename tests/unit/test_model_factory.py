@@ -110,6 +110,66 @@ class TestModelFactory:
             kwargs = mock_chat.call_args.kwargs
             assert "extra_body" not in kwargs
 
+    def test_disable_thinking_case_insensitive_qwen(self) -> None:
+        """provider / model 大小写混写也应命中 qwen3 分支。"""
+        settings = Settings()
+        settings.llm.provider = "QWEN"
+        settings.llm.model = "Qwen3-Max"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"enable_thinking": False}
+
+    def test_disable_thinking_case_insensitive_zhipu(self) -> None:
+        """provider 大小写混写也应命中 zhipu 分支。"""
+        settings = Settings()
+        settings.llm.provider = "ZhiPu"
+        settings.llm.model = "GLM-4.6"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_disable_thinking_provider_prefix_zhipuai(self) -> None:
+        """provider=zhipuai（子品牌前缀）应命中 zhipu 分支。"""
+        settings = Settings()
+        settings.llm.provider = "zhipuai"
+        settings.llm.model = "glm-4.6"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_disable_thinking_provider_prefix_qwen_intl(self) -> None:
+        """provider=qwen-intl 且 model 为 qwen3 系列应命中 qwen 分支。"""
+        settings = Settings()
+        settings.llm.provider = "qwen-intl"
+        settings.llm.model = "qwen3-max"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["extra_body"] == {"enable_thinking": False}
+
+    def test_disable_thinking_qwen_prefix_non_qwen3_still_skipped(self) -> None:
+        """provider 前缀匹配 qwen 但 model 非 qwen3 系列仍应跳过（护栏不拆）。"""
+        settings = Settings()
+        settings.llm.provider = "qwen-intl"
+        settings.llm.model = "qwen-plus"
+        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+            from modules.p2p.model_factory import build_chat_model
+
+            build_chat_model(settings.llm, disable_thinking=True)
+            kwargs = mock_chat.call_args.kwargs
+            assert "extra_body" not in kwargs
+
     def test_disable_thinking_false_no_extra_body(self) -> None:
         """disable_thinking=False（默认）：任何 provider 均不注入 extra_body。"""
         settings = Settings()
