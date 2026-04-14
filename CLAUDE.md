@@ -140,7 +140,12 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
   - SQLite 测试环境由 `tests/conftest.py` 调用 `configure_timezone` + `install_sqlite_timezone_hook` 模拟北京时间。
 
 ## 配置要点
-- 敏感信息通过环境变量注入：`LLM_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
+- 敏感信息通过环境变量注入：`LLM_API_KEY`、`LLM_FAST_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
+- 双模型架构：
+  - `llm`：主模型，承担 P2P Agent ReAct + tool-calling（默认 qwen3-max）
+  - `llm_fast`：小模型，承担 ReportAgent 报告生成、IntentRouter L3 意图分类（轻量任务）
+  - 字段级继承：`llm_fast` 任一字段未在 YAML / env 显式配置时，`Settings.from_yaml` 会在启动期自动从 `llm` 对应字段镜像（测试环境无需单独配置 llm_fast）
+  - 代码层对两套配置一视同仁，不硬编码具体模型名；切换只改配置不改代码
 - 三路匹配容差支持按供应商/物料类别/金额区间配置；默认 5%，最大 10%
 - 默认分析时间范围 30 天，可配置（最大 365 天）
 - 异常严重等级：超容差 2 倍以上或金额 > 50 万为 HIGH

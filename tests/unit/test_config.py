@@ -232,6 +232,128 @@ class TestFromYaml:
         assert s.app_name == "ERP Analysis Agent"
 
 
+class TestLLMFastFallback:
+    """llm_fast 字段级继承 fallback 测试。
+
+    未显式配置 llm_fast 的字段应自动从 llm 镜像过来，
+    用于支持测试环境 / 单模型部署场景。
+    """
+
+    def _build_yaml(self, llm_block: dict, llm_fast_block: dict | None = None) -> dict:
+        y: dict = {"llm": llm_block}
+        if llm_fast_block is not None:
+            y["llm_fast"] = llm_fast_block
+        return y
+
+    def _disable_dotenv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import dotenv
+        monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **kw: None)
+
+    def _clear_llm_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in (
+            "LLM_PROVIDER", "LLM_MODEL", "LLM_API_BASE", "LLM_API_KEY",
+            "LLM_API_KEY_ENCRYPTED",
+            "LLM_FAST_PROVIDER", "LLM_FAST_MODEL", "LLM_FAST_API_BASE",
+            "LLM_FAST_API_KEY", "LLM_FAST_API_KEY_ENCRYPTED", "LLM_FAST_TIMEOUT",
+            "POSTGRES_PASSWORD_ENCRYPTED", "NEO4J_PASSWORD_ENCRYPTED",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_no_llm_fast_block_mirrors_llm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """YAML 无 llm_fast 块时，llm_fast 所有字段应镜像 llm。"""
+        self._disable_dotenv(monkeypatch)
+        self._clear_llm_env(monkeypatch)
+        monkeypatch.setenv("LLM_API_KEY", "sk-main-123")
+
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(self._build_yaml(
+            {"provider": "qwen", "model": "qwen3-max", "api_base": "https://main.example"}
+        )), encoding="utf-8")
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.llm_fast.provider == s.llm.provider == "qwen"
+        assert s.llm_fast.model == s.llm.model == "qwen3-max"
+        assert s.llm_fast.api_base == s.llm.api_base == "https://main.example"
+        assert s.llm_fast.api_key == s.llm.api_key == "sk-main-123"
+        assert s.llm_fast.timeout == s.llm.timeout
+
+    def test_partial_override_inherits_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """仅覆盖 llm_fast.model 时，其它字段应继承 llm。"""
+        self._disable_dotenv(monkeypatch)
+        self._clear_llm_env(monkeypatch)
+        monkeypatch.setenv("LLM_API_KEY", "sk-main-xyz")
+
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(self._build_yaml(
+            {"provider": "qwen", "model": "qwen3-max"},
+            {"model": "qwen-flash"},
+        )), encoding="utf-8")
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.llm.model == "qwen3-max"
+        assert s.llm_fast.model == "qwen-flash"
+        # provider / api_key 继承
+        assert s.llm_fast.provider == s.llm.provider == "qwen"
+        assert s.llm_fast.api_key == "sk-main-xyz"
+
+    def test_env_only_override_inherits_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """仅通过 env 覆盖 LLM_FAST_MODEL 时，其余字段应继承 llm。"""
+        self._disable_dotenv(monkeypatch)
+        self._clear_llm_env(monkeypatch)
+        monkeypatch.setenv("LLM_API_KEY", "sk-main")
+        monkeypatch.setenv("LLM_FAST_MODEL", "qwen-flash")
+
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(self._build_yaml(
+            {"provider": "qwen", "model": "qwen3-max"}
+        )), encoding="utf-8")
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.llm_fast.model == "qwen-flash"
+        assert s.llm_fast.provider == s.llm.provider == "qwen"
+        assert s.llm_fast.api_key == s.llm.api_key == "sk-main"
+
+    def test_full_independent_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """llm_fast 独立配置时应完全独立于 llm。"""
+        self._disable_dotenv(monkeypatch)
+        self._clear_llm_env(monkeypatch)
+        monkeypatch.setenv("LLM_API_KEY", "sk-main")
+        monkeypatch.setenv("LLM_FAST_API_KEY", "sk-fast")
+        monkeypatch.setenv("LLM_FAST_TIMEOUT", "60")
+
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(self._build_yaml(
+            {"provider": "qwen", "model": "qwen3-max", "api_base": "https://main.example"},
+            {"provider": "deepseek", "model": "deepseek-chat", "api_base": "https://fast.example"},
+        )), encoding="utf-8")
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.llm.provider == "qwen"
+        assert s.llm_fast.provider == "deepseek"
+        assert s.llm_fast.model == "deepseek-chat"
+        assert s.llm_fast.api_base == "https://fast.example"
+        assert s.llm_fast.api_key == "sk-fast"
+        assert s.llm_fast.timeout == 60
+        assert s.llm.api_key == "sk-main"
+        assert s.llm.timeout == 240
+
+    def test_default_settings_llm_fast_equals_llm(self) -> None:
+        """直接 Settings() 构造（无 from_yaml）时，llm_fast 默认与 llm 默认完全一致。"""
+        s = Settings()
+        assert s.llm_fast.provider == s.llm.provider
+        assert s.llm_fast.model == s.llm.model
+        assert s.llm_fast.api_base == s.llm.api_base
+        assert s.llm_fast.timeout == s.llm.timeout
+
+
 class TestLoggingLevelValidation:
     """测试日志级别校验。"""
 

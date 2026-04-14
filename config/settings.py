@@ -79,6 +79,41 @@ def _strip_env_overrides(
     return result
 
 
+def _apply_llm_fast_fallback(
+    settings_obj: "Settings",
+    yaml_fast_block: dict[str, Any],
+) -> None:
+    """按字段粒度为 ``llm_fast`` 填充 fallback：未显式配置的字段继承 ``llm``。
+
+    判定"显式配置"的依据：
+      - YAML 的 ``llm_fast.<field>`` 键存在；或
+      - 环境变量 ``LLM_FAST_<FIELD>`` / ``LLM_FAST_API_KEY[_ENCRYPTED]`` 非空。
+
+    二者都未命中时，将 ``settings_obj.llm.<field>`` 的值镜像到
+    ``settings_obj.llm_fast.<field>``。
+
+    这样保证：
+      - 完全不配 ``llm_fast`` → 全字段镜像 llm（测试环境自动等同主模型）；
+      - 只配 ``llm_fast.model`` → 其余字段继承 llm（同 key / 同 provider 等）；
+      - 独立配置完整 ``llm_fast`` → 完全独立。
+    """
+    for field_name in LLMSettings.model_fields:
+        if field_name in yaml_fast_block:
+            continue
+
+        env_vars = [f"LLM_FAST_{field_name.upper()}"]
+        if field_name == "api_key":
+            env_vars.append("LLM_FAST_API_KEY_ENCRYPTED")
+        if any(os.environ.get(v) for v in env_vars):
+            continue
+
+        setattr(
+            settings_obj.llm_fast,
+            field_name,
+            getattr(settings_obj.llm, field_name),
+        )
+
+
 class LLMSettings(BaseSettings):
     """LLM 模型配置。"""
 
@@ -99,6 +134,21 @@ class LLMSettings(BaseSettings):
     token_estimate_ratio: float = 1.5
 
     model_config = {"populate_by_name": True, "env_prefix": "LLM_"}
+
+
+class LLMFastSettings(LLMSettings):
+    """小模型配置，用于报告生成、L3 意图分类等轻量任务。
+
+    字段集合与 ``LLMSettings`` 完全一致；差异仅在于 env_prefix=``LLM_FAST_``
+    以及 ``api_key`` 的 alias 指向 ``LLM_FAST_API_KEY``。
+
+    未在 YAML / 环境变量中显式配置时，``Settings.from_yaml`` 会在启动期
+    按字段粒度从 ``llm`` 镜像值过来（测试环境自动等同主模型）。
+    """
+
+    api_key: str = Field(default="", alias="LLM_FAST_API_KEY")
+
+    model_config = {"populate_by_name": True, "env_prefix": "LLM_FAST_"}
 
 
 class Neo4jSettings(BaseSettings):
@@ -401,6 +451,9 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Shanghai"
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    # 小模型配置（报告生成 / L3 意图分类）。未配置时由 from_yaml 按字段镜像 llm 的值，
+    # 此默认工厂仅在直接实例化 Settings() 的场景生效（测试/单元用例）。
+    llm_fast: LLMFastSettings = Field(default_factory=LLMFastSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     postgresql: PostgreSQLSettings = Field(default_factory=PostgreSQLSettings)
@@ -488,9 +541,10 @@ class Settings(BaseSettings):
         _master_key: str | None = None  # 懒加载，有密文时才读取
 
         for section, env_plain, env_enc, field in (
-            ("llm",        "LLM_API_KEY",        "LLM_API_KEY_ENCRYPTED",        "api_key"),
-            ("neo4j",      "NEO4J_PASSWORD",      "NEO4J_PASSWORD_ENCRYPTED",      "password"),
-            ("postgresql", "POSTGRES_PASSWORD",   "POSTGRES_PASSWORD_ENCRYPTED",   "password"),
+            ("llm",        "LLM_API_KEY",             "LLM_API_KEY_ENCRYPTED",             "api_key"),
+            ("llm_fast",   "LLM_FAST_API_KEY",        "LLM_FAST_API_KEY_ENCRYPTED",        "api_key"),
+            ("neo4j",      "NEO4J_PASSWORD",          "NEO4J_PASSWORD_ENCRYPTED",          "password"),
+            ("postgresql", "POSTGRES_PASSWORD",       "POSTGRES_PASSWORD_ENCRYPTED",       "password"),
         ):
             sec = merged.setdefault(section, {}) or {}
             plain_val = os.getenv(env_plain, "")
@@ -522,7 +576,9 @@ class Settings(BaseSettings):
 
             merged[section] = sec
 
-        return cls(**merged)
+        settings_obj = cls(**merged)
+        _apply_llm_fast_fallback(settings_obj, raw.get("llm_fast") or {})
+        return settings_obj
 
 
 @lru_cache(maxsize=1)

@@ -38,7 +38,8 @@ class TestReportAgentInit:
         agent = ReportAgent(settings=settings)
         with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
             agent._ensure_llm()
-            mock_build.assert_called_once_with(settings.llm, disable_thinking=True)
+            # 报告生成走小模型 llm_fast（未配置时在 from_yaml 里自动镜像 llm）
+            mock_build.assert_called_once_with(settings.llm_fast, disable_thinking=True)
 
 
 class TestReportAgentGenerate:

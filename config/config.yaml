@@ -22,6 +22,23 @@ llm:
   context_window: 32768      # 模型上下文窗口大小（token 数）
   token_estimate_ratio: 1.5  # 字符数 / token 数估算比率（中文约 1.5）
 
+# 小模型配置（报告生成 / L3 意图分类等轻量任务）。
+# 与 llm 字段集完全对称；未显式配置的字段会在启动期自动从 llm 镜像过来，
+# 因此测试环境可整块省略，生产按需覆盖。
+# env 前缀为 LLM_FAST_，敏感字段走 LLM_FAST_API_KEY / LLM_FAST_API_KEY_ENCRYPTED。
+llm_fast:
+  # provider: "qwen"
+  # model: "qwen-flash"                # 生产建议用更小/更快的模型
+  # api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  # api_key: 通过环境变量 LLM_FAST_API_KEY 注入
+  # temperature: 0.1
+  # max_tokens: 4096
+  # timeout: 60                        # 小模型延迟期望更低，可设更短超时
+  # max_retries: 2
+  # use_system_proxy: false
+  # context_window: 32768
+  # token_estimate_ratio: 1.5
+
 neo4j:
   enabled: false              # 总开关：false 时服务不依赖 Neo4j，相关功能短路
   uri: "bolt://localhost:7687"

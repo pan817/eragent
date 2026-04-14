@@ -277,12 +277,14 @@ class TestLevel3:
 
         L3 是单轮 JSON 分类，无需链式推理；关 thinking 可省 token、降延迟，
         并避免思考内容混入 content 导致 json.loads 失败。
+
+        走小模型 llm_fast（未配置时在 from_yaml 里自动镜像 llm）。
         """
         settings = Settings()
         router = IntentRouter(settings=settings)
         with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
             router._ensure_llm()
-            mock_build.assert_called_once_with(settings.llm, disable_thinking=True)
+            mock_build.assert_called_once_with(settings.llm_fast, disable_thinking=True)
 
 
 # ============================================================

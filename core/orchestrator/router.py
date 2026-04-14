@@ -600,7 +600,7 @@ class IntentRouter:
 
         from modules.p2p.model_factory import build_chat_model
 
-        self._llm = build_chat_model(self._settings.llm, disable_thinking=True)
+        self._llm = build_chat_model(self._settings.llm_fast, disable_thinking=True)
         return self._llm
 
     def _try_level3(
