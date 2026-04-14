@@ -272,6 +272,51 @@ class TestLevel3:
         signal = self.router._try_level3("查询", {})
         assert signal.keywords == [AnalysisType.COMPREHENSIVE.value]
 
+    def test_llm_unknown_type_returns_sentinel_signal(self) -> None:
+        """LLM 返回 type=unknown 时应返回 keywords=['unknown'] 的信号，不转为 COMPREHENSIVE。"""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "unknown", "confidence": 0.7, "supplier_id": null, "po_number": null, "days": null}'
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+        signal = self.router._try_level3("今天天气怎么样", {})
+        assert signal.route_level == 3
+        assert signal.keywords == ["unknown"]
+        assert signal.confidence == 0.7
+        assert "unknown" in signal.reasoning or "非" in signal.reasoning
+
+    def test_llm_classify_prompt_contains_unknown_enum(self) -> None:
+        """L3 prompt 应列出 unknown 枚举与非采购查询判定规则。"""
+        prompt = self.router._LLM_CLASSIFY_PROMPT
+        assert "unknown" in prompt
+        assert "非 ERP 采购" in prompt or "非采购" in prompt
+
+    def test_llm_classify_prompt_contains_confidence_anchors(self) -> None:
+        """L3 prompt 应包含 confidence 分档锚点（P1）。"""
+        prompt = self.router._LLM_CLASSIFY_PROMPT
+        assert "confidence 判定锚点" in prompt or "判定锚点" in prompt
+        # 至少包含 3 个分档阈值
+        assert ">0.9" in prompt
+        assert "0.7-0.9" in prompt
+        assert "<0.5" in prompt
+
+    def test_llm_classify_prompt_injects_current_date(self) -> None:
+        """L3 prompt 在 _try_level3 渲染后应包含当前日期与时区（P1）。"""
+        import re
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"type": "comprehensive", "confidence": 0.5}'
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+        self.router._try_level3("测试", {})
+        rendered_prompt = mock_llm.invoke.call_args[0][0]
+
+        assert re.search(r"\d{4}-\d{2}-\d{2}", rendered_prompt)
+        assert "Asia/Shanghai" in rendered_prompt
+        assert "当前日期" in rendered_prompt
+
     def test_ensure_llm_passes_disable_thinking(self) -> None:
         """_ensure_llm 应传 disable_thinking=True 给 build_chat_model。
 

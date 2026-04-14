@@ -158,6 +158,67 @@ class TestOrchestratorReActPath:
         assert result.session_id == "my-session"
 
 
+class TestOrchestratorUnknownIntent:
+    """L3 判定为 unknown（非采购分析）时的早退出分支。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_intent_early_return(self, settings: Settings) -> None:
+        """signal.keywords==['unknown'] 且未指定 analysis_type 时应早返回，不触发 agent。"""
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={})
+        orch._agent = mock_agent
+
+        unknown_signal = QuerySignal(
+            raw_query="天气怎么样",
+            keywords=["unknown"],
+            entities={},
+            route_level=3,
+            confidence=0.7,
+            reasoning="L3 判定为非 ERP 采购分析意图（unknown）",
+        )
+
+        with patch.object(orch._intent_router, "route", return_value=unknown_signal):
+            request = AnalysisRequest(query="今天天气怎么样")
+            result = await orch.analyze(request)
+
+        # 成功返回但不触发 agent
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_agent.run.assert_not_called()
+        # 报告说明不属于分析范围
+        assert "采购分析" in result.report_markdown
+        # summary 打标非分析
+        assert result.summary.get("route_type") == "non_analysis"
+
+    @pytest.mark.asyncio
+    async def test_unknown_intent_overridden_by_explicit_type(
+        self, settings: Settings
+    ) -> None:
+        """用户显式指定 analysis_type 时，即使 L3 判 unknown 也应以用户意图为准。"""
+        orch = Orchestrator(settings=settings)
+        orch._agent = _make_mock_agent(return_value={
+            "anomalies": [], "supplier_kpis": [], "summary": {},
+            "report_markdown": "# Forced", "completed_tasks": [], "failed_tasks": [],
+        })
+
+        unknown_signal = QuerySignal(
+            raw_query="x",
+            keywords=["unknown"],
+            entities={},
+            route_level=3,
+            confidence=0.6,
+            reasoning="L3 unknown",
+        )
+
+        with patch.object(orch._intent_router, "route", return_value=unknown_signal):
+            request = AnalysisRequest(
+                query="x", analysis_type=AnalysisType.THREE_WAY_MATCH
+            )
+            result = await orch.analyze(request)
+
+        # 未早退出，走完整流程
+        assert result.report_markdown == "# Forced"
+
+
 class TestReferenceResolution:
     """指代消解测试。"""
 

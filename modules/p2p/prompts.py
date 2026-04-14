@@ -25,6 +25,7 @@ def get_ontology_context() -> str:
 
     成功时返回根据 OWL 本体推理出的核心实体、合规规则与业务背景；
     任意失败均回退到默认 narrative，避免阻塞 Agent 启动。
+    超出 ``p2p.ontology.context_max_tokens_pct`` 预算时按比例裁剪并 WARNING。
     """
     try:
         loader = OntologyLoader()
@@ -45,14 +46,30 @@ def get_ontology_context() -> str:
         for entity in structured.get("core_entities", []):
             entities_text += f"- {entity}\n"
 
-        return (
+        text = (
             f"### 业务背景\n{narrative}\n\n"
             f"### 核心业务实体\n{entities_text}\n"
             f"### 合规规则\n{rules_text}"
         )
     except Exception as exc:
         _logger.warning("get_ontology_context failed, using default narrative: %s", exc)
-        return _DEFAULT_ONTOLOGY_NARRATIVE
+        text = _DEFAULT_ONTOLOGY_NARRATIVE
+
+    # Token 预算裁剪：避免本体过长挤占用户查询和记忆
+    try:
+        from config.settings import get_settings
+        settings = get_settings()
+        if settings.p2p.ontology.context_trim_enabled:
+            max_tokens = int(
+                settings.llm.context_window
+                * settings.p2p.ontology.context_max_tokens_pct
+                / 100
+            )
+            text = trim_to_token_budget(text, max_tokens, "本体上下文")
+    except Exception as exc:
+        _logger.debug("ontology trim config load failed, keeping original text: %s", exc)
+
+    return text
 
 
 def trim_to_token_budget(text: str, max_tokens: int, label: str) -> str:
@@ -136,33 +153,40 @@ def build_system_prompt(long_term_context: str = "") -> str:
         long_term_context: 从 LongTermMemory 召回的历史相关记忆/报告摘要。
             非空时会被渲染到系统提示词的"历史参考"段落,供 LLM 参考。
     """
+    from core.time_utils import get_timezone_name, now_cn
+
     ontology_context = get_ontology_context()
     long_term_block = (
         f"\n## 历史参考（来自长期记忆）\n以下是与本次查询相关的历史记忆或分析结论,可用于参考:\n{long_term_context}\n"
         if long_term_context
         else ""
     )
+    current_date = now_cn().strftime("%Y-%m-%d")
+    tz_name = get_timezone_name()
 
     return f"""你是一位专业的 P2P（采购到付款）分析专家，负责分析企业采购流程中的异常和风险。
+
+## 时间上下文
+当前日期：{current_date}（{tz_name}）。"最近 N 天"/"本月"/"上周"等相对时间一律以此为基准。
 
 ## 角色定义
 你精通 Oracle EBS 采购模块的业务流程，能够从采购订单、收货、发票、付款等多维度数据中识别问题。
 你的分析应当专业、准确、可操作，为企业采购管理提供切实可行的改进建议。
 
-## 可用工具
-你可以使用以下工具获取数据和执行分析：
+## 执行边界（重要）
+- 本系统为分析**只读**系统，不会执行任何 ERP 写操作（付款、审批、工单创建、单据修改、邮件发送、通知下发等）
+- 涉及上述动作时，在报告中以"建议人工处理"措辞给出，不要承诺或模拟执行
+- 用户要求执行写操作时，回复说明当前为只读分析系统，给出建议路径但不模拟已完成
 
-### 数据查询工具
-1. **query_purchase_orders** - 查询采购订单数据（支持按供应商、状态筛选）
-2. **query_receipts** - 查询收货记录（支持按 PO 号、供应商筛选）
-3. **query_invoices** - 查询发票数据（支持按 PO 号、供应商、状态筛选）
-4. **query_payments** - 查询付款记录（支持按发票号、供应商筛选）
+## 数据诚信（重要）
+- 所有结论、异常、具体数据（单据号、金额、供应商名称、日期等）必须来自工具实际调用的返回结果
+- 如工具输出为空、字段缺失或数据不足以支撑结论，明确标注"数据不足"或"无异常发现"，不要虚构
+- 不确定的情况优先回答"不确定 / 需人工复核"，避免编造具体数值或细节
+- 不要基于训练知识回答具体数据（如"某某供应商的标准价是多少"）；只能引用工具返回的内容
 
-### 分析检查工具
-5. **run_three_way_match** - 执行三路匹配检查（PO-收货-发票 金额/数量比对）
-6. **run_price_variance_analysis** - 执行价格差异分析（实际价 vs 合同价）
-7. **run_payment_compliance_check** - 执行付款合规性检查（逾期/提前付款/折扣滥用）
-8. **calculate_supplier_kpis** - 计算供应商绩效 KPI（准时交付率、发票准确率等）
+## 工具使用
+系统已注册采购订单/收货/发票/付款数据查询工具，以及三路匹配/价格差异/付款合规/供应商 KPI 规则引擎工具。
+完整参数签名由工具 schema 提供，这里不再重复；按"分析方法"章节按需调用。
 
 ## 输出格式要求
 1. 使用中文回复
@@ -171,11 +195,12 @@ def build_system_prompt(long_term_context: str = "") -> str:
 4. 提供具体的数据支撑（单据号、金额、偏差百分比等）
 5. 给出可操作的改进建议
 
-## 分析流程
-1. 理解用户的分析需求，确定分析类型
-2. 调用相关查询工具获取基础数据
-3. 调用分析工具执行规则检查
-4. 综合分析结果，生成结构化报告
+## 分析方法（按需执行，不要强行全流程）
+根据查询复杂度选择工具组合，避免为简单查询强行执行完整分析：
+- **简单事实查询**（如"查看 PO-001 的状态"/"SUP-001 最近三张发票"）：调用必要的单个查询工具即可，直接基于返回结果回答
+- **异常检查类查询**（三路匹配 / 价格差异 / 付款合规 / 供应商绩效）：调用对应的规则引擎工具（run_three_way_match 等），其内部会自动拉取所需数据
+- **综合或探索类查询**：组合多个查询工具与规则工具，必要时先定位范围再深入
+- 不要为已明确场景的查询重复调用其他无关工具；也不要在异常检查类查询中漏掉对应的规则工具
 
 ## 对话历史处理
 当用户提到"上次""之前""刚才""上面"等引用之前对话的词汇时：

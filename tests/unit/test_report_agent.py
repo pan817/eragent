@@ -166,6 +166,166 @@ class TestReportAgentGenerate:
         assert "x" * 3001 not in prompt
 
     @pytest.mark.asyncio
+    async def test_prompt_contains_severity_thresholds(self, settings: Settings) -> None:
+        """prompt 中应注入 AnomalySeverity 配置的具体阈值，不是写死在模板里。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        settings.p2p.anomaly_severity.high_amount_threshold = 800000.0
+        settings.p2p.anomaly_severity.variance_high_multiplier = 3.0
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "# 报告"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        await agent.generate(scenario="测试", outputs={"d": "{}"})
+        prompt = mock_llm.ainvoke.call_args[0][0]
+
+        assert "800,000" in prompt
+        assert "容差的 3 倍以上" in prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_p0_guardrails(self, settings: Settings) -> None:
+        """prompt 应包含数据诚信、只读边界、严重等级规则等 P0 约束。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "# 报告"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        await agent.generate(scenario="测试", outputs={"d": "{}"})
+        prompt = mock_llm.ainvoke.call_args[0][0]
+
+        assert "工具输出数据" in prompt
+        assert ("不得编造" in prompt) or ("不得虚构" in prompt) or ("禁止推断" in prompt)
+        assert "只读" in prompt
+        assert "建议人工处理" in prompt
+        assert "HIGH" in prompt and "MEDIUM" in prompt and "LOW" in prompt
+        assert "已截断" in prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_current_date(self, settings: Settings) -> None:
+        """prompt 应注入当前日期与时区（P1：相对时间基准）。"""
+        import re
+        from modules.p2p.report_agent import ReportAgent
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "# 报告"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        await agent.generate(scenario="测试", outputs={"d": "{}"})
+        prompt = mock_llm.ainvoke.call_args[0][0]
+
+        # YYYY-MM-DD 日期
+        assert re.search(r"\d{4}-\d{2}-\d{2}", prompt)
+        assert "Asia/Shanghai" in prompt
+        assert "时间上下文" in prompt
+
+    @pytest.mark.asyncio
+    async def test_output_mode_overrides_core_requirements(
+        self, settings: Settings
+    ) -> None:
+        """output_mode 段应明确标注优先级高于上文报告要求（P1：brief/core 冲突）。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "简报"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        await agent.generate(
+            scenario="测试",
+            outputs={"d": "{}"},
+            output_mode_prompt="请以简报形式输出",
+        )
+        prompt = mock_llm.ainvoke.call_args[0][0]
+
+        # 优先级声明
+        assert "优先级高于" in prompt
+        assert "以本节为准" in prompt
+
+    @pytest.mark.asyncio
+    async def test_span_records_prompt_hash(
+        self, settings: Settings, monkeypatch
+    ) -> None:
+        """report.prep / report span 应记录 prompt_hash（P2 - 5.2 可观测性）。"""
+        import hashlib
+        from modules.p2p.report_agent import ReportAgent
+
+        captured_attrs: list[dict] = []
+
+        class _SpanCtx:
+            def __init__(self, span_name: str, op: str) -> None:
+                self.attrs: dict = {}
+                captured_attrs.append(self.attrs)
+            def __enter__(self) -> dict:
+                return self.attrs
+            def __exit__(self, *_: object) -> None:
+                pass
+
+        import core.observability.middleware as obs_mod
+        monkeypatch.setattr(obs_mod, "record_span", _SpanCtx)
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "# 报告"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        await agent.generate(scenario="测试", outputs={"d": "{}"})
+
+        # prep span 与 outer report span 均应带 prompt_hash
+        hashes = [a.get("prompt_hash") for a in captured_attrs if "prompt_hash" in a]
+        assert len(hashes) >= 2
+        # hash 为 12 位 hex
+        for h in hashes:
+            assert isinstance(h, str) and len(h) == 12
+            int(h, 16)  # 合法 hex
+        # 两处 hash 应一致（同一 prompt）
+        assert hashes[0] == hashes[-1]
+
+    @pytest.mark.asyncio
+    async def test_truncation_marker_injected(self, settings: Settings) -> None:
+        """超过 3000 字符的工具输出应附加 [已截断] 标记到 outputs_text。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        agent = ReportAgent(settings=settings)
+        mock_response = MagicMock()
+        mock_response.content = "OK"
+        mock_response.usage_metadata = None
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        big_value = "x" * 5000
+        await agent.generate(scenario="测试", outputs={"big": big_value})
+        prompt = mock_llm.ainvoke.call_args[0][0]
+
+        assert "[已截断，原始数据更长]" in prompt
+
+    @pytest.mark.asyncio
     async def test_generate_llm_failure_raises(self, settings: Settings) -> None:
         """非网络类异常直接抛 ReportGenerationError，不重试、不吞。"""
         from modules.p2p.report_agent import ReportAgent

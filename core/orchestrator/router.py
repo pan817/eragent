@@ -358,10 +358,20 @@ class IntentRouter:
 
             if not bypass:
                 # Level 1：关键词命中率
-                l1_scores = self._evaluate_all_rules(query)
-                trace_data["l1_scores"] = l1_scores
-
-                signal = self._try_level1(query, params)
+                with record_span("intent.l1", "keyword_match") as l1_attrs:
+                    l1_scores = self._evaluate_all_rules(query)
+                    trace_data["l1_scores"] = l1_scores
+                    signal = self._try_level1(query, params)
+                    l1_attrs["rule_count"] = len(l1_scores)
+                    l1_attrs["matched_rules"] = [
+                        s["rule"] for s in l1_scores if s.get("matched")
+                    ]
+                    l1_attrs["hit"] = signal is not None
+                    if signal is not None:
+                        l1_attrs["result_type"] = (
+                            signal.keywords[0] if signal.keywords else ""
+                        )
+                        l1_attrs["confidence"] = signal.confidence
                 if signal is not None:
                     trace_data["hit_level"] = 1
                     trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
@@ -371,10 +381,20 @@ class IntentRouter:
                     return signal
 
                 # Level 2：Chroma 语义匹配
-                l2_results = self._search_seeds_for_trace(query)
-                trace_data["l2_results"] = l2_results
-
-                signal = self._try_level2(query, params)
+                with record_span("intent.l2", "semantic_search") as l2_attrs:
+                    l2_results = self._search_seeds_for_trace(query)
+                    trace_data["l2_results"] = l2_results
+                    signal = self._try_level2(query, params)
+                    l2_attrs["top_k"] = len(l2_results)
+                    l2_attrs["top_similarity"] = (
+                        l2_results[0]["similarity"] if l2_results else None
+                    )
+                    l2_attrs["hit"] = signal is not None
+                    if signal is not None:
+                        l2_attrs["result_type"] = (
+                            signal.keywords[0] if signal.keywords else ""
+                        )
+                        l2_attrs["confidence"] = signal.confidence
                 if signal is not None:
                     trace_data["hit_level"] = 2
                     trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
@@ -384,7 +404,11 @@ class IntentRouter:
                     return signal
 
             # Level 3：LLM 分类（注入角色偏好）
-            signal = self._try_level3(query, params, analyst_role=analyst_role)
+            with record_span("intent.l3", "llm_classify") as l3_attrs:
+                signal = self._try_level3(query, params, analyst_role=analyst_role)
+                l3_attrs["result_type"] = signal.keywords[0] if signal.keywords else ""
+                l3_attrs["confidence"] = signal.confidence
+                l3_attrs["params_merged"] = signal.entities.copy()
             trace_data["hit_level"] = 3
             trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
             trace_data["confidence"] = signal.confidence
@@ -569,6 +593,8 @@ class IntentRouter:
     # ── Level 3：LLM 分类 ───────────────────────────────────────────
 
     _LLM_CLASSIFY_PROMPT = """你是 ERP 采购分析系统的意图分类器。根据用户查询，判断最匹配的分析类型。
+
+当前日期：{current_date}（{timezone}）。"最近 N 天"/"本月"/"上周"等相对时间以此为基准计算 days 参数。
 {role_section}
 可选分析类型：
 - three_way_match: 采购订单、收货单、发票的三单匹配异常检查
@@ -581,10 +607,24 @@ class IntentRouter:
 - discount_utilization: 早付折扣利用率分析
 - po_cycle_time: 采购订单全流程周期分析
 - vendor_concentration: 供应商集中度与采购依赖风险分析
-- comprehensive: 以上多类或无法明确归类的综合分析
+- comprehensive: 明确需要跨上述多个维度组合分析的查询（如"综合评估供应商风险"）
+- unknown: 非 ERP 采购分析意图（闲聊、问候、无关话题、常识/情感问答、信息严重不足无法归入任何采购分析场景）
 
-输出纯 JSON，无其他文字：
-{{"type": "分析类型", "confidence": 0.0到1.0, "supplier_id": null或字符串, "po_number": null或字符串, "days": null或整数}}
+判定规则：
+- 优先匹配具体分析类型（1-10）
+- 只有明确需要跨多个维度时才选 comprehensive；"模糊但相关"不要强行归为 comprehensive
+- 非采购分析查询一律返回 unknown；不要强行归入其他类型
+
+confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9）：
+- >0.9: 查询直接命中某类型核心名词（如"三路匹配"/"发票重复"），语义无歧义
+- 0.7-0.9: 语义强相关需要推断（如"发票和采购订单对不上"→ three_way_match）
+- 0.5-0.7: 多类共存或表述模糊
+- <0.5: 几乎无关或信息严重不足，考虑 unknown
+
+输出纯 JSON（不要 markdown 代码块、不要前后说明，第一个字符必须是 `{{`）：
+{{"type": "<枚举值>", "confidence": 0.0到1.0, "supplier_id": null或字符串, "po_number": null或字符串, "days": null或整数}}
+
+参数抽取：只抽取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null。
 
 用户查询：{query}"""
 
@@ -621,9 +661,18 @@ class IntentRouter:
                 if role_desc
                 else ""
             )
+            from core.time_utils import get_timezone_name, now_cn
+
             prompt = self._LLM_CLASSIFY_PROMPT.format(
-                query=query, role_section=role_section
+                query=query,
+                role_section=role_section,
+                current_date=now_cn().strftime("%Y-%m-%d"),
+                timezone=get_timezone_name(),
             )
+
+            import hashlib
+
+            prompt_hash = hashlib.md5(prompt.encode("utf-8")).hexdigest()[:12]
 
             # 显式记录 model span（L3 不经过 LangChain 中间件）
             model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
@@ -631,6 +680,7 @@ class IntentRouter:
                 model_attrs["model"] = str(model_name)
                 model_attrs["input"] = prompt[:2000]
                 model_attrs["estimated_input_tokens"] = estimate_tokens(prompt)
+                model_attrs["prompt_hash"] = prompt_hash
                 response = llm.invoke(prompt)
                 content: str = response.content if hasattr(response, "content") else str(response)
                 usage = (
@@ -653,6 +703,21 @@ class IntentRouter:
 
             data = json.loads(raw)
             analysis_type_str: str = data.get("type", "comprehensive")
+
+            # "unknown" 表示非 ERP 采购分析意图，用 sentinel keyword 透传给 orchestrator，
+            # 由上层决定是否早退出；不进入 AnalysisType 枚举转换。
+            if analysis_type_str == "unknown":
+                confidence: float = data.get("confidence", 0.5)
+                return QuerySignal(
+                    raw_query=query,
+                    keywords=["unknown"],
+                    entities=params,
+                    time_range_days=params.get("days"),
+                    route_level=3,
+                    confidence=round(confidence, 3),
+                    reasoning="L3 判定为非 ERP 采购分析意图（unknown）",
+                )
+
             try:
                 analysis_type = AnalysisType(analysis_type_str)
             except ValueError:

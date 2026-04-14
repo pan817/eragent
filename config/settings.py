@@ -380,6 +380,15 @@ class AnomalySeveritySettings(BaseSettings):
     model_config = {"env_prefix": "ANOMALY_SEVERITY_"}
 
 
+class OntologyContextSettings(BaseSettings):
+    """本体上下文注入 LLM 时的预算控制。"""
+
+    context_trim_enabled: bool = True  # 注入 LLM 前裁剪兜底开关
+    context_max_tokens_pct: int = 8    # 本体上下文最大占 context_window 的百分比
+
+    model_config = {"env_prefix": "ONTOLOGY_"}
+
+
 class P2PSettings(BaseSettings):
     """P2P 模块整体配置。"""
 
@@ -392,6 +401,9 @@ class P2PSettings(BaseSettings):
     )
     anomaly_severity: AnomalySeveritySettings = Field(
         default_factory=AnomalySeveritySettings
+    )
+    ontology: OntologyContextSettings = Field(
+        default_factory=OntologyContextSettings
     )
 
     model_config = {"env_prefix": "P2P_"}

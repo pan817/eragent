@@ -42,6 +42,12 @@ def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
         _logger.debug("publish_stage failed", exc_info=True)
 
 # 输出模式 → prompt 后缀
+# 输出模式覆盖指令：拼接在 _REPORT_PROMPT 末尾，声明优先级高于上文"报告要求"。
+# - "detailed" 保持空串是刻意约定：完全沿用 _REPORT_PROMPT 的默认 4 段结构，无需额外覆盖；
+#   改为非空反而会在基础 prompt 上重复一次，浪费 token。
+# - "brief" / "table" 给出具体结构/字数约束，覆盖基础 prompt 的 4 段规定。
+# 取值由 AnalysisRequest.output_mode 的 Pydantic pattern 校验，非法值在 API 层 400，
+# 此字典不承担二次校验职责。
 _OUTPUT_MODE_PROMPTS: dict[str, str] = {
     "detailed": "",
     "brief": "请以简报摘要形式输出，控制在 3-5 个要点，突出关键数据和结论，总字数不超过 500 字。",
@@ -803,6 +809,50 @@ class Orchestrator:
             signal = self._intent_router.route(
                 enhanced_query, analyst_role=request.analyst_role
             )
+
+            # 2.5 L3 判定为非 ERP 采购分析意图（unknown）时直接返回友好提示，
+            # 不触发 DAG / ReAct，避免浪费 LLM 资源和产生误导性报告。
+            # 仅当用户未显式指定 analysis_type 时生效；显式指定时以用户意图为准。
+            if request.analysis_type is None and signal.keywords == ["unknown"]:
+                duration_ms = (time.monotonic() - start_time) * 1000.0
+                _logger.info(
+                    "L3 unknown intent detected, early return: query='%s' confidence=%.3f",
+                    request.query,
+                    signal.confidence,
+                )
+                _publish_stage_safe(
+                    "intent_resolved",
+                    {
+                        "analysis_type": "unknown",
+                        "route_level": signal.route_level,
+                        "confidence": signal.confidence,
+                    },
+                )
+                return AnalysisResult(
+                    report_id=report_id,
+                    trace_id=trace_id,
+                    status=AnalysisStatus.SUCCESS,
+                    analysis_type=AnalysisType.COMPREHENSIVE,
+                    query=request.query,
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    time_range="",
+                    summary={
+                        "route_type": "non_analysis",
+                        "route_level": signal.route_level,
+                        "route_confidence": signal.confidence,
+                        "route_reasoning": signal.reasoning,
+                    },
+                    report_markdown=(
+                        "您的查询似乎不属于 ERP 采购分析范围，或信息不足以归入任何分析场景。\n\n"
+                        "本系统支持以下采购分析场景：三路匹配、价格差异、付款合规、供应商绩效、"
+                        "支出分析、收货异常、重复发票、早付折扣、采购周期、供应商集中度，"
+                        "以及综合跨域分析。\n\n"
+                        "请提供更具体的采购场景或单据信息（如供应商 ID、PO 号、时间范围）后重试。"
+                    ),
+                    duration_ms=duration_ms,
+                )
+
             analysis_type: AnalysisType = request.analysis_type or self._intent_router.resolve_type(signal)
             # SSE 阶段事件：意图已解析
             _publish_stage_safe(

@@ -204,6 +204,42 @@ class TestP2PAgentBuild:
         assert "P2P" in prompt
         assert "角色定义" in prompt
 
+    def test_system_prompt_contains_p0_guardrails(self) -> None:
+        """system prompt 应包含只读边界与数据诚信约束（P0）。"""
+        from modules.p2p.prompts import build_system_prompt
+
+        prompt = build_system_prompt()
+        assert "只读" in prompt
+        assert "建议人工处理" in prompt
+        assert "数据诚信" in prompt
+        assert ("不要虚构" in prompt) or ("不得编造" in prompt) or ("不要基于训练知识" in prompt)
+        assert "执行边界" in prompt
+
+    def test_system_prompt_contains_p1_date_and_heuristic(self) -> None:
+        """system prompt 应注入日期基准且流程改为启发式（P1）。"""
+        import re
+        from modules.p2p.prompts import build_system_prompt
+
+        prompt = build_system_prompt()
+        # 日期 + 时区
+        assert re.search(r"\d{4}-\d{2}-\d{2}", prompt)
+        assert "Asia/Shanghai" in prompt
+        assert "时间上下文" in prompt
+        # 流程改为启发式，不再固定 4 步
+        assert "分析方法" in prompt
+        assert "按需执行" in prompt or "简单事实查询" in prompt
+
+    def test_system_prompt_drops_tool_listing(self) -> None:
+        """删除重复的工具编号清单（P2 - 3.1），避免与 LangChain 注入的 schema 漂移。"""
+        from modules.p2p.prompts import build_system_prompt
+
+        prompt = build_system_prompt()
+        # 编号列表已删除（原来是 "1. **query_purchase_orders**" ... "8. **calculate_supplier_kpis**"）
+        assert "1. **query_purchase_orders**" not in prompt
+        assert "8. **calculate_supplier_kpis**" not in prompt
+        # 但整体"工具使用"章节仍存在，给出高层引导
+        assert "工具使用" in prompt
+
     def test_get_ontology_context_success(self) -> None:
         """本体上下文获取成功时应返回格式化文本。"""
         from modules.p2p.prompts import get_ontology_context
