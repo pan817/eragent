@@ -39,3 +39,48 @@ ReportAgent 慢的根因按影响从大到小排序：
 ## 最小可执行的第一步建议
 
 先做 **#1 + #3 + #11**：把 `llm_fast` 配成真的 fast 模型、`max_tokens` 降到 2000、打点输入/输出 tokens 和 TTFT。跑一次端到端就能量化剩余瓶颈，再决定是否上流式 / 缓存 / map-reduce。
+
+## 其他业界优化措施（补充）
+
+有，下面补几类没在上一版覆盖到的，业界在 LLM 推理链路上常见：
+
+### 一、生成侧（降低单次 LLM 调用延迟）
+
+- **推测解码 / Speculative Decoding**：用小模型起草、大模型一次性校验多 token。Qwen 兼容接口暂不暴露，但自托管 vLLM/TGI/TensorRT-LLM 默认支持，典型 1.5–3×。
+- **Skeleton-of-Thought**：先让模型一次输出"报告骨架/分节标题"，再**并行**让多路调用分别填各节内容，最后拼接。长报告 2–4× 提速。
+- **Chain-of-Density**：迭代压缩式生成，适合"长输入 → 短输出"的摘要型报告，token 产出更紧凑。
+- **Constrained/Structured Decoding**（JSON schema / grammar-guided，如 Outlines、XGrammar）：不只是省 token，还能避免重试式"输出不合规再调一次"的浪费。
+- **Stop sequences / early stopping**：在 prompt 里定义明确结束符（如 `---END---`），防止模型尾部啰嗦。
+
+### 二、请求侧（编排层）
+
+- **Progressive / 渐进式 prompting**：DAG 的工具节点一旦完成，就把已有 outputs 先喂给 ReportAgent 开始生成骨架，不必等全部并行节点收齐。端到端"重叠"而非"串行"。
+- **Hedged request + cancel**：相同请求同时发到两个 endpoint/provider，先返回的胜出并 cancel 另一个。拿尾延迟换成本。
+- **多模型 Router**：用 LLM-Router（如 RouteLLM、Martian 式）或手写分级——简单场景走 flash，复杂场景走 max；代码里已有 `llm` / `llm_fast` 二分，可再细化到按 `scenario` 或 outputs 体量路由。
+- **批处理 API（Batch API）**：对离线/T+1 的日报、周报类报告，走 Anthropic/OpenAI/Dashscope 的 Batch endpoint，单价 50%、延迟允许小时级。
+
+### 三、缓存侧（更精细）
+
+- **语义缓存（Semantic Cache）**：不止 hash，把 `(scenario + outputs)` 嵌入向量，向量近邻命中即复用历史报告。GPTCache / Redis-VSS 是业界常用方案。尤其适合"同一供应商上周分析过"这种近似重复查询。
+- **KV-cache 复用**：自托管场景可把系统 prompt 的 KV 状态固定驻留，跳过 prefill 阶段（vLLM prefix caching、SGLang radix cache）。托管 API 对应的就是 prompt caching。
+- **负缓存**：把"输入数据不足 / 无异常"这类短报告也缓存，避免每次都点一次 LLM。
+
+### 四、数据侧（让 LLM 干更少的活）
+
+- **模板化 + LLM 只填"异常解读"**：标题、指标表、图表链接全部用 Jinja 模板渲染，LLM 只生成"关键发现"和"建议措施"两段，输出 token 可降 70%+。
+- **抽取式优先、生成式兜底**：先用规则/Pandas 产出事实句（"PO-123 偏差 8%，超容差 3%"），LLM 只做措辞润色与归并。
+- **领域小模型微调 / 蒸馏**：用历史报告做 SFT 得到一个 7B 级的专用报告模型，延迟和成本能再压一个数量级。前提是有≥几千条标注报告。
+- **Few-shot 检索**：向量库存历史高质量报告，按 scenario 取最相似 1–2 条作为 few-shot，生成更稳、可以适当减小 `max_tokens` 和废话率。
+
+### 五、运行时/网络侧
+
+- **HTTP/2 或 gRPC 复用 + 连接池长驻**：httpx AsyncClient 已用，但要确保单例复用、不是每次请求新建。
+- **就近 endpoint / 多区域**：Dashscope 的就近接入点（北京/张家口等）可以省几十到上百毫秒 RTT。
+- **压缩**（Accept-Encoding: zstd/br）：长 prompt 上行也是带宽瓶颈。
+- **租户级限流与优先级队列**：避免突发流量把所有请求一起拖慢；报告类请求走低优队列、交互类走高优。
+- **可观测的 SLO**：P50/P95/P99 TTFT 与 total latency 分开看，不然"平均慢"定位不到是输入侧还是输出侧的问题。
+
+### 六、产品层（最被低估）
+
+- **流式 + 分段可展开的 UI**：即使总耗时不变，用户看到报告"边写边出"就不焦虑。比任何后端优化性价比都高。
+- **"快稿 + 深稿"双档**：先 5 秒返回模板化快稿，后台异步跑 LLM 生成深度稿，Ready 后 push 更新。
