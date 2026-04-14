@@ -589,13 +589,18 @@ class IntentRouter:
 用户查询：{query}"""
 
     def _ensure_llm(self) -> Any:
-        """延迟初始化 LLM 客户端。"""
+        """延迟初始化 LLM 客户端。
+
+        L3 是单轮 11 路 JSON 分类，不需要链式推理；且输出要被 ``json.loads``
+        解析，部分 provider 的思考内容会以 ``<think>`` 等形式混入 ``content``，
+        拉低解析成功率。统一关闭 thinking。
+        """
         if self._llm is not None:
             return self._llm
 
         from modules.p2p.model_factory import build_chat_model
 
-        self._llm = build_chat_model(self._settings.llm)
+        self._llm = build_chat_model(self._settings.llm, disable_thinking=True)
         return self._llm
 
     def _try_level3(

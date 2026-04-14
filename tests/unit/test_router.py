@@ -272,6 +272,18 @@ class TestLevel3:
         signal = self.router._try_level3("查询", {})
         assert signal.keywords == [AnalysisType.COMPREHENSIVE.value]
 
+    def test_ensure_llm_passes_disable_thinking(self) -> None:
+        """_ensure_llm 应传 disable_thinking=True 给 build_chat_model。
+
+        L3 是单轮 JSON 分类，无需链式推理；关 thinking 可省 token、降延迟，
+        并避免思考内容混入 content 导致 json.loads 失败。
+        """
+        settings = Settings()
+        router = IntentRouter(settings=settings)
+        with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
+            router._ensure_llm()
+            mock_build.assert_called_once_with(settings.llm, disable_thinking=True)
+
 
 # ============================================================
 # parse() 集成测试（端到端三级路由）
