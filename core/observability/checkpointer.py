@@ -18,22 +18,20 @@ from __future__ import annotations
 
 import asyncio
 import time
-import traceback
 import uuid
 from datetime import datetime
 from typing import Any
 
 from core.logging_utils import get_logger
-from core.observability.middleware import TimingMiddleware, _current_trace
+from core.observability.middleware import (
+    TimingMiddleware,
+    _current_trace,
+    format_error_chain,
+)
 from core.observability.store import SpanEvent
+from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
-
-
-def _truncate(text: str, limit: int = 500) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "…"
 
 
 def _thread_id(config: Any) -> str | None:
@@ -117,7 +115,7 @@ def _emit_span(
         name=name,
         status=status,
         started_at=started_at,
-        finished_at=datetime.utcnow(),
+        finished_at=now_cn(),
         duration_ms=round(duration_ms, 3),
         attributes=attributes,
         error=error,
@@ -147,7 +145,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
     # ---- 同步 ----
 
     def get_tuple(config):  # type: ignore[no-untyped-def]
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status = "ok"
         error: str | None = None
@@ -161,7 +159,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
             return result
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{_truncate(traceback.format_exc(limit=3))}"
+            error = format_error_chain(exc)
             raise
         finally:
             _emit_span(
@@ -175,7 +173,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
             )
 
     def put(config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status = "ok"
         error: str | None = None
@@ -192,7 +190,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
             return orig_put(config, checkpoint, metadata, new_versions)
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{_truncate(traceback.format_exc(limit=3))}"
+            error = format_error_chain(exc)
             raise
         finally:
             _emit_span(
@@ -206,7 +204,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
             )
 
     def put_writes(config, writes, task_id, task_path=""):  # type: ignore[no-untyped-def]
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status = "ok"
         error: str | None = None
@@ -223,7 +221,7 @@ def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:
             return orig_put_writes(config, writes, task_id, task_path)
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{_truncate(traceback.format_exc(limit=3))}"
+            error = format_error_chain(exc)
             raise
         finally:
             _emit_span(

@@ -27,6 +27,7 @@ from langchain.agents.middleware.types import (
 from core.logging_utils import get_logger
 from core.observability.console import format_io_panel, format_summary, format_tree
 from core.observability.store import RunEvent, SpanEvent, TraceStore, get_trace_store
+from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
 
@@ -34,6 +35,11 @@ _logger = get_logger(__name__)
 # 单条 input/output 文本的最大长度。超出截断，避免 attributes JSON 膨胀。
 # 默认 2000，可被 ObservabilitySettings.max_io_text 覆盖。
 _MAX_IO_TEXT_DEFAULT = 2000
+
+# 单条 error 文本（含完整异常链 traceback）的最大长度。超出截断，
+# 避免极端栈撑爆 trace_spans.error 列与 API 响应。可被
+# ObservabilitySettings.max_error_text 覆盖。
+_MAX_ERROR_TEXT_DEFAULT = 8192
 
 # token 估算默认比率（字符数 / 此比率 ≈ token 数，中文约 1.5）
 _DEFAULT_TOKEN_RATIO = 1.5
@@ -47,6 +53,56 @@ def _max_io_text() -> int:
     except Exception as exc:
         _logger.debug("failed to load observability.max_io_text, using default: %s", exc)
         return _MAX_IO_TEXT_DEFAULT
+
+
+def _max_error_text() -> int:
+    try:
+        from config.settings import get_settings
+
+        return get_settings().observability.max_error_text
+    except Exception as exc:
+        _logger.debug(
+            "failed to load observability.max_error_text, using default: %s", exc
+        )
+        return _MAX_ERROR_TEXT_DEFAULT
+
+
+def format_error_chain(exc: BaseException, *, max_len: int | None = None) -> str:
+    """格式化异常为 trace error 字符串。
+
+    与 ``traceback.format_exc(limit=3)`` 不同，此函数：
+    - 通过 ``traceback.format_exception(..., chain=True)`` 完整记录
+      ``__cause__`` / ``__context__`` 链，不丢失被包装的根因；
+    - 不限制栈帧数量，深栈调用（agent → SDK → httpx → asyncio）也能完整保留；
+    - 总长度超过 ``max_len`` 时执行头尾截断（默认头 60% + 尾 40%），
+      中间插入 ``...[truncated N chars; full length=M]...`` 标记，
+      同时保住链顶根因与链尾外层异常。
+
+    Args:
+        exc: 待格式化的异常。
+        max_len: 上限字符数。``None`` 表示读取
+            ``ObservabilitySettings.max_error_text``（默认 8192）。
+    """
+    if max_len is None:
+        max_len = _max_error_text()
+    text = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__, chain=True)
+    ).rstrip()
+    if len(text) <= max_len:
+        return text
+    truncated_n = len(text) - max_len
+    marker = f"\n...[truncated {truncated_n} chars; full length={len(text)}]...\n"
+    budget = max_len - len(marker)
+    if budget < 200:
+        # 上限太小，无法做有意义的头尾切分，退化为单纯头截断
+        return text[: max(0, max_len - 3)] + "..."
+    head_len = (budget * 6) // 10
+    tail_len = budget - head_len
+    truncated_n = len(text) - head_len - tail_len
+    marker = f"\n...[truncated {truncated_n} chars; full length={len(text)}]...\n"
+    # marker 长度变动后再校准一次 head，确保总长不超 max_len
+    head_len = max_len - len(marker) - tail_len
+    return text[:head_len] + marker + text[-tail_len:]
 
 
 def _token_estimate_ratio() -> float:
@@ -121,14 +177,15 @@ class _TraceContext:
         session_id: str | None,
         user_id: str | None,
         store: TraceStore | None = None,
+        trace_id: str | None = None,
     ) -> None:
-        self.trace_id: str = str(uuid.uuid4())
+        self.trace_id: str = trace_id or str(uuid.uuid4())
         self.agent_name: str = agent_name
         self.session_id: str | None = session_id
         self.user_id: str | None = user_id
         self.store: TraceStore | None = store
         self.spans: list[SpanEvent] = []
-        self.started_at: datetime = datetime.utcnow()
+        self.started_at: datetime = now_cn()
         self.started_monotonic: float = time.monotonic()
         self.model_count: int = 0
         self.tool_count: int = 0
@@ -138,6 +195,104 @@ class _TraceContext:
 _current_trace: contextvars.ContextVar[_TraceContext | None] = contextvars.ContextVar(
     "current_trace", default=None
 )
+
+
+# ---------------------------------------------------------------------------
+# 事件总线桥接：把 span 起止 / 阶段节点同步广播给 EventBus
+#
+# 异步分析接口（/analyze/async）订阅这些事件走 SSE。observability 主流程
+# 不依赖 EventBus，如果未初始化则所有 publish 为 no-op。
+# ---------------------------------------------------------------------------
+
+
+def _publish_to_event_bus(trace_id: str, payload: dict[str, Any]) -> None:
+    """向全局 EventBus 发布事件。失败吞掉，不影响 observability 主流程。"""
+    try:
+        from core.tasks.events import get_event_bus
+
+        bus = get_event_bus()
+    except Exception:  # noqa: BLE001
+        return
+    if bus is None:
+        return
+    try:
+        seq = bus.next_seq(trace_id)
+        payload = {
+            **payload,
+            "trace_id": trace_id,
+            "ts": now_cn().isoformat(),
+            "seq": seq,
+        }
+        bus.publish(trace_id, payload)
+    except Exception:  # noqa: BLE001
+        # 不让事件广播失败影响主流程；降级为 debug 日志
+        pass
+
+
+def _publish_span_start(span_type: str, name: str) -> None:
+    """在当前 trace 上发布 span 起始事件（仅 tool / dag.task）。"""
+    ctx = _current_trace.get()
+    if ctx is None:
+        return
+    if span_type == "tool":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {"type": "tool", "action": "start", "name": name},
+        )
+    elif span_type == "dag.task":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {"type": "dag_task", "action": "start", "task_name": name},
+        )
+
+
+def _publish_span_end(
+    span_type: str,
+    name: str,
+    *,
+    duration_ms: float,
+    status: str,
+) -> None:
+    """在当前 trace 上发布 span 结束事件（仅 tool / dag.task）。"""
+    ctx = _current_trace.get()
+    if ctx is None:
+        return
+    if span_type == "tool":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {
+                "type": "tool",
+                "action": "end",
+                "name": name,
+                "duration_ms": duration_ms,
+                "status": status,
+            },
+        )
+    elif span_type == "dag.task":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {
+                "type": "dag_task",
+                "action": "end",
+                "task_name": name,
+                "duration_ms": duration_ms,
+                "status": status,
+            },
+        )
+
+
+def publish_stage(name: str, attrs: dict[str, Any] | None = None) -> None:
+    """供编排层调用：发布阶段事件（intent_resolved / dag_planned / react_started 等）。
+
+    在当前无活跃 trace 时 no-op。
+    """
+    ctx = _current_trace.get()
+    if ctx is None:
+        return
+    payload: dict[str, Any] = {"type": "stage", "name": name}
+    if attrs:
+        payload["attrs"] = attrs
+    _publish_to_event_bus(ctx.trace_id, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -171,13 +326,19 @@ class TimingMiddleware(AgentMiddleware):
         *,
         session_id: str | None = None,
         user_id: str | None = None,
+        trace_id: str | None = None,
     ) -> str:
-        """开启一次 trace，返回 trace_id。"""
+        """开启一次 trace，返回 trace_id。
+
+        若传入 ``trace_id`` 则使用该值（用于异步分析场景下 API 层预生成
+        trace_id 以便立即 ack 给客户端）；否则由内部生成 uuid4。
+        """
         ctx = _TraceContext(
             agent_name=self._agent_name,
             session_id=session_id,
             user_id=user_id,
             store=self._store(),
+            trace_id=trace_id,
         )
         _current_trace.set(ctx)
         self._emit(
@@ -197,7 +358,7 @@ class TimingMiddleware(AgentMiddleware):
         ctx = _current_trace.get()
         if ctx is None:
             return
-        finished_at = datetime.utcnow()
+        finished_at = now_cn()
         total_ms = (time.monotonic() - ctx.started_monotonic) * 1000
 
         # 汇总所有 model span 的 token 使用量
@@ -293,15 +454,16 @@ class TimingMiddleware(AgentMiddleware):
             yield None
             return
         span_id = str(uuid.uuid4())
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status = "ok"
         error: str | None = None
+        _publish_span_start(span_type, name)
         try:
             yield span_id
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            error = format_error_chain(exc)
             raise
         finally:
             duration_ms = (time.monotonic() - t0) * 1000
@@ -313,7 +475,7 @@ class TimingMiddleware(AgentMiddleware):
                 name=name,
                 status=status,
                 started_at=started_at,
-                finished_at=datetime.utcnow(),
+                finished_at=now_cn(),
                 duration_ms=round(duration_ms, 3),
                 attributes=attributes,
                 error=error,
@@ -324,6 +486,11 @@ class TimingMiddleware(AgentMiddleware):
             elif span_type == "tool":
                 ctx.tool_count += 1
             self._emit(sp)
+            _publish_span_end(
+                span_type, name,
+                duration_ms=round(duration_ms, 3),
+                status=status,
+            )
 
     # ------------------------------------------------------------------
     # 通用 span 记录（带 input / output 捕获）
@@ -350,7 +517,7 @@ class TimingMiddleware(AgentMiddleware):
             name=name,
             status=status,
             started_at=started_at,
-            finished_at=datetime.utcnow(),
+            finished_at=now_cn(),
             duration_ms=round(duration_ms, 3),
             attributes=attributes,
             error=error,
@@ -362,6 +529,11 @@ class TimingMiddleware(AgentMiddleware):
             elif span_type == "tool":
                 ctx.tool_count += 1
         self._emit(sp)
+        _publish_span_end(
+            span_type, name,
+            duration_ms=round(duration_ms, 3),
+            status=status,
+        )
         if self._print:
             # 每次调用结束后立即打印结构化 I/O 面板，方便实时观察
             print(format_io_panel(sp), flush=True)
@@ -377,7 +549,7 @@ class TimingMiddleware(AgentMiddleware):
     ) -> Any:
         attrs = self._model_attrs(request)
         attrs["input"] = self._serialize_model_input(request)
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status, error = "ok", None
         try:
@@ -388,7 +560,7 @@ class TimingMiddleware(AgentMiddleware):
             status = "error"
             attrs["error_type"] = _classify_llm_error(exc)
             attrs["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 2)
-            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            error = format_error_chain(exc)
             raise
         finally:
             self._record_span(
@@ -408,7 +580,7 @@ class TimingMiddleware(AgentMiddleware):
     ) -> Any:
         attrs = self._model_attrs(request)
         attrs["input"] = self._serialize_model_input(request)
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status, error = "ok", None
         try:
@@ -419,7 +591,7 @@ class TimingMiddleware(AgentMiddleware):
             status = "error"
             attrs["error_type"] = _classify_llm_error(exc)
             attrs["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 2)
-            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            error = format_error_chain(exc)
             raise
         finally:
             self._record_span(
@@ -546,16 +718,17 @@ class TimingMiddleware(AgentMiddleware):
     ) -> Any:
         attrs = self._tool_attrs(request)
         attrs["input"] = attrs.get("args")
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status, error = "ok", None
+        _publish_span_start("tool", attrs["tool"])
         try:
             result = handler(request)
             attrs["output"] = self._serialize_tool_output(result)
             return result
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            error = format_error_chain(exc)
             raise
         finally:
             self._record_span(
@@ -575,16 +748,17 @@ class TimingMiddleware(AgentMiddleware):
     ) -> Any:
         attrs = self._tool_attrs(request)
         attrs["input"] = attrs.get("args")
-        started_at = datetime.utcnow()
+        started_at = now_cn()
         t0 = time.monotonic()
         status, error = "ok", None
+        _publish_span_start("tool", attrs["tool"])
         try:
             result = await handler(request)
             attrs["output"] = self._serialize_tool_output(result)
             return result
         except BaseException as exc:
             status = "error"
-            error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+            error = format_error_chain(exc)
             raise
         finally:
             self._record_span(
@@ -661,7 +835,7 @@ def record_memory_span(operation: str, **attributes: Any):
         return
 
     span_id = str(uuid.uuid4())
-    started_at = datetime.utcnow()
+    started_at = now_cn()
     t0 = time.monotonic()
     status = "ok"
     error: str | None = None
@@ -669,7 +843,7 @@ def record_memory_span(operation: str, **attributes: Any):
         yield
     except BaseException as exc:
         status = "error"
-        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+        error = format_error_chain(exc)
         raise
     finally:
         duration_ms = (time.monotonic() - t0) * 1000
@@ -681,7 +855,7 @@ def record_memory_span(operation: str, **attributes: Any):
             name=operation,
             status=status,
             started_at=started_at,
-            finished_at=datetime.utcnow(),
+            finished_at=now_cn(),
             duration_ms=round(duration_ms, 3),
             attributes=attributes,
             error=error,
@@ -721,15 +895,16 @@ def record_span(span_type: str, name: str, **attributes: Any):
         return
 
     span_id = str(uuid.uuid4())
-    started_at = datetime.utcnow()
+    started_at = now_cn()
     t0 = time.monotonic()
     status = "ok"
     error: str | None = None
+    _publish_span_start(span_type, name)
     try:
         yield attributes
     except BaseException as exc:
         status = "error"
-        error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=3)}"
+        error = format_error_chain(exc)
         raise
     finally:
         duration_ms = (time.monotonic() - t0) * 1000
@@ -741,7 +916,7 @@ def record_span(span_type: str, name: str, **attributes: Any):
             name=name,
             status=status,
             started_at=started_at,
-            finished_at=datetime.utcnow(),
+            finished_at=now_cn(),
             duration_ms=round(duration_ms, 3),
             attributes=_safe_jsonable(attributes),
             error=error,
@@ -751,6 +926,11 @@ def record_span(span_type: str, name: str, **attributes: Any):
             ctx.model_count += 1
         elif span_type == "tool":
             ctx.tool_count += 1
+        _publish_span_end(
+            span_type, name,
+            duration_ms=round(duration_ms, 3),
+            status=status,
+        )
         active_store = ctx.store or get_trace_store()
         if active_store is not None:
             active_store.enqueue(sp)

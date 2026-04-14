@@ -21,6 +21,7 @@ from api.schemas.analysis import (
 )
 from config.settings import P2PSettings
 from core.logging_utils import get_logger
+from core.time_utils import now_cn
 from modules.p2p.rules._utils import (
     AnomalyIdGenerator,
     safe_date,
@@ -146,7 +147,7 @@ class PaymentComplianceChecker:
                             "请调查逾期原因并采取纠正措施，"
                             "评估是否需要支付滞纳金，优化付款审批流程"
                         ),
-                        detected_at=datetime.utcnow(),
+                        detected_at=now_cn(),
                         ontology_evidence=f"规则 {_RULE_OVERDUE} 触发：逾期 {overdue_days} 天",
                     )
                 )
@@ -178,7 +179,7 @@ class PaymentComplianceChecker:
                                 "请确认提前付款是否因折扣优惠等合理原因，"
                                 "否则建议在到期日前合理安排付款以优化资金利用率"
                             ),
-                            detected_at=datetime.utcnow(),
+                            detected_at=now_cn(),
                             ontology_evidence=f"规则 {_RULE_EARLY} 触发：提前 {early_days} 天",
                         )
                     )
@@ -216,7 +217,7 @@ class PaymentComplianceChecker:
                                 "请核实是否存在未经授权的折扣扣减，"
                                 "补齐差额或与供应商重新协商折扣条款"
                             ),
-                            detected_at=datetime.utcnow(),
+                            detected_at=now_cn(),
                             ontology_evidence=f"规则 {_RULE_DISCOUNT_ABUSE} 触发：折扣滥用",
                         )
                     )
@@ -255,7 +256,7 @@ class PaymentComplianceChecker:
                                     "建议优化付款流程，在折扣有效期内优先使用折扣，"
                                     "以降低采购成本"
                                 ),
-                                detected_at=datetime.utcnow(),
+                                detected_at=now_cn(),
                                 ontology_evidence=f"规则 {_RULE_DISCOUNT_ABUSE} 触发：折扣未使用",
                             )
                         )

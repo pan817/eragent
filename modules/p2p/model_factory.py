@@ -56,8 +56,16 @@ def build_chat_model(
     )
     if not llm_cfg.use_system_proxy:
         # 当前服务全程走 async 路径，仅创建 AsyncClient，避免空闲的同步连接池。
+        # connect 阶段用短超时（5s），避免 DNS/TCP 握手被墙/卡住时空耗大量时间；
+        # read 阶段使用 llm_cfg.timeout（通常数十秒~数分钟），LLM 输出本就耗时。
+        timeout = httpx.Timeout(
+            connect=5.0,
+            read=float(llm_cfg.timeout),
+            write=10.0,
+            pool=5.0,
+        )
         kwargs["http_async_client"] = httpx.AsyncClient(
-            trust_env=False, timeout=llm_cfg.timeout
+            trust_env=False, timeout=timeout
         )
     if disable_thinking:
         extra_body = _resolve_disable_thinking(llm_cfg.provider, llm_cfg.model)

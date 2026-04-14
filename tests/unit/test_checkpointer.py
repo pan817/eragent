@@ -18,7 +18,6 @@ from core.observability.checkpointer import (
     _summarize_checkpoint,
     _summarize_tuple,
     _thread_id,
-    _truncate,
     attach_tracing,
 )
 from core.observability.middleware import TimingMiddleware
@@ -28,20 +27,6 @@ from core.observability.store import SpanEvent
 # ------------------------------------------------------------------
 # 辅助函数
 # ------------------------------------------------------------------
-
-
-class TestTruncate:
-    def test_short_passthrough(self):
-        assert _truncate("hello", 10) == "hello"
-
-    def test_long_truncated(self):
-        result = _truncate("a" * 600, 500)
-        assert result.endswith("…")
-        assert len(result) == 501
-
-    def test_exact_limit(self):
-        s = "x" * 500
-        assert _truncate(s, 500) == s
 
 
 class TestThreadId:

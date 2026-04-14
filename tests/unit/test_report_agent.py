@@ -165,8 +165,10 @@ class TestReportAgentGenerate:
         assert "x" * 3001 not in prompt
 
     @pytest.mark.asyncio
-    async def test_generate_llm_failure(self, settings: Settings) -> None:
+    async def test_generate_llm_failure_raises(self, settings: Settings) -> None:
+        """非网络类异常直接抛 ReportGenerationError，不重试、不吞。"""
         from modules.p2p.report_agent import ReportAgent
+        from modules.p2p.errors import ReportGenerationError
 
         agent = ReportAgent(settings=settings)
         mock_llm = AsyncMock()
@@ -174,9 +176,12 @@ class TestReportAgentGenerate:
         mock_llm.model_name = "test-model"
         agent._llm = mock_llm
 
-        result = await agent.generate(scenario="三路匹配", outputs={"data": "{}"})
-        assert "报告生成失败" in result
-        assert "LLM down" in result
+        with pytest.raises(ReportGenerationError) as exc_info:
+            await agent.generate(scenario="三路匹配", outputs={"data": "{}"})
+        assert exc_info.value.code == "REPORT_GEN_FAILED"
+        assert "LLM down" in exc_info.value.message
+        # 非瞬时错误不重试，调用次数应为 1
+        assert mock_llm.ainvoke.await_count == 1
 
     @pytest.mark.asyncio
     async def test_generate_response_without_content_attr(self, settings: Settings) -> None:
@@ -191,3 +196,61 @@ class TestReportAgentGenerate:
 
         result = await agent.generate(scenario="测试", outputs={"d": "{}"})
         assert "plain string response" in result
+
+    @pytest.mark.asyncio
+    async def test_transient_error_retries_then_succeeds(
+        self, settings: Settings, monkeypatch
+    ) -> None:
+        """瞬时连接错误前两次失败、第三次成功 → 返回报告、总共调 3 次。"""
+        import httpx
+
+        from modules.p2p.report_agent import ReportAgent
+
+        # 去掉指数退避等待，加快测试
+        import modules.p2p.report_agent as ra_module
+        from tenacity import wait_none
+
+        monkeypatch.setattr(ra_module, "wait_exponential", lambda **_: wait_none())
+
+        agent = ReportAgent(settings=settings)
+        ok_response = MagicMock()
+        ok_response.content = "# 成功报告"
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(side_effect=[
+            httpx.ConnectError("conn reset"),
+            httpx.ConnectError("conn reset"),
+            ok_response,
+        ])
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        result = await agent.generate(scenario="测试", outputs={"d": "{}"})
+        assert "成功报告" in result
+        assert mock_llm.ainvoke.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_transient_error_exhausts_raises_structured(
+        self, settings: Settings, monkeypatch
+    ) -> None:
+        """3 次都失败 → 抛 ReportGenerationError(code=LLM_CONNECTION_ERROR)。"""
+        import httpx
+
+        import modules.p2p.report_agent as ra_module
+        from modules.p2p.errors import ReportGenerationError
+        from modules.p2p.report_agent import ReportAgent
+        from tenacity import wait_none
+
+        monkeypatch.setattr(ra_module, "wait_exponential", lambda **_: wait_none())
+
+        agent = ReportAgent(settings=settings)
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(
+            side_effect=httpx.ConnectError("conn reset")
+        )
+        mock_llm.model_name = "test-model"
+        agent._llm = mock_llm
+
+        with pytest.raises(ReportGenerationError) as exc_info:
+            await agent.generate(scenario="测试", outputs={"d": "{}"})
+        assert exc_info.value.code == "LLM_CONNECTION_ERROR"
+        assert mock_llm.ainvoke.await_count == 3

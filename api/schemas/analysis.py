@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from core.time_utils import now_cn
+
 
 # ============================================================
 # 枚举类型
@@ -153,7 +155,7 @@ class AnomalyRecord(BaseModel):
     details: AnomalyDetail = Field(description="异常明细")
     description: str = Field(description="异常描述（中文）")
     recommended_action: str = Field(description="建议处理动作（中文）")
-    detected_at: datetime = Field(default_factory=datetime.utcnow, description="检测时间")
+    detected_at: datetime = Field(default_factory=now_cn, description="检测时间")
     ontology_evidence: str = Field(default="", description="本体规则依据")
 
 
@@ -219,7 +221,7 @@ class AnalysisResult(BaseModel):
     failed_tasks: list[str] = Field(default_factory=list, description="失败子任务")
 
     # 元信息
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="报告生成时间")
+    created_at: datetime = Field(default_factory=now_cn, description="报告生成时间")
     duration_ms: float = Field(default=0.0, description="分析耗时（毫秒）")
 
     # 会话持久化反馈（Section 5）

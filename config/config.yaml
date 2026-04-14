@@ -6,6 +6,7 @@ app:
   version: "0.1.0"
   debug: false
   language: "zh"  # 报告语言：zh=中文
+  timezone: "Asia/Shanghai"  # 业务时区：全链路(代码/DB/checkpointer)统一使用；改动需重启进程
 
 llm:
   provider: "qwen"          # 模型提供商：zhipu / openai / deepseek / qwen
@@ -94,9 +95,17 @@ agent_runtime:
 
 observability:
   max_io_text: 2000                   # trace 中 input/output 文本截断长度
+  max_error_text: 8192                # trace 中 error 字段（含异常链）最大字符数
   trace_queue_maxsize: 10000          # trace 异步写入队列上限
   trace_batch_size: 50                # 批量写入条数
   trace_flush_interval: 1.0           # 批量写入间隔（秒）
+
+async_analysis:
+  max_concurrent_tasks: 5             # 同进程并发分析任务上限，超出 queued 排队
+  result_cache_ttl_sec: 600           # 任务完成后内存中 result 快照保留时间
+  sweep_interval_sec: 60              # 清理过期 entry 的扫描周期
+  event_buffer_size: 200              # 每 trace_id 的 SSE 事件环形缓冲条数
+  sse_heartbeat_sec: 15               # SSE 心跳周期（秒），防代理 idle 超时
 
 p2p:
   three_way_match:

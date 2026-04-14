@@ -18,6 +18,7 @@ from api.schemas.analysis import (
     Severity,
 )
 from config.settings import P2PSettings
+from core.time_utils import now_cn
 from modules.p2p.rules._utils import AnomalyIdGenerator, safe_float
 
 # 规则 ID 常量（对应 core.ontology.reasoner.P2P_RULES）
@@ -349,6 +350,6 @@ class ThreeWayMatchChecker:
             details=detail,
             description=description,
             recommended_action=recommended_action,
-            detected_at=datetime.utcnow(),
+            detected_at=now_cn(),
             ontology_evidence=f"规则 {rule_id} 触发",
         )

@@ -15,6 +15,7 @@ import sqlalchemy as sa
 
 from core.memory.tables import memories_table, metadata_obj, reports_table
 from core.observability.middleware import record_memory_span
+from core.time_utils import now_cn
 
 _logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class _VectorStoreProxy:
                 return self._vs
             if self._factory is None:
                 return None
-            now = datetime.now(timezone.utc)
+            now = now_cn()
             if now < self._next_retry_at:
                 return None
             try:
@@ -418,7 +419,7 @@ class MemoryRepository:
         # L2: 内容指纹去重
         chash = _content_hash(content)
         if self._dedupe_window_seconds > 0 and chash:
-            window_start = datetime.now(timezone.utc) - timedelta(
+            window_start = now_cn() - timedelta(
                 seconds=self._dedupe_window_seconds
             )
             dup_stmt = (
@@ -483,7 +484,7 @@ class MemoryRepository:
             content=content,
             content_hash=chash or None,
             attrs=metadata,
-            created_at=datetime.now(timezone.utc),
+            created_at=now_cn(),
         )
 
         has_vector = self._vector_store.get() is not None
@@ -757,7 +758,7 @@ class ReportRepository:
                 result_json=result_json,
                 report_markdown=report_markdown,
                 anomaly_count=anomaly_count,
-                created_at=datetime.now(timezone.utc),
+                created_at=now_cn(),
             )
             with self._engine.connect() as conn:
                 conn.execute(stmt)

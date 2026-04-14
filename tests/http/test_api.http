@@ -2,7 +2,7 @@
 ### ERP Analysis Agent - HTTP 接口测试数据
 ### 使用方式：VS Code 安装 REST Client 插件后可直接点击 Send Request
 ### 启动服务：uvicorn api.main:app --reload
-### uvicorn api.main:app --workers 4
+### uvicorn api.main:app --workers 4 --port 8080
 ### ============================================================
 
 ### 变量定义

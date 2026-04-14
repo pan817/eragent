@@ -27,8 +27,21 @@ from core.database import (  # noqa: E402
     P2PRepository,
     get_session_factory,
     init_database,
+    install_sqlite_timezone_hook,
 )
 from core.database.engine import create_engine_from_dsn  # noqa: E402
+from core.time_utils import configure_timezone  # noqa: E402
+
+
+# 统一测试时区：SQLite 无原生时区概念，通过 hook 模拟北京时间。
+configure_timezone("Asia/Shanghai")
+
+
+@pytest.fixture(autouse=True)
+def _enforce_test_timezone():
+    """每个测试强制业务时区为 Asia/Shanghai,避免其他测试污染。"""
+    configure_timezone("Asia/Shanghai")
+    yield
 
 
 # ============================================================
@@ -74,6 +87,7 @@ def db_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    install_sqlite_timezone_hook(engine)
     init_database(engine, seed=0)
     yield engine
     engine.dispose()

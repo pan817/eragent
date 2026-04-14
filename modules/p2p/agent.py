@@ -28,6 +28,7 @@ from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
 from core.observability.middleware import estimate_tokens, record_span
+from core.time_utils import now_cn
 from modules.p2p.model_factory import build_chat_model
 from modules.p2p.prompts import build_system_prompt, format_long_term_memory
 
@@ -632,7 +633,7 @@ class P2PAgent:
                     report_markdown=content,
                     summary=summary,
                     duration_ms=round(elapsed_ms, 2),
-                    created_at=datetime.utcnow(),
+                    created_at=now_cn(),
                 )
 
             except Exception as e:
@@ -674,5 +675,5 @@ class P2PAgent:
                 retry_count=max_retries,
             ),
             duration_ms=round(elapsed_ms, 2),
-            created_at=datetime.utcnow(),
+            created_at=now_cn(),
         )

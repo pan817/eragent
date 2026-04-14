@@ -1,0 +1,92 @@
+### ============================================================
+### 异步分析接口手工烟囱脚本
+### 使用方式：VS Code 安装 REST Client 插件后点击 Send Request
+### 启动服务：uvicorn api.main:app --reload
+### ============================================================
+
+@host = http://127.0.0.1:8000
+@api = {{host}}/api/v1/ptp-agent
+
+
+### 0. 健康检查
+GET {{host}}/health
+
+
+### 1. 提交一个异步分析任务（三路匹配）
+### 成功后响应体中 trace_id / poll_url / stream_url 保存到下方变量里
+# @name submit
+POST {{api}}/analyze/async
+Content-Type: application/json
+
+{
+  "query": "过去30天有哪些三路匹配异常",
+  "user_id": "demo_user",
+  "auto_persist": true,
+  "output_mode": "detailed"
+}
+
+
+### 2. 用上一步的 trace_id 查询快照（可反复调用观察状态变化）
+@trace_id = {{submit.response.body.trace_id}}
+
+GET {{api}}/analyze/tasks/{{trace_id}}
+
+
+### 3. 订阅 SSE 事件流（REST Client 会以流式展示响应）
+GET {{api}}/analyze/tasks/{{trace_id}}/events
+Accept: text/event-stream
+
+
+### 4. 带 Last-Event-ID 的重连请求（从上次 seq=5 之后继续）
+GET {{api}}/analyze/tasks/{{trace_id}}/events
+Accept: text/event-stream
+Last-Event-ID: 5
+
+
+### ----- 重新生成场景 -----
+
+### 5. 先提交一次普通请求，记录 assistant_message_id
+# @name first
+POST {{api}}/analyze/async
+Content-Type: application/json
+
+{
+  "query": "最近30天价格差异异常",
+  "user_id": "demo_user",
+  "auto_persist": true
+}
+
+
+### 6. 用 regenerate_of 重跑上一次的 assistant 消息
+@assistant_id = {{first.response.body.assistant_message_id}}
+@session_id   = {{first.response.body.session_id}}
+
+POST {{api}}/analyze/async
+Content-Type: application/json
+
+{
+  "query": "最近30天价格差异异常",
+  "user_id": "demo_user",
+  "session_id": "{{session_id}}",
+  "regenerate_of": "{{assistant_id}}",
+  "auto_persist": true
+}
+
+
+### ----- 404 路径验证 -----
+
+### 7. 查询不存在的 trace（期望 404）
+GET {{api}}/analyze/tasks/not-a-real-trace-id
+
+
+### ----- 兼容：旧同步接口仍可用 -----
+
+### 8. 旧同步 /analyze（返回完整 AnalysisResult，耗时可能较长）
+POST {{api}}/analyze
+Content-Type: application/json
+
+{
+  "query": "过去30天有哪些三路匹配异常",
+  "user_id": "demo_user",
+  "auto_persist": false
+}

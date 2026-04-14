@@ -20,6 +20,7 @@ from typing import Any
 import structlog
 
 from core.ontology.loader import OntologyLoader, OWLREADY2_AVAILABLE
+from core.time_utils import now_cn
 
 logger = structlog.get_logger(__name__)
 
@@ -38,7 +39,7 @@ class RuleViolation:
     """业务单据类型"""
     details: dict[str, Any] = field(default_factory=dict)
     """违反细节，包含具体数值"""
-    detected_at: datetime = field(default_factory=datetime.utcnow)
+    detected_at: datetime = field(default_factory=now_cn)
     """检测时间"""
 
 

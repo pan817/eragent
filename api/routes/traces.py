@@ -19,6 +19,23 @@ def _store_or_503():
     return store
 
 
+def _error_summary(error: str | None) -> str | None:
+    """从完整 error（含 traceback 链）中抽出最具信息量的一行用于列表展示。
+
+    完整 traceback 由 `format_error_chain` 生成，首行通常是
+    ``Traceback (most recent call last):``，而最外层异常的
+    ``ExceptionType: message`` 位于末尾。取最后一条非空行即可。
+    列表接口只回摘要，详情接口仍返回完整内容。
+    """
+    if not error:
+        return error
+    for line in reversed(error.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
 @router.get("", response_model=list[RunOut])
 def list_traces(
     session_id: str | None = Query(default=None),
@@ -41,6 +58,7 @@ def list_traces(
     for r in runs:
         out = RunOut.model_validate(r)
         out.token_summary = summaries.get(r.trace_id)
+        out.error = _error_summary(out.error)
         result.append(out)
     return result
 

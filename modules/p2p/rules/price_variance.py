@@ -17,6 +17,7 @@ from api.schemas.analysis import (
     Severity,
 )
 from config.settings import P2PSettings
+from core.time_utils import now_cn
 from modules.p2p.rules._utils import AnomalyIdGenerator, safe_float
 
 
@@ -130,7 +131,7 @@ class PriceVarianceAnalyzer:
                         "确认是否按合同或框架协议价格下单，"
                         "必要时联系采购部门审批价格变更"
                     ),
-                    detected_at=datetime.utcnow(),
+                    detected_at=now_cn(),
                     ontology_evidence=f"规则 {_RULE_PRICE_VARIANCE} 触发",
                 )
             )

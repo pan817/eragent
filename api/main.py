@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.analyze import router as analyze_router
+from api.routes.analyze_async import router as analyze_async_router
 from api.routes.sessions import router as sessions_router
 from api.routes.traces import router as traces_router
 from config.settings import get_settings
@@ -26,6 +27,12 @@ from core.database import (
 )
 from core.chat import ChatRepository, init_chat_repository
 from core.observability import init_trace_store, shutdown_trace_store
+from core.tasks import (
+    init_event_bus,
+    init_task_registry,
+    shutdown_event_bus,
+    shutdown_task_registry,
+)
 from modules.p2p.tools import set_repository
 
 
@@ -57,7 +64,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_chat_repository(chat_repo)
     from api.routes.sessions import init_chat_repo
     init_chat_repo(chat_repo)
+
+    # 初始化异步分析基础设施：EventBus + TaskRegistry
+    async_cfg = settings.async_analysis
+    bus = init_event_bus(buffer_size=async_cfg.event_buffer_size)
+    registry = init_task_registry(
+        event_bus=bus,
+        session_factory=session_factory,
+        max_concurrent_tasks=async_cfg.max_concurrent_tasks,
+        result_cache_ttl_sec=async_cfg.result_cache_ttl_sec,
+        sweep_interval_sec=async_cfg.sweep_interval_sec,
+    )
+    # 跨进程残留收敛：把上次进程中残留的 running / pending 标记为 aborted / error
+    registry.recover_on_startup()
+    registry.start_background()
     yield
+    await registry.shutdown()
+    shutdown_task_registry()
+    shutdown_event_bus()
     shutdown_trace_store()
     engine.dispose()
 
@@ -89,6 +113,7 @@ def create_app() -> FastAPI:
 
     # 挂载 API v1 路由
     app.include_router(analyze_router, prefix="/api/v1/ptp-agent")
+    app.include_router(analyze_async_router, prefix="/api/v1/ptp-agent")
     app.include_router(sessions_router, prefix="/api/v1/ptp-agent")
     app.include_router(traces_router, prefix="/api/v1/ptp-agent")
 

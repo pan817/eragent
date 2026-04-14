@@ -133,6 +133,11 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **纯分析只读**：当前版本不执行 ERP 写操作，写操作接口预留。
 - **记忆隔离**：长期记忆按 `user_id` 隔离，短期记忆按 `session_id` 隔离。
 - **模型工厂**：`modules/p2p/model_factory.py` 集中创建 LLM 客户端，便于切换模型 / 测试 mock。
+- **时区约定**：全链路统一使用业务时区（默认 `Asia/Shanghai`），由 `app.timezone` / `APP_TIMEZONE` 配置。
+  - Python 侧**禁止**直接调用 `datetime.utcnow()` 或 `datetime.now(timezone.utc)`，必须经 `core.time_utils.now_cn()` 产生时间戳；写表时也不要依赖 `server_default=func.now()` 作为唯一来源。
+  - PostgreSQL 引擎（SQLAlchemy + LangGraph PostgresSaver）通过 `connect_args.options` / conninfo `?options=...` 注入 `-c TimeZone=<tz>`，让 `now()` / `CURRENT_TIMESTAMP` / TIMESTAMPTZ 展示值全部走业务时区。
+  - trace 表 (`trace_runs` / `trace_spans`) 已升级为 `TIMESTAMPTZ`（迁移 `0008_timezone_normalization`）。
+  - SQLite 测试环境由 `tests/conftest.py` 调用 `configure_timezone` + `install_sqlite_timezone_hook` 模拟北京时间。
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`

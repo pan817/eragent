@@ -823,9 +823,9 @@ def test_model_span_error_type_on_exception(store):
 
 def test_format_tree():
     from core.observability.console import format_tree
-    from datetime import datetime
+    from core.time_utils import now_cn
 
-    now = datetime.utcnow()
+    now = now_cn()
     spans = [
         SpanEvent(
             trace_id="t1", span_id="root", parent_span_id=None,
@@ -857,9 +857,9 @@ def test_format_tree():
 
 def test_format_summary():
     from core.observability.console import format_summary
-    from datetime import datetime
+    from core.time_utils import now_cn
 
-    now = datetime.utcnow()
+    now = now_cn()
     spans = [
         SpanEvent(
             trace_id="t1", span_id="s1", parent_span_id=None,
@@ -878,3 +878,118 @@ def test_format_summary():
     assert "model=1" in result
     assert "tool=1" in result
     assert "memory=0" in result
+
+
+# ============================================================
+# format_error_chain：完整异常链 + 8KB 上限截断
+# ============================================================
+
+
+def test_format_error_chain_captures_cause():
+    """wrapped exception 的 __cause__ 根因必须出现在 error 文本中，
+    不应像旧实现那样只保留最外层 str(exc)。"""
+    from core.observability.middleware import format_error_chain
+
+    try:
+        try:
+            raise ValueError("root_cause_marker")
+        except ValueError as inner:
+            raise RuntimeError("outer_wrapper_marker") from inner
+    except RuntimeError as exc:
+        text = format_error_chain(exc)
+
+    assert "root_cause_marker" in text
+    assert "outer_wrapper_marker" in text
+    # format_exception(chain=True) 会在两段 traceback 之间插入衔接句
+    assert "direct cause" in text or "another exception" in text
+
+
+def test_format_error_chain_preserves_full_stack():
+    """栈深 > 3 的场景，完整栈都应保留，不被 limit=3 截断。"""
+    from core.observability.middleware import format_error_chain
+
+    def level_a():
+        level_b()
+
+    def level_b():
+        level_c()
+
+    def level_c():
+        level_d()
+
+    def level_d():
+        raise RuntimeError("deep_error")
+
+    try:
+        level_a()
+    except RuntimeError as exc:
+        text = format_error_chain(exc)
+
+    # 4 层业务栈，应当都在栈里
+    for fname in ("level_a", "level_b", "level_c", "level_d"):
+        assert fname in text, f"frame {fname} missing from traceback"
+
+
+def test_format_error_chain_head_tail_truncation():
+    """超过 max_len 时采用头尾截断，保留链顶根因 + 链尾外层异常 + 标记。"""
+    from core.observability.middleware import format_error_chain
+
+    # ROOT 异常消息填大量字符，让完整异常链远超 max_len 触发头尾截断；
+    # OUTER 消息保持简短，模拟真实 LLM 错误链（深栈 + 短外层消息）。
+    bulky_root_msg = "ROOT_MARKER_" + ("z" * 8000)
+    try:
+        try:
+            raise ValueError(bulky_root_msg)
+        except ValueError as inner:
+            raise RuntimeError("OUTER_MARKER_short") from inner
+    except RuntimeError as exc:
+        full = format_error_chain(exc, max_len=100_000)
+        text = format_error_chain(exc, max_len=2000)
+
+    assert len(full) > 2000, "test precondition: full text must exceed cap"
+    assert len(text) <= 2000
+    assert "truncated" in text and "full length=" in text
+    # 头段覆盖 ROOT 异常类型与 marker 前缀（ValueError: ROOT_MARKER_...）
+    assert "ROOT_MARKER_" in text
+    # 尾段覆盖 OUTER 异常完整行（RuntimeError: OUTER_MARKER_short）
+    assert "OUTER_MARKER_short" in text
+
+
+def test_format_error_chain_no_truncation_when_short():
+    """短异常不应被截断，也不带 marker。"""
+    from core.observability.middleware import format_error_chain
+
+    try:
+        raise ValueError("short")
+    except ValueError as exc:
+        text = format_error_chain(exc, max_len=8192)
+
+    assert "truncated" not in text
+    assert text.rstrip().endswith("ValueError: short")
+
+
+def test_middleware_tool_error_includes_full_chain(store):
+    """TimingMiddleware 通过 format_error_chain 捕获的 tool 异常应包含异常链。"""
+    mw = TimingMiddleware(agent_name="err_agent", store=store, print_console=False)
+    mw.start_run()
+
+    def bad_handler(req):
+        try:
+            raise ValueError("db_root_cause")
+        except ValueError as inner:
+            raise RuntimeError("tool_wrapper") from inner
+
+    with pytest.raises(RuntimeError):
+        mw.wrap_tool_call(_FakeToolCallRequest("bad_tool", {}), bad_handler)
+
+    mw.finish_run(status="error")
+
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+    _, spans = store.get_run(store.list_runs(limit=1)[0].trace_id)
+    tool_span = next(s for s in spans if s.span_type == "tool")
+    assert tool_span.status == "error"
+    err = tool_span.error or ""
+    # 根因与外层异常都要在 error 字段中
+    assert "db_root_cause" in err
+    assert "RuntimeError" in err
+    assert "tool_wrapper" in err

@@ -170,10 +170,21 @@ class PostgreSQLSettings(BaseSettings):
 
     @property
     def conninfo(self) -> str:
-        """psycopg3 / langgraph PostgresSaver 使用的纯 libpq 连接串。"""
+        """psycopg3 / langgraph PostgresSaver 使用的纯 libpq 连接串。
+
+        通过 ``options`` 查询参数注入 ``TimeZone`` 设置，让 LangGraph
+        checkpointer 所持有的连接也跟随业务时区。时区取 :mod:`core.time_utils`
+        当前配置（由 :func:`config.settings.get_settings` 启动时写入）。
+        """
+        from urllib.parse import quote
+
+        from core.time_utils import get_timezone_name
+
+        options = quote(f"-c TimeZone={get_timezone_name()}", safe="")
         return (
             f"postgresql://{self.username}:{self.password}"
             f"@{self.host}:{self.port}/{self.database}"
+            f"?options={options}"
         )
 
 
@@ -224,11 +235,27 @@ class ObservabilitySettings(BaseSettings):
     """可观测性配置。"""
 
     max_io_text: int = 2000
+    # trace 中 error 字段（含完整异常链 traceback）的最大字符数。
+    # 超长时保留头 60% + 尾 40%，中间以 marker 标记被截断的字节数，
+    # 兼顾根因（链顶）与最外层异常（链尾）的可读性。
+    max_error_text: int = 8192
     trace_queue_maxsize: int = 10000
     trace_batch_size: int = 50
     trace_flush_interval: float = 1.0
 
     model_config = {"env_prefix": "OBS_"}
+
+
+class AsyncAnalysisSettings(BaseSettings):
+    """异步分析接口（/analyze/async）配置。"""
+
+    max_concurrent_tasks: int = 5
+    result_cache_ttl_sec: int = 600
+    sweep_interval_sec: int = 60
+    event_buffer_size: int = 200
+    sse_heartbeat_sec: int = 15
+
+    model_config = {"env_prefix": "ASYNC_ANALYSIS_"}
 
 
 class ThreeWayMatchSettings(BaseSettings):
@@ -346,6 +373,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
     language: str = "zh"
+    timezone: str = "Asia/Shanghai"
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
@@ -355,6 +383,7 @@ class Settings(BaseSettings):
     analysis: AnalysisSettings = Field(default_factory=AnalysisSettings)
     agent_runtime: AgentRuntimeSettings = Field(default_factory=AgentRuntimeSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    async_analysis: AsyncAnalysisSettings = Field(default_factory=AsyncAnalysisSettings)
     p2p: P2PSettings = Field(default_factory=P2PSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -387,6 +416,7 @@ class Settings(BaseSettings):
             "app_version": app_data.get("version", "0.1.0"),
             "debug": app_data.get("debug", False),
             "language": app_data.get("language", "zh"),
+            "timezone": app_data.get("timezone", "Asia/Shanghai"),
             **raw,
         }
 
@@ -473,4 +503,9 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """获取全局配置单例（带缓存）。"""
-    return Settings.from_yaml()
+    settings = Settings.from_yaml()
+    # 将业务时区同步到 core.time_utils，保证 now_cn() 使用的时区与配置一致。
+    from core.time_utils import configure_timezone
+
+    configure_timezone(settings.timezone)
+    return settings

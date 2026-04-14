@@ -28,9 +28,18 @@ from api.schemas.analysis import (
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
+from core.observability.middleware import publish_stage as _publish_stage
 from core.orchestrator.router import IntentRouter
 
 _logger = get_logger(__name__)
+
+
+def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
+    """orchestrator 内用的 stage 事件发布器：失败吞掉，不影响分析主流程。"""
+    try:
+        _publish_stage(name, attrs)
+    except Exception:  # noqa: BLE001
+        _logger.debug("publish_stage failed", exc_info=True)
 
 # 输出模式 → prompt 后缀
 _OUTPUT_MODE_PROMPTS: dict[str, str] = {
@@ -655,7 +664,12 @@ class Orchestrator:
 
     # ── 核心编排 ─────────────────────────────────────────────────────
 
-    async def analyze(self, request: AnalysisRequest) -> AnalysisResult:
+    async def analyze(
+        self,
+        request: AnalysisRequest,
+        *,
+        trace_id: str | None = None,
+    ) -> AnalysisResult:
         """执行分析请求的完整编排流程。
 
         路由策略：
@@ -672,9 +686,9 @@ class Orchestrator:
 
         timing_middleware = self._timing_middleware
         trace_id = timing_middleware.start_run(
-            session_id=session_id, user_id=request.user_id
+            session_id=session_id, user_id=request.user_id, trace_id=trace_id
         )
-        trace_status: str = "ok"
+        trace_status: str = "success"
         trace_error: str | None = None
 
         timeout = self._settings.analysis.response_timeout_seconds
@@ -720,8 +734,10 @@ class Orchestrator:
                 duration_ms=duration_ms,
             )
         except Exception as exc:
+            from core.observability.middleware import format_error_chain
+
             trace_status = "error"
-            trace_error = f"{type(exc).__name__}: {exc}"
+            trace_error = format_error_chain(exc)
             duration_ms = (time.monotonic() - start_time) * 1000.0
             return AnalysisResult(
                 report_id=report_id,
@@ -787,6 +803,15 @@ class Orchestrator:
                 enhanced_query, analyst_role=request.analyst_role
             )
             analysis_type: AnalysisType = request.analysis_type or self._intent_router.resolve_type(signal)
+            # SSE 阶段事件：意图已解析
+            _publish_stage_safe(
+                "intent_resolved",
+                {
+                    "analysis_type": analysis_type.value,
+                    "route_level": signal.route_level,
+                    "confidence": signal.confidence,
+                },
+            )
 
             # 3. 合并参数
             parsed_params = signal.entities.copy()
@@ -836,6 +861,10 @@ class Orchestrator:
             output_mode_prompt = _OUTPUT_MODE_PROMPTS.get(request.output_mode, "")
 
             if use_dag:
+                _publish_stage_safe(
+                    "dag_planned",
+                    {"analysis_type": analysis_type.value},
+                )
                 result = await self._execute_dag(
                     analysis_type=analysis_type,
                     params=parsed_params,
@@ -850,6 +879,10 @@ class Orchestrator:
                     output_mode_prompt=output_mode_prompt,
                 )
             else:
+                _publish_stage_safe(
+                    "react_started",
+                    {"analysis_type": analysis_type.value},
+                )
                 result = await self._execute_react(
                     analysis_type=analysis_type,
                     params=parsed_params,
@@ -978,6 +1011,23 @@ class Orchestrator:
             f"{tid}: {err}" for tid, err in dag_result.get("failed_tasks", {}).items()
         ]
 
+        # 报告生成失败是致命错误：没有 markdown 报告的分析结果对用户无意义
+        # 即便其他工具成功（status=warning），也升级为 FAILED
+        error_info: ErrorInfo | None = None
+        report_err = dag_result.get("report_error")
+        if report_err:
+            status = AnalysisStatus.FAILED
+            error_info = ErrorInfo(
+                code=report_err["code"],
+                message=report_err["message"],
+            )
+        elif status == AnalysisStatus.FAILED and failed_list:
+            # 全部工具失败（无 report_error 但 dag_status=error）
+            error_info = ErrorInfo(
+                code="DAG_EXECUTION_FAILED",
+                message="; ".join(failed_list[:3]),
+            )
+
         return AnalysisResult(
             report_id=report_id,
             trace_id=trace_id,
@@ -990,6 +1040,7 @@ class Orchestrator:
             report_markdown=dag_result.get("report", ""),
             completed_tasks=dag_result.get("completed_tasks", []),
             failed_tasks=failed_list,
+            error=error_info,
             summary={
                 "route_type": "DAG",
                 "route_level": signal.route_level,

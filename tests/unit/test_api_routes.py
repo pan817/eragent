@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-NOW = datetime.now(tz=timezone.utc)
+from core.time_utils import now_cn
+
+NOW = now_cn()
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,35 @@ class TestTracesRouter:
         assert resp.status_code == 200
         data = resp.json()
         assert data[0]["token_summary"]["total_prompt_tokens"] == 5000
+
+    def test_list_traces_returns_error_summary_only(self, traces_client):
+        """列表接口的 error 字段应只保留最后一条非空行（最外层异常摘要），
+        避免把完整 traceback 返给客户端浪费带宽。"""
+        run = _fake_run()
+        run.error = (
+            "Traceback (most recent call last):\n"
+            '  File "a.py", line 1, in foo\n'
+            "    bar()\n"
+            "ValueError: root_cause\n"
+            "\n"
+            "The above exception was the direct cause of the following exception:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            '  File "b.py", line 2, in baz\n'
+            "    qux()\n"
+            "RuntimeError: outer_wrapper"
+        )
+        mock_store = MagicMock()
+        mock_store.list_runs.return_value = [run]
+        mock_store.batch_get_token_summaries.return_value = {}
+        with patch("api.routes.traces.get_trace_store", return_value=mock_store):
+            resp = traces_client.get("/traces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["error"] == "RuntimeError: outer_wrapper"
+        # 不应包含完整 traceback 其它行
+        assert "Traceback" not in data[0]["error"]
+        assert "root_cause" not in data[0]["error"]
 
     def test_list_traces_with_filters(self, traces_client):
         mock_store = MagicMock()

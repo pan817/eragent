@@ -34,10 +34,13 @@ def client() -> TestClient:
         patch("api.main.create_tables"),
         patch("api.main.get_session_factory", return_value=session_factory),
     ):
+        from config.settings import AsyncAnalysisSettings
+
         mock_cfg = MagicMock()
         mock_cfg.app_name = "ERP Agent Test"
         mock_cfg.app_version = "0.1.0-test"
         mock_cfg.postgresql = MagicMock()
+        mock_cfg.async_analysis = AsyncAnalysisSettings()
         mock_settings.return_value = mock_cfg
 
         from api.main import app

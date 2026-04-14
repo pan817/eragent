@@ -16,6 +16,7 @@ from typing import Any
 from core.logging_utils import get_logger
 from core.observability.middleware import record_span, _truncate_text
 from core.orchestrator.dag.registry import ToolRegistry
+from modules.p2p.errors import ReportGenerationError
 
 _logger = get_logger(__name__)
 
@@ -53,6 +54,8 @@ class DAGExecutor:
         outputs: dict[str, str] = {}
         completed: list[str] = []
         failed: dict[str, str] = {}
+        # 若报告任务失败，把 (code, message) 记录下来供 orchestrator 构造 ErrorInfo
+        report_error: dict[str, str] | None = None
 
         # 用 Event 跟踪每个任务完成状态
         events: dict[str, asyncio.Event] = {
@@ -60,6 +63,7 @@ class DAGExecutor:
         }
 
         async def run_task(task: dict[str, Any]) -> None:
+            nonlocal report_error
             task_id = task["task_id"]
             tool_name = task.get("tool_name", "")
             timeout_sec = task.get("timeout_sec", 780)
@@ -97,9 +101,32 @@ class DAGExecutor:
                             completed.append(task_id)
                             span_attrs["status"] = "ok"
                             span_attrs["output_length"] = len(report_text)
-                        except Exception as exc:
-                            failed[task_id] = str(exc)
+                        except ReportGenerationError as exc:
+                            # 结构化错误：保留 code + message 供上层构造 ErrorInfo
+                            failed[task_id] = f"[{exc.code}] {exc.message}"
+                            report_error = {"code": exc.code, "message": exc.message}
                             span_attrs["status"] = "error"
+                            span_attrs["error_code"] = exc.code
+                            span_attrs["error"] = exc.message
+                        except asyncio.TimeoutError:
+                            failed[task_id] = (
+                                f"报告生成超时（{timeout_sec}s）"
+                            )
+                            report_error = {
+                                "code": "REPORT_TIMEOUT",
+                                "message": f"报告生成超时（{timeout_sec}s）",
+                            }
+                            span_attrs["status"] = "error"
+                            span_attrs["error_code"] = "REPORT_TIMEOUT"
+                            span_attrs["timeout_sec"] = timeout_sec
+                        except Exception as exc:  # noqa: BLE001
+                            failed[task_id] = str(exc)
+                            report_error = {
+                                "code": "REPORT_GEN_FAILED",
+                                "message": str(exc),
+                            }
+                            span_attrs["status"] = "error"
+                            span_attrs["error_code"] = "REPORT_GEN_FAILED"
                             span_attrs["error"] = str(exc)
                     else:
                         completed.append(task_id)
@@ -184,4 +211,5 @@ class DAGExecutor:
             "failed_tasks": failed,
             "report": outputs.get("report", ""),
             "duration_sec": round(duration, 2),
+            "report_error": report_error,
         }

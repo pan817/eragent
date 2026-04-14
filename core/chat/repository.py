@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from core.chat.tables import chat_messages_table, chat_sessions_table
 from core.logging_utils import get_logger
+from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
 
@@ -29,7 +30,7 @@ _PREVIEW_LENGTH = 60
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return now_cn()
 
 
 def _new_id() -> str:

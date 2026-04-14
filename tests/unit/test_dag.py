@@ -402,6 +402,79 @@ class TestDAGExecutor:
         mock_report.generate.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_report_generation_failure_recorded(self) -> None:
+        """ReportGenerationError 抛出时 DAG 应把 code/message 记录到 report_error。"""
+        from modules.p2p.errors import ReportGenerationError
+
+        reg = ToolRegistry()
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value='{"data": 1}')
+        reg.register("query_purchase_orders", mock_tool)
+
+        mock_report = MagicMock()
+        mock_report.generate = AsyncMock(side_effect=ReportGenerationError(
+            "LLM_CONNECTION_ERROR", "dashscope 无法访问",
+        ))
+        executor = DAGExecutor(registry=reg, report_agent=mock_report)
+        result = await executor.execute([
+            {"task_id": "t1", "tool_name": "query_purchase_orders", "depends_on": [],
+             "inputs": {}, "output_key": "po_data", "timeout_sec": 10},
+            {"task_id": "t2", "tool_name": "generate_summary_report", "depends_on": ["t1"],
+             "inputs": {"scenario": "测试"}, "output_key": "report", "timeout_sec": 10},
+        ])
+        # 工具成功 + 报告失败 → 整体 warning（有 completed 也有 failed）
+        assert result["status"] == "warning"
+        assert "t2" in result["failed_tasks"]
+        assert result["report_error"] == {
+            "code": "LLM_CONNECTION_ERROR",
+            "message": "dashscope 无法访问",
+        }
+
+    @pytest.mark.asyncio
+    async def test_report_timeout_recorded(self) -> None:
+        """report 超时应记录 REPORT_TIMEOUT code。"""
+        reg = ToolRegistry()
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value='{}')
+        reg.register("query_purchase_orders", mock_tool)
+
+        async def slow_report(*args, **kwargs):
+            import asyncio
+            await asyncio.sleep(5)
+            return "# report"
+
+        mock_report = MagicMock()
+        mock_report.generate = slow_report
+        executor = DAGExecutor(registry=reg, report_agent=mock_report)
+        result = await executor.execute([
+            {"task_id": "t1", "tool_name": "query_purchase_orders", "depends_on": [],
+             "inputs": {}, "output_key": "po", "timeout_sec": 5},
+            {"task_id": "t2", "tool_name": "generate_summary_report", "depends_on": ["t1"],
+             "inputs": {"scenario": "x"}, "output_key": "report", "timeout_sec": 0.1},
+        ])
+        assert result["report_error"]["code"] == "REPORT_TIMEOUT"
+
+    @pytest.mark.asyncio
+    async def test_report_generic_exception_recorded(self) -> None:
+        """ReportAgent 抛非 ReportGenerationError 时应记录 REPORT_GEN_FAILED code。"""
+        reg = ToolRegistry()
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke = AsyncMock(return_value='{}')
+        reg.register("query_purchase_orders", mock_tool)
+
+        mock_report = MagicMock()
+        mock_report.generate = AsyncMock(side_effect=RuntimeError("boom"))
+        executor = DAGExecutor(registry=reg, report_agent=mock_report)
+        result = await executor.execute([
+            {"task_id": "t1", "tool_name": "query_purchase_orders", "depends_on": [],
+             "inputs": {}, "output_key": "po", "timeout_sec": 10},
+            {"task_id": "t2", "tool_name": "generate_summary_report", "depends_on": ["t1"],
+             "inputs": {"scenario": "x"}, "output_key": "report", "timeout_sec": 10},
+        ])
+        assert result["report_error"]["code"] == "REPORT_GEN_FAILED"
+        assert "boom" in result["report_error"]["message"]
+
+    @pytest.mark.asyncio
     async def test_missing_tool(self) -> None:
         """未注册的工具应记录到 failed_tasks。"""
         reg = ToolRegistry()

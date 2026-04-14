@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
 from api.schemas.trace import IoSpanOut, RunDetailOut, RunOut, SpanOut, StatRow
+from core.time_utils import now_cn
 
 
-NOW = datetime.now(tz=timezone.utc)
+NOW = now_cn()
 
 
 class TestSpanOut:

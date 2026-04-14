@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from core.logging_utils import get_logger
 from core.observability.tables import TraceRun, TraceSpan
+from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
 
@@ -210,7 +211,7 @@ class TraceStore:
                         session_id=ev.session_id,
                         user_id=ev.user_id,
                         status="running",
-                        started_at=ev.started_at or datetime.utcnow(),
+                        started_at=ev.started_at or now_cn(),
                     )
                 )
             else:  # run_end
@@ -221,7 +222,7 @@ class TraceStore:
                         agent_name=ev.agent_name,
                         session_id=ev.session_id,
                         user_id=ev.user_id,
-                        started_at=ev.started_at or ev.finished_at or datetime.utcnow(),
+                        started_at=ev.started_at or ev.finished_at or now_cn(),
                     )
                     session.add(run)
                 run.status = ev.status

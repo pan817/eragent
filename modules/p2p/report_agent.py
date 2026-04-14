@@ -9,10 +9,28 @@ from __future__ import annotations
 
 from typing import Any
 
+from tenacity import (
+    AsyncRetrying,
+    RetryError,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
+from modules.p2p.errors import (
+    TRANSIENT_ERROR_CODES,
+    ReportGenerationError,
+    classify_llm_exception,
+)
 
 _logger = get_logger(__name__)
+
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """仅对瞬时网络类错误重试；业务错误 / 鉴权错误直接失败。"""
+    return classify_llm_exception(exc) in TRANSIENT_ERROR_CODES
 
 _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以下分析工具的输出，生成一份结构化的 Markdown 分析报告。
 
@@ -87,29 +105,63 @@ class ReportAgent:
             span_attrs["input_keys"] = [k for k in outputs if k != "report"]
             span_attrs["prompt_length"] = len(prompt)
 
+            llm = self._ensure_llm()
+
+            # 显式记录 model span（ReportAgent 不经过 LangChain 中间件）
+            from core.observability.middleware import estimate_tokens
+
+            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
+
             try:
-                llm = self._ensure_llm()
-
-                # 显式记录 model span（ReportAgent 不经过 LangChain 中间件）
-                from core.observability.middleware import estimate_tokens
-
-                model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
-                with record_span("model", str(model_name)) as model_attrs:
-                    model_attrs["model"] = str(model_name)
-                    model_attrs["input"] = prompt[:2000]
-                    model_attrs["estimated_input_tokens"] = estimate_tokens(prompt)
-                    response = await llm.ainvoke(prompt)
-                    content: str = response.content if hasattr(response, "content") else str(response)
-                    model_attrs["output"] = content[:2000]
-                    usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", None)
-                    if usage:
-                        model_attrs["usage"] = usage if isinstance(usage, dict) else str(usage)
-
-                span_attrs["output_length"] = len(content)
-                span_attrs["status"] = "ok"
-                return content
-            except Exception as exc:
-                _logger.warning("report generation failed: %s", exc)
+                async for attempt in AsyncRetrying(
+                    stop=stop_after_attempt(3),
+                    wait=wait_exponential(multiplier=1, min=1, max=4),
+                    retry=retry_if_exception(_is_transient_llm_error),
+                    reraise=True,
+                ):
+                    with attempt:
+                        with record_span("model", str(model_name)) as model_attrs:
+                            model_attrs["model"] = str(model_name)
+                            model_attrs["input"] = prompt[:2000]
+                            model_attrs["estimated_input_tokens"] = estimate_tokens(prompt)
+                            if attempt.retry_state.attempt_number > 1:
+                                model_attrs["retry_attempt"] = attempt.retry_state.attempt_number
+                            response = await llm.ainvoke(prompt)
+                            content: str = (
+                                response.content
+                                if hasattr(response, "content")
+                                else str(response)
+                            )
+                            model_attrs["output"] = content[:2000]
+                            usage = getattr(response, "usage_metadata", None) or getattr(
+                                response, "response_metadata", None
+                            )
+                            if usage:
+                                model_attrs["usage"] = (
+                                    usage if isinstance(usage, dict) else str(usage)
+                                )
+            except RetryError as retry_err:
+                # tenacity 仅在非 reraise 模式下抛 RetryError；这里 reraise=True
+                # 进不到这条分支，留作兜底
+                inner = retry_err.last_attempt.exception() or retry_err
+                code = classify_llm_exception(inner)
                 span_attrs["status"] = "error"
+                span_attrs["error_code"] = code
+                span_attrs["error"] = str(inner)
+                _logger.warning(
+                    "report generation exhausted retries: code=%s exc=%s", code, inner
+                )
+                raise ReportGenerationError(code, str(inner)) from inner
+            except Exception as exc:
+                code = classify_llm_exception(exc)
+                span_attrs["status"] = "error"
+                span_attrs["error_code"] = code
                 span_attrs["error"] = str(exc)
-                return f"# {scenario}\n\n> 报告生成失败：{exc}\n\n## 原始数据\n\n{outputs_text}"
+                _logger.warning(
+                    "report generation failed: code=%s exc=%s", code, exc
+                )
+                raise ReportGenerationError(code, str(exc)) from exc
+
+            span_attrs["output_length"] = len(content)
+            span_attrs["status"] = "ok"
+            return content
