@@ -993,3 +993,164 @@ def test_middleware_tool_error_includes_full_chain(store):
     assert "db_root_cause" in err
     assert "RuntimeError" in err
     assert "tool_wrapper" in err
+
+
+# ---------------------------------------------------------------------------
+# flush_now_sync 同步屏障（修复 SSE done / 快照 running 的 race）
+# ---------------------------------------------------------------------------
+
+
+import threading  # noqa: E402
+
+from core.time_utils import now_cn  # noqa: E402
+
+
+def _make_run_end(trace_id: str, *, status: str = "success") -> RunEvent:
+    now = now_cn()
+    return RunEvent(
+        kind="run_end",
+        trace_id=trace_id,
+        agent_name="p2p",
+        session_id="s1",
+        user_id="u1",
+        started_at=now,
+        finished_at=now,
+        duration_ms=1.0,
+        status=status,
+    )
+
+
+def test_flush_now_sync_returns_true_after_run_end_flushed(store: TraceStore) -> None:
+    """正常路径：enqueue run_end → flush_now_sync 在 worker 线程 commit 后立即返回 True。"""
+    trace_id = "trace-a"
+    # 先写 run_start（否则 run_end 是对不存在行的 UPDATE，apply 里会走 INSERT 分支也行）
+    store.enqueue(RunEvent(
+        kind="run_start",
+        trace_id=trace_id,
+        agent_name="p2p",
+        session_id="s1",
+        user_id="u1",
+        started_at=now_cn(),
+    ))
+    store.enqueue(_make_run_end(trace_id, status="success"))
+
+    ok = store.flush_now_sync(trace_id, timeout=3.0)
+    assert ok is True
+
+    # 屏障返回后 DB 应当已终态
+    run = store.list_runs(limit=1)[0]
+    assert run.trace_id == trace_id
+    assert run.status == "success"
+    assert run.finished_at is not None
+
+
+def test_flush_now_sync_fast_path_when_flush_preceeds_wait(
+    store: TraceStore,
+) -> None:
+    """flush 先于 wait：调用 flush_now_sync 时 _run_end_flushed 里已经记下，
+    不用注册 waiter，立即返回 True。"""
+    trace_id = "trace-fast"
+    store.enqueue(RunEvent(
+        kind="run_start",
+        trace_id=trace_id,
+        agent_name="p2p",
+        session_id="s1",
+        user_id="u1",
+        started_at=now_cn(),
+    ))
+    store.enqueue(_make_run_end(trace_id))
+
+    # 给后台线程充分时间完成 flush + signal
+    _wait_flush(store, lambda: len(store.list_runs(limit=10)) == 1)
+
+    # 现在才来等 —— 应走快路径
+    t0 = time.monotonic()
+    ok = store.flush_now_sync(trace_id, timeout=3.0)
+    assert ok is True
+    # 快路径必须是几乎零等待（给 10ms 余量）
+    assert time.monotonic() - t0 < 0.1
+
+
+def test_flush_now_sync_times_out_when_no_run_end(store: TraceStore) -> None:
+    """run_end 从未入队：flush_now_sync 必须按 timeout 超时返回 False，
+    而不是永远阻塞把 registry finally 吊死。"""
+    t0 = time.monotonic()
+    ok = store.flush_now_sync("never-enqueued", timeout=0.3)
+    elapsed = time.monotonic() - t0
+    assert ok is False
+    assert 0.25 < elapsed < 1.0
+
+
+def test_flush_now_sync_concurrent_waiters_independent(store: TraceStore) -> None:
+    """不同 trace_id 的 wait 相互独立，不会因为一个 trace 先 flush 把另一个也唤醒。"""
+    trace_a, trace_b = "trace-ind-a", "trace-ind-b"
+    for tid in (trace_a, trace_b):
+        store.enqueue(RunEvent(
+            kind="run_start",
+            trace_id=tid,
+            agent_name="p2p",
+            session_id="s1",
+            user_id="u1",
+            started_at=now_cn(),
+        ))
+    # 只给 trace_a 入 run_end
+    store.enqueue(_make_run_end(trace_a))
+
+    result_a: list[bool] = []
+    result_b: list[bool] = []
+
+    def wait_a() -> None:
+        result_a.append(store.flush_now_sync(trace_a, timeout=2.0))
+
+    def wait_b() -> None:
+        result_b.append(store.flush_now_sync(trace_b, timeout=0.3))
+
+    ta = threading.Thread(target=wait_a)
+    tb = threading.Thread(target=wait_b)
+    ta.start()
+    tb.start()
+    ta.join(timeout=3.0)
+    tb.join(timeout=3.0)
+
+    assert result_a == [True], "trace_a 有 run_end 必须被唤醒"
+    assert result_b == [False], "trace_b 无 run_end 必须 timeout，不被 a 顺带唤醒"
+
+
+def test_flush_now_sync_signals_even_if_commit_fails(tmp_path) -> None:
+    """flush 内部 commit 异常也要唤醒 waiter，避免调用方永远挂在 wait 上。"""
+    dsn = f"sqlite:///{tmp_path / 'trace_err.db'}"
+    engine = create_engine_from_dsn(dsn)
+    Base.metadata.create_all(engine)
+    sf = get_session_factory(engine)
+
+    store = TraceStore(sf, batch_size=1, flush_interval=0.05)
+    store.start()
+    try:
+        # 手工把 _apply 打坏，让 _flush 的 session.commit 抛异常
+        original_apply = store._apply  # noqa: SLF001
+
+        def broken_apply(session, ev):
+            if isinstance(ev, RunEvent) and ev.kind == "run_end":
+                raise RuntimeError("simulated DB error")
+            return original_apply(session, ev)
+
+        store._apply = broken_apply  # type: ignore[attr-defined]
+
+        trace_id = "trace-err"
+        store.enqueue(RunEvent(
+            kind="run_start",
+            trace_id=trace_id,
+            agent_name="p2p",
+            session_id="s1",
+            user_id="u1",
+            started_at=now_cn(),
+        ))
+        store.enqueue(_make_run_end(trace_id))
+
+        # 即使 commit 失败，waiter 也必须被 signal（返回 True）
+        # 这样 registry 才能继续 publish_done
+        ok = store.flush_now_sync(trace_id, timeout=2.0)
+        assert ok is True
+    finally:
+        store.close(timeout=2.0)
+        engine.dispose()

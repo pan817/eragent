@@ -39,6 +39,20 @@ from modules.p2p.tools import set_repository
 _logger = get_logger(__name__)
 
 
+def _mask_redis_url(url: str) -> str:
+    """把 Redis URL 里的密码替换成 ***，用于启动日志打印。"""
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(url)
+        if parsed.password:
+            netloc = parsed.netloc.replace(parsed.password, "***")
+            return urlunparse(parsed._replace(netloc=netloc))
+    except Exception:  # noqa: BLE001
+        pass
+    return url
+
+
 def _check_event_backend_matches_workers(event_backend: str) -> None:
     """检查 event_backend 与实际 worker 数量是否匹配；不匹配打 WARNING。
 
@@ -101,12 +115,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         redis_url=async_cfg.redis_url,
         redis_key_prefix=async_cfg.redis_key_prefix,
     )
+    # Redis 后端启动时 fail-fast：连不通 / 认证失败就别让服务起来接流量，
+    # 否则会退化成每个 POST /analyze/async 都在 submit 里跑第一条 Redis 命令失败 → 500。
+    # 配错 redis_url（比如 `redis://pwd@host` 而不是 `redis://:pwd@host`）是最常见的翻车点。
+    if async_cfg.event_backend == "redis" and hasattr(bus, "ping"):
+        try:
+            bus.ping()
+            _logger.info(
+                "redis event bus ping ok (url=%s, prefix=%s)",
+                _mask_redis_url(async_cfg.redis_url),
+                async_cfg.redis_key_prefix,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"RedisEventBus ping failed ({exc!r})；请检查 "
+                "ASYNC_ANALYSIS_REDIS_URL（密码格式须为 redis://:<pwd>@host:port/db）"
+                "以及 Redis 实例是否可达。"
+            ) from exc
     registry = init_task_registry(
         event_bus=bus,
         session_factory=session_factory,
         max_concurrent_tasks=async_cfg.max_concurrent_tasks,
         result_cache_ttl_sec=async_cfg.result_cache_ttl_sec,
         sweep_interval_sec=async_cfg.sweep_interval_sec,
+        trace_flush_barrier_timeout=async_cfg.trace_flush_barrier_timeout,
     )
     # 跨进程残留收敛：把上次进程中残留的 running / pending 标记为 aborted / error
     registry.recover_on_startup()

@@ -110,9 +110,22 @@ class RedisEventBus:
     # ------------------------------------------------------------------
 
     def next_seq(self, trace_id: str) -> int:
-        """跨进程单调递增地为 trace 分配下一个 seq。"""
-        client = self._ensure_sync()
-        return int(client.incr(self._seq_key(trace_id)))
+        """跨进程单调递增地为 trace 分配下一个 seq。
+
+        Redis 不可达 / AUTH 失败时返回 0（降级），与 ``publish`` 的吞异常策略对齐——
+        宁可让事件的 seq=0（前端认作"未知序号"不更新 Last-Event-ID 锚点），
+        也不要把一次 Redis 抖动打成 API 500。
+        """
+        try:
+            client = self._ensure_sync()
+            return int(client.incr(self._seq_key(trace_id)))
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "redis event bus next_seq failed on trace %s (degraded to 0)",
+                trace_id,
+                exc_info=True,
+            )
+            return 0
 
     def publish(self, trace_id: str, event: dict[str, Any]) -> None:
         """发布事件到所有订阅者 + 写入环形缓冲。
@@ -309,6 +322,15 @@ class RedisEventBus:
                 "redis is_closed failed on trace %s", trace_id, exc_info=True
             )
             return False
+
+    def ping(self) -> None:
+        """连通性探测。失败直接抛异常（供 lifespan 启动时 fail-fast 调用）。
+
+        与其他方法的"吞异常 + 降级"策略不同：此方法**故意**让异常向上传播，
+        因为它只在启动期被调用，配错就应该快速失败、阻止服务起来接流量。
+        """
+        client = self._ensure_sync()
+        client.ping()
 
     async def aclose(self) -> None:
         """关闭底层 Redis 连接（可选，lifespan shutdown 时调用）。"""

@@ -666,6 +666,42 @@ class TestReportRepository:
         repo = _make_report_repo(vector_store=vs)
         assert repo.search_semantic("u1", "q") == []
 
+    def test_save_and_get_by_trace_id(self) -> None:
+        """save 写入 trace_id 后，get_by_trace_id 能按该列反查到行。
+        支撑 /analyze/tasks/{trace_id} 快照接口跨 worker 重建 result。"""
+        repo = _make_report_repo()
+        tid = "trace-abc"
+        rid = repo.save(
+            "u1", "s1", "q", "t", '{"x": 1}', "# r", 0,
+            trace_id=tid,
+        )
+        hit = repo.get_by_trace_id(tid)
+        assert hit is not None
+        assert hit["id"] == rid
+        assert hit["trace_id"] == tid
+        assert hit["result_json"] == '{"x": 1}'
+
+    def test_get_by_trace_id_not_found(self) -> None:
+        repo = _make_report_repo()
+        assert repo.get_by_trace_id("nonexistent-trace") is None
+
+    def test_get_by_trace_id_empty_input(self) -> None:
+        """空字符串 trace_id 必须直接返回 None，不发起 DB 查询。
+        （防御 trace_id 未设置的历史行误伤）"""
+        repo = _make_report_repo()
+        # 写一行 trace_id=NULL
+        repo.save("u1", "s1", "q", "t", "{}", "", 0)
+        assert repo.get_by_trace_id("") is None
+
+    def test_trace_id_unique_constraint(self) -> None:
+        """同一 trace_id 重复写入应被 UNIQUE 索引拒掉
+        （体现"一次 analyze → 一份 report"的业务约束）。"""
+        repo = _make_report_repo()
+        tid = "trace-dup"
+        repo.save("u1", "s1", "q", "t", "{}", "", 0, trace_id=tid)
+        with pytest.raises(Exception):  # IntegrityError from SQLite
+            repo.save("u1", "s2", "q2", "t", "{}", "", 0, trace_id=tid)
+
 
 # ---------------------------------------------------------------------------
 # _VectorStoreProxy 测试

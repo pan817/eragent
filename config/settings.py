@@ -260,6 +260,11 @@ class AsyncAnalysisSettings(BaseSettings):
     event_buffer_size: int = 200
     sse_heartbeat_sec: int = 15
 
+    # registry._run 在 publish_done 之前等 trace_runs 落库的最长阻塞秒数。
+    # 保证前端收到 SSE done 时再查 /tasks/{id} 一定能看到终态。
+    # 正常 DB 写入 10-50ms；超时会降级 WARNING 不阻塞 SSE。
+    trace_flush_barrier_timeout: float = 2.0
+
     # SSE 事件总线后端：memory=进程内（仅 workers=1）/ redis=跨进程（多 worker 必须）
     event_backend: str = "memory"
     redis_url: str = "redis://localhost:6379/0"

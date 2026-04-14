@@ -266,14 +266,19 @@ class LongTermMemory:
         report_markdown: str,
         anomaly_count: int,
         report_id: str | None = None,
+        trace_id: str | None = None,
     ) -> str:
         return self._rep_repo.save(
             user_id, session_id, query, analysis_type,
             result_json, report_markdown, anomaly_count, report_id,
+            trace_id=trace_id,
         )
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         return self._rep_repo.get(report_id)
+
+    def get_report_by_trace_id(self, trace_id: str) -> dict[str, Any] | None:
+        return self._rep_repo.get_by_trace_id(trace_id)
 
     def search_reports_semantic(self, user_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._rep_repo.search_semantic(user_id, query, limit)
@@ -736,8 +741,14 @@ class ReportRepository:
         report_markdown: str,
         anomaly_count: int,
         report_id: str | None = None,
+        *,
+        trace_id: str | None = None,
     ) -> str:
-        """写入一份分析报告，返回 report_id。"""
+        """写入一份分析报告，返回 report_id。
+
+        ``trace_id`` 若给出，会写入 trace_id 列（UNIQUE 索引），供
+        ``/analyze/tasks/{trace_id}`` 快照接口跨 worker 反查完整 result 使用。
+        """
         if not report_id:
             report_id = str(uuid.uuid4())
 
@@ -753,6 +764,7 @@ class ReportRepository:
                 id=report_id,
                 user_id=user_id,
                 session_id=session_id,
+                trace_id=trace_id,
                 query=query,
                 analysis_type=analysis_type,
                 result_json=result_json,
@@ -774,6 +786,7 @@ class ReportRepository:
                         "metadata": {
                             "source": "report",
                             "report_id": report_id,
+                            "trace_id": trace_id or "",
                             "user_id": user_id,
                             "session_id": session_id,
                             "analysis_type": analysis_type,
@@ -792,6 +805,21 @@ class ReportRepository:
     def get(self, report_id: str) -> dict[str, Any] | None:
         """按 ID 获取报告，不存在返回 None。"""
         stmt = sa.select(reports_table).where(reports_table.c.id == report_id)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).fetchone()
+            return dict(row._mapping) if row is not None else None
+
+    def get_by_trace_id(self, trace_id: str) -> dict[str, Any] | None:
+        """按 trace_id 获取报告。UNIQUE 索引保证最多一条。
+
+        供 /analyze/tasks/{trace_id} 的 DB 回落路径使用（跨 worker 场景下
+        当前进程 registry 没有 TaskEntry，需要从 DB 恢复完整 AnalysisResult）。
+        """
+        if not trace_id:
+            return None
+        stmt = sa.select(reports_table).where(
+            reports_table.c.trace_id == trace_id
+        )
         with self._engine.connect() as conn:
             row = conn.execute(stmt).fetchone()
             return dict(row._mapping) if row is not None else None

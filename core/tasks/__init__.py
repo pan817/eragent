@@ -24,6 +24,7 @@ from core.tasks.schemas import (
     AnalysisTaskSnapshot,
     TaskState,
 )
+from core.tasks.schemas import TERMINAL_STATES
 
 __all__ = [
     "AnalysisTaskAck",
@@ -31,6 +32,7 @@ __all__ = [
     "EventBus",
     "EventBusProtocol",
     "MemoryEventBus",
+    "TERMINAL_STATES",
     "TaskEntry",
     "TaskRegistry",
     "TaskState",

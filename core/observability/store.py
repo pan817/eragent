@@ -94,6 +94,17 @@ class TraceStore:
         self._stopped = threading.Event()
         self._dropped_count: int = 0
         self._dropped_lock = threading.Lock()
+        # run_end flush 同步屏障：
+        # - 调用方（registry._run）在 finish_run 入队后调 flush_now_sync(trace_id)
+        #   同步等待该 trace 的 run_end 被 commit 到 DB，再 publish_done 给前端
+        # - 解决的 race：前端收到 done 后立刻查 /tasks/{id}，快照走到其他 worker
+        #   回落 trace_runs 但还显示 running
+        self._flush_barrier_lock = threading.Lock()
+        self._run_end_waiters: dict[str, threading.Event] = {}
+        # 已 flush 但调用方还没来拿的 trace_id 集合（处理"flush 先于 wait"的时序）。
+        # 被消费后立即 discard；留一个 soft cap 防极端场景泄漏。
+        self._run_end_flushed: set[str] = set()
+        self._run_end_flushed_cap = 1024
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -193,6 +204,13 @@ class TraceStore:
     def _flush(self, events: list[RunEvent | SpanEvent]) -> None:
         if not events:
             return
+        # 收集本批里 run_end 事件的 trace_id，commit 完成后统一唤醒等待者。
+        # 这里只记录 trace_id；commit 失败时也会 signal（避免 registry 永远 hang），
+        # 由 commit 自身的异常日志暴露问题。
+        run_end_trace_ids = {
+            ev.trace_id for ev in events
+            if isinstance(ev, RunEvent) and ev.kind == "run_end"
+        }
         try:
             with self._session_factory() as session:
                 for ev in events:
@@ -200,6 +218,69 @@ class TraceStore:
                 session.commit()
         except Exception as exc:  # noqa: BLE001
             _logger.error("trace-store flush failed: %s", exc, exc_info=True)
+        finally:
+            if run_end_trace_ids:
+                self._signal_run_end_flushed(run_end_trace_ids)
+
+    def _signal_run_end_flushed(self, trace_ids: set[str]) -> None:
+        """唤醒等待这些 trace 的 run_end flush 的调用方。"""
+        to_set: list[threading.Event] = []
+        with self._flush_barrier_lock:
+            for tid in trace_ids:
+                ev = self._run_end_waiters.pop(tid, None)
+                if ev is not None:
+                    to_set.append(ev)
+                else:
+                    # 调用方还没到（flush 先于 wait），记一笔，等它来了立即返回
+                    self._run_end_flushed.add(tid)
+            # soft cap：极端情况下（finish_run 有 run_end 入队但没人 wait），
+            # 防止集合无限膨胀
+            if len(self._run_end_flushed) > self._run_end_flushed_cap:
+                self._run_end_flushed.clear()
+        for ev in to_set:
+            ev.set()
+
+    # ------------------------------------------------------------------
+    # 同步 flush 屏障（供 registry._run 在 publish_done 前调用）
+    # ------------------------------------------------------------------
+
+    def flush_now_sync(self, trace_id: str, *, timeout: float = 2.0) -> bool:
+        """阻塞等待 ``trace_id`` 对应的 ``run_end`` 事件被 commit 到 DB。
+
+        **必须在 ``finish_run`` 已经把 run_end 入队之后调用**，否则会等到
+        timeout。调用方（registry._run）按如下时序使用：
+
+        1. orchestrator.analyze() 的 finally 里 ``timing_middleware.finish_run()``
+           把 run_end enqueue 到本 store
+        2. registry._run 的 finally 里调 ``store.flush_now_sync(trace_id)``
+        3. wait 返回后再 ``_publish_done`` + ``bus.close`` → SSE 前端收到 done
+           时 DB 已终态
+
+        返回：
+            ``True`` 表示已 commit（或 commit 已在 wait 之前发生）；
+            ``False`` 表示 timeout（DB 可能依然 stale，调用方应降级为 WARNING
+            但仍然发 done，避免 SSE 吊死）。
+        """
+        with self._flush_barrier_lock:
+            # 快路径：flush 早于本次 wait 调用
+            if trace_id in self._run_end_flushed:
+                self._run_end_flushed.discard(trace_id)
+                return True
+            # 慢路径：注册一个 event，等 _flush 唤醒
+            waiter = self._run_end_waiters.get(trace_id)
+            if waiter is None:
+                waiter = threading.Event()
+                self._run_end_waiters[trace_id] = waiter
+
+        signaled = waiter.wait(timeout)
+
+        # 清理：无论是否 signaled 都移除 waiter，避免累积
+        with self._flush_barrier_lock:
+            current = self._run_end_waiters.get(trace_id)
+            if current is waiter:
+                self._run_end_waiters.pop(trace_id, None)
+            self._run_end_flushed.discard(trace_id)
+        return signaled
 
     def _apply(self, session: Session, ev: RunEvent | SpanEvent) -> None:
         if isinstance(ev, RunEvent):

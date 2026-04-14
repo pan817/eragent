@@ -88,6 +88,9 @@ async def running_app(monkeypatch):
             sweep_interval_sec=60,
             event_buffer_size=50,
             sse_heartbeat_sec=1,
+            # FakeOrchestrator 不走 TimingMiddleware，run_end 永远不会入队；
+            # 让 barrier 很快超时降级 WARNING 放行，避免每个测试浪费 2s 挂在 barrier。
+            trace_flush_barrier_timeout=0.1,
         )
         mock_settings_fn.return_value = mock_cfg
 

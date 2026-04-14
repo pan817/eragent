@@ -201,6 +201,7 @@ class Orchestrator:
                 report_markdown=result.report_markdown or "",
                 anomaly_count=len(result.anomalies),
                 report_id=result.report_id,
+                trace_id=result.trace_id or None,
             )
         except Exception as exc:
             _logger.warning(

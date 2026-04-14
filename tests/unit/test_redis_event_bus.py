@@ -195,3 +195,38 @@ async def test_subscribe_deduplicates_buffer_and_pubsub(bus_pair) -> None:
     # seq=1 只来自 buffer replay；seq=2/3 只来自 pubsub
     # 不应有重复
     assert received == [1, 2, 3]
+
+
+def test_ping_ok_on_healthy_redis(bus_pair) -> None:
+    """ping() 对正常 fakeredis 实例应当不抛异常。"""
+    bus_pair.ping()  # 不抛即通过
+
+
+def test_ping_raises_when_client_broken() -> None:
+    """ping() 在 Redis 不可达 / AUTH 失败时必须把异常原样抛出，
+    供 lifespan 启动时 fail-fast 使用。"""
+    from core.tasks.events_redis import RedisEventBus
+
+    bus = RedisEventBus(redis_url="redis://fake", key_prefix="t:ev")
+
+    class _BrokenClient:
+        def ping(self) -> None:
+            raise ConnectionError("AUTH failed")
+
+    bus._sync = _BrokenClient()  # type: ignore[assignment]
+    with pytest.raises(ConnectionError, match="AUTH failed"):
+        bus.ping()
+
+
+def test_next_seq_degrades_to_zero_on_redis_failure() -> None:
+    """Redis 抖动时 next_seq 返回 0，而不是抛异常打到 API 层成 500。"""
+    from core.tasks.events_redis import RedisEventBus
+
+    bus = RedisEventBus(redis_url="redis://fake", key_prefix="t:ev")
+
+    class _BrokenClient:
+        def incr(self, key: str) -> int:
+            raise ConnectionError("redis down")
+
+    bus._sync = _BrokenClient()  # type: ignore[assignment]
+    assert bus.next_seq("trace-x") == 0

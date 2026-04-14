@@ -71,11 +71,15 @@ class TaskRegistry:
         max_concurrent_tasks: int = 5,
         result_cache_ttl_sec: int = 600,
         sweep_interval_sec: int = 60,
+        trace_flush_barrier_timeout: float = 2.0,
     ) -> None:
         self._bus = event_bus
         self._session_factory = session_factory
         self._ttl = result_cache_ttl_sec
         self._sweep_interval = sweep_interval_sec
+        # publish_done 前等 trace_runs 落库的最长阻塞时间。
+        # 正常 DB 写入 10-50ms；超时就降级 WARNING，不阻塞 SSE。
+        self._trace_flush_barrier_timeout = trace_flush_barrier_timeout
         self._semaphore = asyncio.Semaphore(max_concurrent_tasks)
         self._entries: dict[str, TaskEntry] = {}
         self._lock = asyncio.Lock()
@@ -157,7 +161,13 @@ class TaskRegistry:
         async with self._lock:
             self._entries[trace_id] = entry
 
-        # 先发一条 queued 事件，前端订阅 SSE 时可通过 Last-Event-ID 重放
+        # 跨 worker 可见性种子：把 trace_runs 的占位行同步写入。
+        # 前端收到 202 后如果立刻 GET /analyze/tasks/{id}/events 落到别的 worker，
+        # Gate 1 preflight 回落 DB 时一定能查到 status=queued，不再误伤 404。
+        # orchestrator.start_run 后续的 session.merge 会把 agent_name/status 刷成真实值。
+        await asyncio.to_thread(self._seed_trace_run, entry)
+
+        # 再发一条 queued 事件，前端订阅 SSE 时可通过 Last-Event-ID 重放
         self._publish_status(entry, TaskState.QUEUED)
 
         entry.task = asyncio.create_task(
@@ -165,6 +175,36 @@ class TaskRegistry:
             name=f"analyze-async:{trace_id}",
         )
         return entry
+
+    def _seed_trace_run(self, entry: TaskEntry) -> None:
+        """POST 阶段同步写一行 trace_runs 占位，保证跨 worker 可见性。
+
+        - 用 ``session.merge`` 而非 ``add``：trace_id 是主键，理论上唯一，
+          但 merge 对"已存在"幂等（比如同进程 race 或 orchestrator 先启动的异常场景），
+          也方便以后有重试语义时复用
+        - ``agent_name="pending"`` 作为占位，orchestrator 的 TimingMiddleware.start_run
+          之后会被 merge 覆盖成真实的 agent 名
+        - 失败只 WARNING，不抛 —— seed 失败最坏是退化回原先的 race（跨 worker GET 可能 404），
+          比让 POST 整体 500 要好
+        """
+        try:
+            with self._session_factory() as session:
+                session.merge(TraceRun(
+                    trace_id=entry.trace_id,
+                    agent_name="pending",
+                    session_id=entry.session_id,
+                    user_id=entry.user_id,
+                    status="queued",
+                    started_at=now_cn(),
+                ))
+                session.commit()
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "failed to seed trace_runs for %s; cross-worker GET /events "
+                "may briefly 404 until orchestrator.start_run flushes",
+                entry.trace_id,
+                exc_info=True,
+            )
 
     def get(self, trace_id: str) -> TaskEntry | None:
         return self._entries.get(trace_id)
@@ -213,8 +253,47 @@ class TaskRegistry:
                 entry.duration_ms = (
                     entry.finished_at - entry.started_at
                 ).total_seconds() * 1000.0
+            # 发 done 之前先等 trace_runs 的 run_end 被 commit 到 DB，
+            # 避免前端收到 done 后立刻查快照落到其他 worker，
+            # 后者回落 DB 时 trace_runs 仍是 running（docs/issue SSE 与快照不一致问题）。
+            # 失败只降级 WARNING，仍照常 publish_done——不能因为 DB 抖动把 SSE 吊死。
+            await self._await_trace_run_flushed(entry.trace_id)
             self._publish_done(entry)
             self._bus.close(entry.trace_id)
+
+    async def _await_trace_run_flushed(self, trace_id: str) -> None:
+        """发 done 前阻塞等 trace_runs 的 run_end commit 到 DB。
+
+        把 ``TraceStore.flush_now_sync``（同步、基于 threading.Event）放到
+        ``asyncio.to_thread`` 里跑，避免阻塞事件循环。TraceStore 未初始化
+        或不支持 barrier（测试场景）时直接跳过。
+        """
+        try:
+            from core.observability.store import get_trace_store
+        except Exception:  # noqa: BLE001
+            return
+        store = get_trace_store()
+        if store is None or not hasattr(store, "flush_now_sync"):
+            return
+        try:
+            ok = await asyncio.to_thread(
+                store.flush_now_sync,
+                trace_id,
+                timeout=self._trace_flush_barrier_timeout,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "trace-run flush barrier raised on trace %s; publishing done anyway",
+                trace_id,
+                exc_info=True,
+            )
+            return
+        if not ok:
+            _logger.warning(
+                "trace-run flush barrier timed out on trace %s; "
+                "snapshot may lag behind SSE done briefly",
+                trace_id,
+            )
 
     def _publish_status(self, entry: TaskEntry, state: TaskState) -> None:
         seq = self._bus.next_seq(entry.trace_id)
@@ -327,6 +406,7 @@ def init_task_registry(
     max_concurrent_tasks: int = 5,
     result_cache_ttl_sec: int = 600,
     sweep_interval_sec: int = 60,
+    trace_flush_barrier_timeout: float = 2.0,
 ) -> TaskRegistry:
     """初始化全局 TaskRegistry（幂等）。"""
     global _registry
@@ -337,6 +417,7 @@ def init_task_registry(
             max_concurrent_tasks=max_concurrent_tasks,
             result_cache_ttl_sec=result_cache_ttl_sec,
             sweep_interval_sec=sweep_interval_sec,
+            trace_flush_barrier_timeout=trace_flush_barrier_timeout,
         )
     return _registry
 
