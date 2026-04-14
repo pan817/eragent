@@ -156,6 +156,69 @@ class TestFromYaml:
         assert s.llm.provider == "zhipu"
         assert s.llm.model == "glm-4"
 
+    def test_empty_env_does_not_override_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """空串 env（POSTGRES_HOST= 没填值）不应压死 YAML 默认。
+
+        回归：_strip_env_overrides 曾用 ``key in os.environ`` 判断环境变量
+        是否设置，空串也算"存在"，导致 YAML 里的有效值被剥掉换成空串。
+        """
+        yaml_content = {
+            "postgresql": {
+                "host": "yaml-host",
+                "port": 5432,
+                "database": "db",
+                "username": "u",
+            },
+        }
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(yaml_content), encoding="utf-8")
+
+        monkeypatch.setenv("POSTGRES_HOST", "")  # 空串
+        monkeypatch.setenv("POSTGRES_PASSWORD", "dummy")
+        # 避免本地 .env 里的加密版本跟测试明文触发冲突检查
+        monkeypatch.delenv("POSTGRES_PASSWORD_ENCRYPTED", raising=False)
+        monkeypatch.delenv("LLM_API_KEY_ENCRYPTED", raising=False)
+        monkeypatch.delenv("NEO4J_PASSWORD_ENCRYPTED", raising=False)
+        # Settings.from_yaml() 内部会调 load_dotenv 从项目 .env 重新注入上面刚删的 env，
+        # 这里把它禁掉，让测试只依赖 monkeypatch 的值。
+        import dotenv
+        monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **kw: None)
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.postgresql.host == "yaml-host", (
+            "空串 env 不应覆盖 YAML；若等于 '' 则触发了历史 bug"
+        )
+
+    def test_non_empty_env_still_overrides_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """非空 env 仍然正常覆盖 YAML（修复不应破坏常规行为）。"""
+        yaml_content = {
+            "postgresql": {
+                "host": "yaml-host",
+                "port": 5432,
+                "database": "db",
+                "username": "u",
+            },
+        }
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(yaml.dump(yaml_content), encoding="utf-8")
+
+        monkeypatch.setenv("POSTGRES_HOST", "real-host.internal")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "dummy")
+        monkeypatch.delenv("POSTGRES_PASSWORD_ENCRYPTED", raising=False)
+        monkeypatch.delenv("LLM_API_KEY_ENCRYPTED", raising=False)
+        monkeypatch.delenv("NEO4J_PASSWORD_ENCRYPTED", raising=False)
+        # Settings.from_yaml() 内部会调 load_dotenv 从项目 .env 重新注入上面刚删的 env，
+        # 这里把它禁掉，让测试只依赖 monkeypatch 的值。
+        import dotenv
+        monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **kw: None)
+
+        s = Settings.from_yaml(yaml_path)
+        assert s.postgresql.host == "real-host.internal"
+
     def test_from_yaml_nonexistent_file(self, tmp_path: Path) -> None:
         """YAML 文件不存在时应使用全部默认值。"""
         s = Settings.from_yaml(tmp_path / "nonexistent.yaml")

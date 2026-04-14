@@ -107,6 +107,15 @@ async_analysis:
   event_buffer_size: 200              # 每 trace_id 的 SSE 事件环形缓冲条数
   sse_heartbeat_sec: 15               # SSE 心跳周期（秒），防代理 idle 超时
 
+  # SSE 事件总线后端。
+  # - memory：进程内 asyncio.Queue，仅适用于 workers=1 的单进程部署
+  # - redis：Redis Pub/Sub + 环形缓冲，支持 uvicorn --workers>1 多进程共享事件
+  # 多 worker 部署必须使用 redis，否则 POST 落到 worker A 的任务事件无法
+  # 送达订阅落在 worker B 的 SSE 连接，前端只能看到心跳（详见 docs/issue/async_analyze_backend_issue.md）
+  event_backend: "memory"
+  redis_url: "redis://localhost:6379/0"  # 仅 event_backend=redis 时需要
+  redis_key_prefix: "eragent:events"     # Redis key 前缀，多实例隔离用
+
 p2p:
   three_way_match:
     default_tolerance_pct: 5.0   # 三路匹配默认容差（%）

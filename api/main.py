@@ -26,6 +26,7 @@ from core.database import (
     reset_and_seed,
 )
 from core.chat import ChatRepository, init_chat_repository
+from core.logging_utils import get_logger
 from core.observability import init_trace_store, shutdown_trace_store
 from core.tasks import (
     init_event_bus,
@@ -34,6 +35,32 @@ from core.tasks import (
     shutdown_task_registry,
 )
 from modules.p2p.tools import set_repository
+
+_logger = get_logger(__name__)
+
+
+def _check_event_backend_matches_workers(event_backend: str) -> None:
+    """检查 event_backend 与实际 worker 数量是否匹配；不匹配打 WARNING。
+
+    多 worker 部署下 memory backend 会导致 POST 与 SSE 可能落在不同 worker
+    进程，订阅方永远收不到发布方的事件（详见
+    docs/issue/async_analyze_backend_issue.md）。此处仅打 WARNING，不阻止
+    启动——运维可能临时调整 workers 数量做压测；但启动日志里能看到明显提示。
+    """
+    import os
+
+    workers_env = os.environ.get("WEB_CONCURRENCY") or os.environ.get("WORKERS")
+    try:
+        workers = int(workers_env) if workers_env else 1
+    except ValueError:
+        workers = 1
+    if workers > 1 and event_backend == "memory":
+        _logger.warning(
+            "async_analysis.event_backend=memory 但检测到 workers=%d；"
+            "多 worker 下 SSE 事件无法跨进程送达，请改用 event_backend=redis。"
+            "详见 docs/issue/async_analyze_backend_issue.md",
+            workers,
+        )
 
 
 @asynccontextmanager
@@ -67,7 +94,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 初始化异步分析基础设施：EventBus + TaskRegistry
     async_cfg = settings.async_analysis
-    bus = init_event_bus(buffer_size=async_cfg.event_buffer_size)
+    _check_event_backend_matches_workers(async_cfg.event_backend)
+    bus = init_event_bus(
+        buffer_size=async_cfg.event_buffer_size,
+        backend=async_cfg.event_backend,
+        redis_url=async_cfg.redis_url,
+        redis_key_prefix=async_cfg.redis_key_prefix,
+    )
     registry = init_task_registry(
         event_bus=bus,
         session_factory=session_factory,
@@ -81,6 +114,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     await registry.shutdown()
     shutdown_task_registry()
+    # 如果是 Redis 后端，关闭底层连接；memory 后端此调用是 no-op
+    if bus is not None and hasattr(bus, "aclose"):
+        try:
+            await bus.aclose()
+        except Exception:  # noqa: BLE001
+            pass
     shutdown_event_bus()
     shutdown_trace_store()
     engine.dispose()

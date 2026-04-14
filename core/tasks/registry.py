@@ -28,7 +28,7 @@ from api.schemas.analysis import (
 from core.chat.tables import chat_messages_table
 from core.logging_utils import get_logger
 from core.observability.tables import TraceRun
-from core.tasks.events import EventBus
+from core.tasks.events import EventBusProtocol
 from core.tasks.schemas import TERMINAL_STATES, TaskState
 from core.time_utils import now_cn
 
@@ -66,7 +66,7 @@ class TaskRegistry:
     def __init__(
         self,
         *,
-        event_bus: EventBus,
+        event_bus: EventBusProtocol,
         session_factory: sessionmaker[Session],
         max_concurrent_tasks: int = 5,
         result_cache_ttl_sec: int = 600,
@@ -322,7 +322,7 @@ _registry: TaskRegistry | None = None
 
 def init_task_registry(
     *,
-    event_bus: EventBus,
+    event_bus: EventBusProtocol,
     session_factory: sessionmaker[Session],
     max_concurrent_tasks: int = 5,
     result_cache_ttl_sec: int = 600,

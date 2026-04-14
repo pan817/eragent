@@ -171,6 +171,106 @@ async def test_close_with_full_queue_still_delivers_sentinel() -> None:
     await task
 
 
+def test_worker_mismatch_warning(monkeypatch) -> None:
+    """workers>1 且 backend=memory 时打 WARNING。"""
+    import api.main as api_main
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        api_main._logger,
+        "warning",
+        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
+    )
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    api_main._check_event_backend_matches_workers("memory")
+    assert any("event_backend=memory" in w for w in warnings)
+
+
+def test_worker_mismatch_no_warning_when_redis(monkeypatch) -> None:
+    """workers>1 且 backend=redis 时不打 WARNING。"""
+    import api.main as api_main
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        api_main._logger,
+        "warning",
+        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
+    )
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    api_main._check_event_backend_matches_workers("redis")
+    assert warnings == []
+
+
+def test_worker_mismatch_no_warning_single_worker(monkeypatch) -> None:
+    """单 worker 下无论 backend 都不打 WARNING。"""
+    import api.main as api_main
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        api_main._logger,
+        "warning",
+        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
+    )
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("WORKERS", raising=False)
+    api_main._check_event_backend_matches_workers("memory")
+    assert warnings == []
+
+
+def test_worker_mismatch_invalid_env_treated_as_single(monkeypatch) -> None:
+    """WEB_CONCURRENCY 非法值应按单 worker 处理。"""
+    import api.main as api_main
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        api_main._logger,
+        "warning",
+        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
+    )
+    monkeypatch.setenv("WEB_CONCURRENCY", "not-a-number")
+    api_main._check_event_backend_matches_workers("memory")
+    assert warnings == []
+
+
+def test_init_event_bus_memory_default() -> None:
+    from core.tasks.events import (
+        MemoryEventBus,
+        get_event_bus,
+        init_event_bus,
+        shutdown_event_bus,
+    )
+
+    shutdown_event_bus()
+    bus = init_event_bus(backend="memory")
+    assert isinstance(bus, MemoryEventBus)
+    assert get_event_bus() is bus
+    # 幂等
+    assert init_event_bus(backend="memory") is bus
+    shutdown_event_bus()
+
+
+def test_init_event_bus_redis_requires_url() -> None:
+    from core.tasks.events import init_event_bus, shutdown_event_bus
+
+    shutdown_event_bus()
+    with pytest.raises(ValueError, match="redis_url"):
+        init_event_bus(backend="redis", redis_url=None)
+
+
+def test_init_event_bus_redis_returns_redis_bus() -> None:
+    from core.tasks.events import init_event_bus, shutdown_event_bus
+    from core.tasks.events_redis import RedisEventBus
+
+    shutdown_event_bus()
+    bus = init_event_bus(
+        backend="redis",
+        redis_url="redis://fake",
+        redis_key_prefix="x",
+    )
+    assert isinstance(bus, RedisEventBus)
+    shutdown_event_bus()
+
+
 @pytest.mark.asyncio
 async def test_subscribe_after_close_returns_buffered_and_exits() -> None:
     bus = EventBus()

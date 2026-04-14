@@ -217,7 +217,7 @@ data: {"type":"done","trace_id":"...","ts":"...","seq":42,"status":"ok","duratio
 | tool | tool | action (start/end), name, duration_ms?, status? | 工具调用起止 |
 | dag_task | dag_task | action, task_name, duration_ms?, status? | DAG 任务起止 |
 | report | report | anomaly_count, duration_ms | 报告生成完成 |
-| heartbeat | heartbeat | — | 保活，每 15s 一次 |
+| heartbeat | heartbeat | — | 保活，每 15s 一次；**同样带 type/trace_id/ts/seq 四个通用字段** |
 | done | done | status, duration_ms, anomaly_count?, error? | 终态，服务端随后关闭连接 |
 
 **连接关闭**：

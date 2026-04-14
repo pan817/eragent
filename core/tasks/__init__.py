@@ -4,7 +4,14 @@
 和对应的 Pydantic 数据模型，供 ``api/routes/analyze_async.py`` 消费。
 """
 
-from core.tasks.events import EventBus, get_event_bus, init_event_bus, shutdown_event_bus
+from core.tasks.events import (
+    EventBus,
+    EventBusProtocol,
+    MemoryEventBus,
+    get_event_bus,
+    init_event_bus,
+    shutdown_event_bus,
+)
 from core.tasks.registry import (
     TaskEntry,
     TaskRegistry,
@@ -22,6 +29,8 @@ __all__ = [
     "AnalysisTaskAck",
     "AnalysisTaskSnapshot",
     "EventBus",
+    "EventBusProtocol",
+    "MemoryEventBus",
     "TaskEntry",
     "TaskRegistry",
     "TaskState",

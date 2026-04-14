@@ -209,7 +209,7 @@ async def stream_task_events(
                         queue.get(), timeout=heartbeat
                     )
                 except asyncio.TimeoutError:
-                    yield _format_heartbeat(trace_id)
+                    yield _format_heartbeat(trace_id, bus)
                     continue
                 if item is None:
                     return
@@ -376,8 +376,22 @@ def _format_event(event: dict[str, Any]) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def _format_heartbeat(trace_id: str) -> bytes:
-    payload = {"type": "heartbeat", "trace_id": trace_id}
+def _format_heartbeat(trace_id: str, bus: Any) -> bytes:
+    """序列化一条 heartbeat。带上与业务事件一致的 type/trace_id/ts/seq 四字段。
+
+    - ``seq`` 向 bus 申请，保证与业务事件共用同一单调序列（Redis 后端下跨进程全局递增）
+    - 不输出 ``id:`` 行：浏览器 EventSource 不应把心跳 seq 作为 Last-Event-ID 的锚点
+      （心跳不应被重放，业务事件才需要重放）
+    """
+    from core.time_utils import now_cn
+
+    seq = bus.next_seq(trace_id) if bus is not None else 0
+    payload = {
+        "type": "heartbeat",
+        "trace_id": trace_id,
+        "ts": now_cn().isoformat(),
+        "seq": seq,
+    }
     return (
         "event: heartbeat\n"
         f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"

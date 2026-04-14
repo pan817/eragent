@@ -38,8 +38,12 @@ def _strip_env_overrides(
 
     pydantic-settings 的优先级：init 参数 > 环境变量 > 默认值。
     ``from_yaml`` 把 YAML 值作为 init 参数传入，会压死环境变量。
-    本函数在传入前，将已有对应环境变量的字段从 dict 中删除，
+    本函数在传入前，将已被环境变量覆盖的字段从 dict 中删除，
     让 pydantic-settings 自动从环境变量读取，确保 .env 为权威源。
+
+    **空字符串 env 不视为"已覆盖"**：``POSTGRES_HOST=""`` 等错配常见于
+    忘填 .env 占位或 shell 残留，若按"已覆盖"处理会把 YAML 里有效的
+    默认值剥成空串，产生反直觉 bug。因此只有**非空**字符串才算有效覆盖。
 
     对嵌套 BaseSettings 子模型递归处理。
     """
@@ -66,9 +70,10 @@ def _strip_env_overrides(
                     result[field_name], field_type
                 )
         else:
-            # 标量字段：环境变量已设置则从 dict 移除
+            # 标量字段：环境变量已设置**且非空**才认为是有效覆盖
+            # （空串通常是 .env 占位没填 / shell 残留，不应压死 YAML 默认）
             env_var = f"{env_prefix}{field_name}".upper()
-            if env_var in os.environ:
+            if os.environ.get(env_var):
                 del result[field_name]
 
     return result
@@ -255,7 +260,22 @@ class AsyncAnalysisSettings(BaseSettings):
     event_buffer_size: int = 200
     sse_heartbeat_sec: int = 15
 
+    # SSE 事件总线后端：memory=进程内（仅 workers=1）/ redis=跨进程（多 worker 必须）
+    event_backend: str = "memory"
+    redis_url: str = "redis://localhost:6379/0"
+    redis_key_prefix: str = "eragent:events"
+
     model_config = {"env_prefix": "ASYNC_ANALYSIS_"}
+
+    @field_validator("event_backend")
+    @classmethod
+    def _validate_event_backend(cls, v: str) -> str:
+        if v not in {"memory", "redis"}:
+            raise ValueError(
+                f"async_analysis.event_backend 只支持 memory / redis，"
+                f"当前值: {v}"
+            )
+        return v
 
 
 class ThreeWayMatchSettings(BaseSettings):

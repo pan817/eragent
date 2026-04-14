@@ -1,9 +1,12 @@
-"""EventBus：进程内按 trace_id 维度的 pub/sub 总线。
+"""EventBus：按 trace_id 维度的 pub/sub 总线。
 
-- 用于 SSE 端点消费异步分析任务的进度事件。
-- 每个订阅对应一个 ``asyncio.Queue``，发布方 ``put_nowait``，队列满则丢最旧。
-- 每 trace_id 维护一个环形缓冲（最近 N 条），支持 ``Last-Event-ID`` 重放。
-- 单进程实现，不跨机器广播——当前只需单实例部署。
+提供两种实现：
+- :class:`MemoryEventBus`：进程内 asyncio.Queue，仅适用于单 worker 部署
+- :class:`RedisEventBus`（``events_redis``）：Redis Pub/Sub + 环形缓冲，
+  跨 worker / 跨机共享，多 worker 部署必须使用
+
+所有实现都遵循 :class:`EventBusProtocol`，TaskRegistry / SSE 端点
+只依赖 Protocol，不关心具体后端。
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import asyncio
 import threading
 from collections import deque
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from core.logging_utils import get_logger
 
@@ -23,10 +26,37 @@ DEFAULT_BUFFER_SIZE = 200
 DEFAULT_SUBSCRIBER_QUEUE_SIZE = 200
 
 
-class EventBus:
-    """按 trace_id 维度的进程内事件总线。
+@runtime_checkable
+class EventBusProtocol(Protocol):
+    """EventBus 的结构化契约。"""
+
+    def next_seq(self, trace_id: str) -> int: ...
+
+    def publish(self, trace_id: str, event: dict[str, Any]) -> None: ...
+
+    def subscribe(
+        self,
+        trace_id: str,
+        *,
+        last_event_id: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]: ...
+
+    def close(self, trace_id: str) -> None: ...
+
+    def drop(self, trace_id: str) -> None: ...
+
+    def buffered(self, trace_id: str) -> list[dict[str, Any]]: ...
+
+    def subscriber_count(self, trace_id: str) -> int: ...
+
+    def is_closed(self, trace_id: str) -> bool: ...
+
+
+class MemoryEventBus:
+    """按 trace_id 维度的进程内事件总线（asyncio.Queue 实现）。
 
     所有方法线程安全；订阅 / 事件转发基于 asyncio，必须在事件循环内调用。
+    仅适用于单 worker 部署——多 worker 场景请使用 ``RedisEventBus``。
     """
 
     def __init__(
@@ -215,26 +245,59 @@ def _seq_gt(event: dict[str, Any], last_event_id: int | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-_bus: EventBus | None = None
+_bus: EventBusProtocol | None = None
 
 
 def init_event_bus(
     *,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     subscriber_queue_size: int = DEFAULT_SUBSCRIBER_QUEUE_SIZE,
-) -> EventBus:
-    """初始化全局 EventBus（幂等）。"""
+    backend: str = "memory",
+    redis_url: str | None = None,
+    redis_key_prefix: str = "eragent:events",
+) -> EventBusProtocol:
+    """初始化全局 EventBus 单例（幂等）。
+
+    Args:
+        buffer_size: 每 trace_id 环形缓冲保留的事件条数（用于断线重连重放）
+        subscriber_queue_size: memory 后端下每订阅的 queue 容量
+        backend: ``"memory"`` 或 ``"redis"``
+        redis_url: Redis 连接串，仅 ``backend="redis"`` 时必须
+        redis_key_prefix: Redis key 前缀，多实例隔离用
+    """
     global _bus
-    if _bus is None:
-        _bus = EventBus(
+    if _bus is not None:
+        return _bus
+
+    if backend == "redis":
+        if not redis_url:
+            raise ValueError(
+                "event_backend=redis 时必须提供 redis_url "
+                "（config.yaml: async_analysis.redis_url）"
+            )
+        from core.tasks.events_redis import RedisEventBus
+
+        _bus = RedisEventBus(
+            redis_url=redis_url,
+            key_prefix=redis_key_prefix,
+            buffer_size=buffer_size,
+            subscriber_queue_size=subscriber_queue_size,
+        )
+    else:
+        _bus = MemoryEventBus(
             buffer_size=buffer_size,
             subscriber_queue_size=subscriber_queue_size,
         )
     return _bus
 
 
-def get_event_bus() -> EventBus | None:
+def get_event_bus() -> EventBusProtocol | None:
     return _bus
+
+
+# 向后兼容别名：历史代码中的 ``EventBus`` 指向内存实现。
+# 新代码应改用 ``EventBusProtocol`` 做类型标注，或直接写 ``MemoryEventBus``。
+EventBus = MemoryEventBus
 
 
 def shutdown_event_bus() -> None:

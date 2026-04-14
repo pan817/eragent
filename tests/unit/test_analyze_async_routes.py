@@ -323,6 +323,48 @@ async def test_snapshot_fallback_to_trace_runs(app_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_has_ts_and_seq(app_env, monkeypatch) -> None:
+    """心跳也必须带 type/trace_id/ts/seq 四个基础字段（前端契约）。"""
+    import api.routes.analyze_async as ar
+
+    monkeypatch.setattr(ar, "_sse_heartbeat_seconds", lambda: 0.05)
+
+    # 让 runner 多跑一会儿，以便触发 heartbeat
+    async def slow_runner(req, *, trace_id=None):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0.3)
+        return AnalysisResult(
+            report_id="r", trace_id=trace_id or "",
+            status=AnalysisStatus.SUCCESS,
+            analysis_type=AnalysisType.COMPREHENSIVE,
+            query=req.query, user_id=req.user_id, session_id=req.session_id,
+            time_range="30d", report_markdown="# ok",
+        )
+
+    fastapi_app, _fake, _chat_repo, _registry = app_env
+    slow_orch = type("SO", (), {"analyze": staticmethod(slow_runner)})()
+    monkeypatch.setattr(
+        async_module, "_get_orchestrator", lambda: slow_orch, raising=True
+    )
+    async with _make_client(fastapi_app) as client:
+        ack = await _post_submit(client, query="heartbeat 字段")
+        heartbeats: list[dict[str, Any]] = []
+        async with client.stream("GET", ack["stream_url"]) as r:
+            async for line in r.aiter_lines():
+                if line.startswith("data: "):
+                    ev = json.loads(line[len("data: "):])
+                    if ev.get("type") == "heartbeat":
+                        heartbeats.append(ev)
+                    if ev.get("type") == "done":
+                        break
+        assert heartbeats, "应至少触发一条 heartbeat"
+        h0 = heartbeats[0]
+        assert h0["type"] == "heartbeat"
+        assert h0["trace_id"] == ack["trace_id"]
+        assert isinstance(h0.get("seq"), int) and h0["seq"] > 0
+        assert "ts" in h0 and isinstance(h0["ts"], str)
+
+
+@pytest.mark.asyncio
 async def test_sse_stream_delivers_done(app_env) -> None:
     fastapi_app, *_ = app_env
     async with _make_client(fastapi_app) as client:

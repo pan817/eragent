@@ -14,6 +14,10 @@
 - `max_concurrent_tasks = 5`（同进程并发上限，超过则 queued 排队）
 - `sse_heartbeat_sec = 15`（SSE 心跳周期，防代理超时）
 - 不提供 NDJSON 备选端点；SSE 失败场景前端走 2s 轮询兜底
+- `event_backend = "memory"`（默认）/ `"redis"`（多 worker 必须）
+  - 单 worker 部署：`memory` 足够
+  - `uvicorn --workers>1`：**必须**用 `redis`，否则 POST 与 SSE 落在不同 worker 时 SSE 永远收不到业务事件，只能看到心跳
+  - `redis_url` + `redis_key_prefix` 仅在 `event_backend=redis` 时生效
 
 ---
 
@@ -73,10 +77,27 @@ SSE 用 FastAPI 原生 `StreamingResponse` + `text/event-stream` 手写。
 
 ---
 
-## 3. EventBus（core/tasks/events.py）
+## 3. EventBus（core/tasks/events.py + core/tasks/events_redis.py）
 
 ### 职责
-进程内 pub/sub，把任务进度事件广播给当前订阅了该 trace_id 的 SSE 连接。**不跨进程广播**。
+按 trace_id 维度广播任务进度事件给 SSE 订阅者。
+
+### 两种后端（`EventBusProtocol` 统一契约）
+
+**`MemoryEventBus`**（默认）— 进程内 `asyncio.Queue` + `deque` 环形缓冲。
+- 仅适用于 `workers=1` 单进程部署
+- `close(trace_id)` 推送 `None` 哨兵唤醒订阅者退出
+
+**`RedisEventBus`** — Redis Pub/Sub + 环形缓冲，跨 worker / 跨机共享。
+- 多 worker 场景必须使用，否则 POST 落在 worker A 的事件无法送达订阅落在 worker B 的 SSE
+- Redis key 布局：
+  - `{prefix}:channel:{trace_id}`：Pub/Sub 实时广播
+  - `{prefix}:buffer:{trace_id}`：List (RPUSH + LTRIM) 作为环形缓冲
+  - `{prefix}:seq:{trace_id}`：INCR 计数器，跨 worker 单调
+  - `{prefix}:closed:{trace_id}`：终态标记（带 TTL 自动清理）
+- 同时持有 sync 和 async 两个 Redis client —— 同步方法走 sync client，subscribe 异步方法走 async pubsub，API 层无需区分
+- subscribe 时序：**先订阅 channel，再读 buffer**，避免中间丢事件；用 seq 去重 buffer 与 pubsub 的重叠
+- close 通过 publish `__control__close__` 控制消息通知当前订阅者退出
 
 ### 实现要点
 - 内部结构：`dict[trace_id, list[asyncio.Queue[Event]]]`，每个 SSE 订阅一个 Queue。

@@ -165,3 +165,42 @@ data: {"type":"done","trace_id":"...","ts":"...","seq":N,"status":"ok","duration
 ---
 
 **附：本次复现的 trace_id**：`058282f5-dc2f-4771-8161-6a616525ec7b`（后端如需查具体一次调用的上下文）
+
+---
+
+## 7. 后端修复说明（2026-04-14）
+
+**根因**：`scripts/start.sh` 默认 `WORKERS=4`，每个 uvicorn worker 进程持有独立的
+`EventBus` / `TaskRegistry` 单例。POST 落在 worker A 的任务事件发到 A 的内存
+EventBus；GET /events 落在 worker B 时 B 的 EventBus 为空，订阅者永远等不到事件。
+
+**修复**：引入跨进程的 Redis 事件总线，通过配置开关切换。
+
+- [core/tasks/events.py](../../core/tasks/events.py) — 新增 `EventBusProtocol`；
+  原 `EventBus` 重命名为 `MemoryEventBus`（保留别名 `EventBus = MemoryEventBus`
+  兼容旧调用）；`init_event_bus` 工厂按 `backend` 参数返回 memory / redis 实现
+- [core/tasks/events_redis.py](../../core/tasks/events_redis.py) — 新增
+  `RedisEventBus`：Pub/Sub 实时广播 + List 环形缓冲 + INCR 单调 seq
+- [api/routes/analyze_async.py](../../api/routes/analyze_async.py) —
+  `_format_heartbeat` 补齐 `ts` / `seq` 两个字段（P2 bug）
+- [api/main.py](../../api/main.py) — lifespan 按 `async_analysis.event_backend`
+  选后端；workers>1 且 backend=memory 时打 WARNING
+- [config/config.yaml](../../config/config.yaml) +
+  [config/settings.py](../../config/settings.py) — 新增
+  `async_analysis.event_backend` / `redis_url` / `redis_key_prefix`
+- 新增依赖：`redis>=5.0.0`（生产）、`fakeredis>=2.20.0`（dev 测试）
+
+**部署侧操作**：多 worker 部署请在 `config.yaml` 中设置：
+```yaml
+async_analysis:
+  event_backend: "redis"
+  redis_url: "redis://<redis-host>:6379/0"
+  redis_key_prefix: "eragent:events"
+```
+
+**验证**：
+- 新增单测 [tests/unit/test_redis_event_bus.py](../../tests/unit/test_redis_event_bus.py)（11 用例）
+- 新增集成测试 [tests/integration/test_async_multi_worker.py](../../tests/integration/test_async_multi_worker.py)
+  用两个 `RedisEventBus` 实例 + 共享 `fakeredis.FakeServer` 模拟多 worker 场景，
+  验证跨进程 publish → subscribe 能正常送达，seq 单调，late subscriber 能 replay buffer
+- heartbeat 新增字段有单测 [tests/unit/test_analyze_async_routes.py::test_heartbeat_has_ts_and_seq](../../tests/unit/test_analyze_async_routes.py)
