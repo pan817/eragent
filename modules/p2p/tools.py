@@ -49,6 +49,96 @@ def _get_repository() -> P2PRepository:
     return _repository
 
 
+def _clip_and_dump(obj: Any) -> str:
+    """把 tool 返回的 Python 对象裁剪后序列化为 JSON 字符串。
+
+    两级预算（读取 ``settings.p2p.tool_output``）：
+
+    1. ``max_items``：列表型结构（顶层 list 或 dict 中的 list 字段）最多保留
+       前 N 条，尾部追加一条 ``{"_truncated": true, "dropped": M, "reason": ...}``
+       摘要记录，向 LLM 显式暴露"还有 M 条同类数据未列出"。
+    2. ``max_chars``：序列化后的 JSON 总字符数兜底；超出时继续按顺序丢弃列表
+       尾部元素直到达标（若无列表可裁，最后退化到按字符硬切）。
+
+    注意：只在结构层裁剪，保证截断后仍是合法 JSON；LLM 能正确解析并理解"数据
+    已被系统预算裁剪"，而不是解析到半截坏 JSON。
+    """
+    from config.settings import get_settings
+
+    cfg = get_settings().p2p.tool_output
+    max_items = cfg.max_items
+    max_chars = cfg.max_chars
+
+    def _clip_list(items: list[Any]) -> list[Any]:
+        if max_items <= 0 or len(items) <= max_items:
+            return items
+        dropped = len(items) - max_items
+        return [
+            *items[:max_items],
+            {
+                "_truncated": True,
+                "dropped": dropped,
+                "reason": (
+                    f"列表总长 {len(items)} 条，按 p2p.tool_output.max_items="
+                    f"{max_items} 裁剪，仅保留前 {max_items} 条；剩余 {dropped} "
+                    f"条为同类数据，如需完整数据请导出或缩小查询范围。"
+                ),
+            },
+        ]
+
+    if isinstance(obj, list):
+        clipped: Any = _clip_list(obj)
+    elif isinstance(obj, dict):
+        clipped = {
+            k: (_clip_list(v) if isinstance(v, list) else v) for k, v in obj.items()
+        }
+    else:
+        clipped = obj
+
+    text = json.dumps(clipped, ensure_ascii=False, indent=2, default=str)
+
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    # 兜底：按 max_chars 继续丢弃列表尾部元素。优先处理顶层 list；
+    # 若是 dict，则找出最长的 list 字段逐步丢弃。
+    def _shrink_once(o: Any) -> tuple[Any, bool]:
+        if isinstance(o, list) and len(o) > 1:
+            return o[:-1], True
+        if isinstance(o, dict):
+            longest_key: str | None = None
+            longest_len = -1
+            for k, v in o.items():
+                if isinstance(v, list) and len(v) > longest_len:
+                    longest_key, longest_len = k, len(v)
+            if longest_key is not None and longest_len > 1:
+                o = dict(o)
+                o[longest_key] = o[longest_key][:-1]
+                return o, True
+        return o, False
+
+    current = clipped
+    while len(text) > max_chars:
+        current, shrunk = _shrink_once(current)
+        if not shrunk:
+            # 无法再结构化裁剪：硬切并追加显式提示（仍是合法 JSON 字符串字段）
+            return json.dumps(
+                {
+                    "_truncated": True,
+                    "reason": (
+                        f"返回 JSON 超过 p2p.tool_output.max_chars={max_chars} "
+                        f"且无可裁剪列表；已丢弃尾部内容。"
+                    ),
+                    "preview": text[: max(0, max_chars - 200)],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        text = json.dumps(current, ensure_ascii=False, indent=2, default=str)
+
+    return text
+
+
 # ============================================================
 # 查询工具
 # ============================================================
@@ -82,7 +172,7 @@ async def query_purchase_orders(
         po_number=po_number,
         days=days,
     )
-    return json.dumps(pos, ensure_ascii=False, indent=2)
+    return _clip_and_dump(pos)
 
 
 @tool
@@ -110,7 +200,7 @@ async def query_receipts(
         supplier_id=supplier_id,
         days=days,
     )
-    return json.dumps(receipts, ensure_ascii=False, indent=2)
+    return _clip_and_dump(receipts)
 
 
 @tool
@@ -144,7 +234,7 @@ async def query_invoices(
         invoice_number=invoice_number,
         days=days,
     )
-    return json.dumps(invoices, ensure_ascii=False, indent=2)
+    return _clip_and_dump(invoices)
 
 
 @tool
@@ -175,7 +265,7 @@ async def query_payments(
         payment_number=payment_number,
         days=days,
     )
-    return json.dumps(payments, ensure_ascii=False, indent=2)
+    return _clip_and_dump(payments)
 
 
 # ============================================================
@@ -198,7 +288,7 @@ def _run_three_way_match_sync(po_number: str) -> str:
     result: list[dict[str, Any]] = [
         anomaly.model_dump(mode="json") for anomaly in anomalies
     ]
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return _clip_and_dump(result)
 
 
 @tool
@@ -231,7 +321,7 @@ def _run_price_variance_analysis_sync(supplier_id: str, days: int) -> str:
     result: list[dict[str, Any]] = [
         anomaly.model_dump(mode="json") for anomaly in anomalies
     ]
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return _clip_and_dump(result)
 
 
 @tool
@@ -269,7 +359,7 @@ def _run_payment_compliance_check_sync(supplier_id: str, days: int) -> str:
     result: list[dict[str, Any]] = [
         anomaly.model_dump(mode="json") for anomaly in anomalies
     ]
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return _clip_and_dump(result)
 
 
 @tool
@@ -320,7 +410,7 @@ def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
         period=period,
     )
 
-    return json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    return _clip_and_dump(report.model_dump(mode="json"))
 
 
 @tool
@@ -374,7 +464,7 @@ async def query_vendor_master(vendor_ids: str = "") -> str:
     repo = _get_repository()
     ids = [v.strip() for v in vendor_ids.split(",") if v.strip()] if vendor_ids else []
     suppliers = await asyncio.to_thread(_query_vendor_master_sync, repo, ids)
-    return json.dumps(suppliers, ensure_ascii=False, indent=2)
+    return _clip_and_dump(suppliers)
 
 
 def _query_vendor_master_sync(repo: P2PRepository, vendor_ids: list[str]) -> list[dict[str, Any]]:
@@ -424,7 +514,7 @@ async def calculate_spend_analysis(
     """
     repo = _get_repository()
     result = await asyncio.to_thread(_calculate_spend_analysis_sync, repo, group_by, days)
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _calculate_spend_analysis_sync(
@@ -495,7 +585,7 @@ async def analyze_receipt_anomalies(
     result = await asyncio.to_thread(
         _analyze_receipt_anomalies_sync, repo, supplier_id, po_number, days
     )
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _analyze_receipt_anomalies_sync(
@@ -578,7 +668,7 @@ async def detect_duplicate_invoices(
     result = await asyncio.to_thread(
         _detect_duplicate_invoices_sync, repo, supplier_id, days
     )
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _detect_duplicate_invoices_sync(
@@ -648,7 +738,7 @@ async def analyze_discount_utilization(
     result = await asyncio.to_thread(
         _analyze_discount_utilization_sync, repo, supplier_id, days
     )
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _analyze_discount_utilization_sync(
@@ -739,7 +829,7 @@ async def analyze_vendor_concentration(
     result = await asyncio.to_thread(
         _analyze_vendor_concentration_sync, repo, days, top_n
     )
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _analyze_vendor_concentration_sync(
@@ -841,7 +931,7 @@ async def calculate_po_cycle_time(
     result = await asyncio.to_thread(
         _calculate_po_cycle_time_sync, repo, days, supplier_id
     )
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _clip_and_dump(result)
 
 
 def _calculate_po_cycle_time_sync(

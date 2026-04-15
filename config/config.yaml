@@ -122,6 +122,9 @@ observability:
   slow_tool_ms: 2000                  # 超过此耗时的 tool 调用打 WARNING
   slow_model_ms: 5000                 # 超过此耗时的 model 调用打 WARNING
   verbose_calls: true                 # 高频调用 INFO 开关（LLM/Tool/Memory/checkpointer）；高并发场景可关闭降噪
+  log_llm_content: true               # verbose_calls INFO / 异常 WARNING 是否附带 prompt/response/args/output 预览
+  log_content_truncate: 500           # 上述内容预览截断字符数
+  log_on_error_only: false            # true=正常路径只留摘要，内容仅在异常 WARNING 中输出（生产合规模式）
 
 async_analysis:
   max_concurrent_tasks: 5             # 同进程并发分析任务上限，超出 queued 排队
@@ -173,6 +176,13 @@ p2p:
     high_amount_threshold: 500000     # 金额超过50万自动升为HIGH
     variance_high_multiplier: 2.0     # 超容差2倍以上为HIGH
 
+  # tool 返回值裁剪：源头防止 ERP 大数据量压垮 ReAct 消息历史或 ReportAgent prompt。
+  # 超过 max_items 的列表只保留前 N 条，尾部追加一条 "_truncated" 摘要记录；
+  # 最终 JSON 再受 max_chars 兜底（超过则从列表尾部继续丢弃到达标）。
+  tool_output:
+    max_items: 200                    # 列表型返回最多保留的条目数（0 关闭）
+    max_chars: 30000                  # 单次 tool 返回 JSON 字符数硬上限（0 关闭）
+
 report:
   # ReportAgent LLM 输出硬上限（token）；覆盖 llm_fast.max_tokens。
   # 0 表示不覆盖，沿用 llm_fast.max_tokens 的值。
@@ -184,6 +194,14 @@ report:
   detailed_max_chars: 800             # detailed：保持 4 段结构但限定总字数
   brief_max_chars: 500                # brief：简报摘要模式
   table_max_chars: 300                # table：表格 + 简短结论
+  # 单个 tool 输出拼入报告 prompt 时的字符硬上限；仅 span attr 记录截断计数，
+  # 不把"已截断"标记写入 prompt，避免引导模型在报告里反复强调数据不全。
+  outputs_per_key_max_chars: 12000
+  # tool outputs 整体 token 预算占 llm_fast.context_window 的百分比（0 关闭预算制）。
+  # 生效顺序：总预算均摊到各 key → 再受 outputs_per_key_max_chars 上限约束。
+  outputs_context_max_tokens_pct: 60
+  # 模板常量 token 预留（prompt 骨架 + 规则 + 本体等），从总预算中扣除。
+  outputs_template_overhead_tokens: 1500
 
 memory:
   short_term:

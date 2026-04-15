@@ -165,12 +165,15 @@ class TestReportAgentGenerate:
         mock_llm.model_name = "test-model"
         agent._llm = mock_llm
 
-        big_value = "x" * 5000
+        limit = settings.report.outputs_per_key_max_chars
+        big_value = "x" * (limit + 2000)
         await agent.generate(scenario="测试", outputs={"big": big_value})
         prompt = mock_llm.ainvoke.call_args[0][0]
-        # 应截断到 3000
-        assert len(big_value) > 3000
-        assert "x" * 3001 not in prompt
+        assert len(big_value) > limit
+        # 超过上限的尾部字符不应出现在 prompt 中
+        assert "x" * (limit + 1) not in prompt
+        # 截断不向 prompt 注入"已截断"标记（只记录到 span attr）
+        assert "已截断" not in prompt
 
     @pytest.mark.asyncio
     async def test_prompt_contains_severity_thresholds(self, settings: Settings) -> None:
@@ -217,7 +220,6 @@ class TestReportAgentGenerate:
         assert "只读" in prompt
         assert "建议人工处理" in prompt
         assert "HIGH" in prompt and "MEDIUM" in prompt and "LOW" in prompt
-        assert "已截断" in prompt
 
     @pytest.mark.asyncio
     async def test_prompt_contains_current_date(self, settings: Settings) -> None:
@@ -313,9 +315,25 @@ class TestReportAgentGenerate:
         assert hashes[0] == hashes[-1]
 
     @pytest.mark.asyncio
-    async def test_truncation_marker_injected(self, settings: Settings) -> None:
-        """超过 3000 字符的工具输出应附加 [已截断] 标记到 outputs_text。"""
+    async def test_truncation_recorded_in_span_not_prompt(
+        self, settings: Settings, monkeypatch
+    ) -> None:
+        """超限输出应静默截断并在 span attr 中计数，不向 prompt 注入"已截断"标记。"""
         from modules.p2p.report_agent import ReportAgent
+
+        captured_attrs: list[dict] = []
+
+        class _SpanCtx:
+            def __init__(self, span_name: str, op: str) -> None:
+                self.attrs: dict = {}
+                captured_attrs.append(self.attrs)
+            def __enter__(self) -> dict:
+                return self.attrs
+            def __exit__(self, *_: object) -> None:
+                pass
+
+        import core.observability.middleware as obs_mod
+        monkeypatch.setattr(obs_mod, "record_span", _SpanCtx)
 
         agent = ReportAgent(settings=settings)
         mock_response = MagicMock()
@@ -326,11 +344,15 @@ class TestReportAgentGenerate:
         mock_llm.model_name = "test-model"
         agent._llm = mock_llm
 
-        big_value = "x" * 5000
+        limit = settings.report.outputs_per_key_max_chars
+        big_value = "x" * (limit + 2000)
         await agent.generate(scenario="测试", outputs={"big": big_value})
         prompt = mock_llm.ainvoke.call_args[0][0]
 
-        assert "[已截断，原始数据更长]" in prompt
+        assert "已截断" not in prompt
+        truncated_counts = [a.get("truncated_outputs") for a in captured_attrs
+                            if "truncated_outputs" in a]
+        assert truncated_counts and max(truncated_counts) == 1
 
     @pytest.mark.asyncio
     async def test_generate_llm_failure_raises(self, settings: Settings) -> None:

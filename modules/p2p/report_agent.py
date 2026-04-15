@@ -58,7 +58,6 @@ _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以�
 - **语言必须是中文**：所有段落、标题、要点、结论均使用简体中文；即使工具输出数据中含英文字段名或枚举值，正文叙述仍用中文
 - 所有结论、数据、单据号、金额、供应商名称必须直接来源于上文"工具输出数据"；禁止推断、猜测或虚构未提供的具体数值
 - 建议措施必须基于上文工具输出中已出现的具体异常或数据；不得引入未提及的供应商、未发生的事件或假想的系统改造项
-- 看到 "[已截断]" 标记时，不要基于末尾内容做结论；必要时在报告中注明"数据过长已截断，结论仅覆盖前段"
 - 如工具输出为空或数据不足以支撑某项结论，必须明确写"数据不足"或"无异常发现"，不得编造
 - 本系统为分析只读系统，不会执行任何 ERP 写操作（付款、审批、工单创建、单据修改、邮件发送等）；改进动作一律以"建议人工处理"措辞表达，不要承诺或模拟执行
 - 直接输出 Markdown 正文，不要添加前言或"好的，以下是..."之类的导语
@@ -90,6 +89,41 @@ class ReportAgent:
             max_tokens_override=max_tok if max_tok else None,
         )
         return self._llm
+
+    @staticmethod
+    def _extract_chunk_text(chunk: Any) -> str:
+        """从 ``AIMessageChunk`` 中提取增量文本，兼容多种模型返回结构。
+
+        优先级：
+
+        1. ``chunk.content`` 是非空 ``str`` → 直接使用（OpenAI / Qwen 主模型）
+        2. ``chunk.content`` 是 ``list[dict]`` → 拼接所有 text block 的 ``text``
+           （LangChain 对多模态 / reasoning 模型用 content-blocks 结构）
+        3. ``chunk.additional_kwargs["reasoning_content"]`` 非空 → 作为兜底
+
+        #3 专门处理 Qwen3 系列的**已知 Bug**：当 ``enable_thinking=False`` 与
+        ``stream=True`` 同时生效（Dashscope OpenAI 兼容接口、vLLM、SGLang 后端
+        均中招），模型把最终答案错误地落在 ``reasoning_content`` 字段而非
+        ``content``；此时 ``content`` 是空串，若只读 content 会得到 0 长度输出。
+        参考：sgl-project/sglang#5874、vllm-project/vllm#38894。
+        """
+        raw = getattr(chunk, "content", None)
+        if isinstance(raw, str) and raw:
+            return raw
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for block in raw:
+                if isinstance(block, dict):
+                    text = block.get("text") or block.get("content") or ""
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+            if parts:
+                return "".join(parts)
+        extra = getattr(chunk, "additional_kwargs", None) or {}
+        reasoning = extra.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            return reasoning
+        return ""
 
     async def _astream_with_publish(
         self,
@@ -152,7 +186,7 @@ class ReportAgent:
             last_flush_ts = _time.monotonic()
 
         async for chunk in llm.astream(prompt):
-            text = getattr(chunk, "content", "") or ""
+            text = self._extract_chunk_text(chunk)
             if text:
                 pending.append(text)
                 accumulated.append(text)
@@ -167,7 +201,20 @@ class ReportAgent:
                 _flush()
         # 末尾兜底 flush（空 delta 也要带 eos=True 让前端结束累加状态）
         _flush(eos=True)
-        return "".join(accumulated), final_meta
+        full_text = "".join(accumulated)
+        if not full_text:
+            # 流式跑完但没拿到任何文本：常见于 Qwen3 / 部分 provider 的兼容性异常。
+            # 抛 EMPTY_RESPONSE 让上层 tenacity 按 transient 规则决定是否重试；
+            # 即使不重试也比静默写一份空 report 好——前端能看到明确的 error 事件。
+            from modules.p2p.errors import ReportGenerationError
+
+            raise ReportGenerationError(
+                "EMPTY_RESPONSE",
+                "LLM 流式返回为空（content / reasoning_content 均无文本）；"
+                "常见原因：Qwen3 系列 enable_thinking=False + stream=True "
+                "的兼容性 bug。可关闭 llm_fast.streaming_enabled 回退到 ainvoke。",
+            )
+        return full_text, final_meta
 
     async def generate(
         self,
@@ -202,28 +249,83 @@ class ReportAgent:
             # 子 span: 输出合并 + Prompt 构建 + LLM 懒加载初始化
             with record_span("report.prep", "prompt_build") as prep_attrs:
                 # —— 1) outputs 合并/截断 ——
+                # 两级预算：
+                #   a. 总预算 = context_window * outputs_context_max_tokens_pct%
+                #             - max_output_tokens - outputs_template_overhead_tokens
+                #      用于兜住所有 outputs 合计占用，不让单次报告生成把窗口打爆。
+                #   b. per-key 软上限 = min(总预算均摊, outputs_per_key_max_chars)
+                #      保证多 key 场景下任何单个 key 都不会独占预算。
+                # 预算换算回字符数使用 llm_fast.token_estimate_ratio（字符/token）。
                 with record_span("report.prep", "merge_outputs") as merge_attrs:
+                    from core.observability.middleware import estimate_tokens
+
+                    report_cfg = self._settings.report
+                    llm_fast_cfg = self._settings.llm_fast
+                    ratio = max(0.5, float(llm_fast_cfg.token_estimate_ratio))
+
+                    active_keys = [k for k in outputs if k != "report"]
+                    key_count = max(1, len(active_keys))
+
+                    if report_cfg.outputs_context_max_tokens_pct > 0:
+                        total_budget_tokens = int(
+                            llm_fast_cfg.context_window
+                            * report_cfg.outputs_context_max_tokens_pct
+                            / 100
+                            - report_cfg.max_output_tokens
+                            - report_cfg.outputs_template_overhead_tokens
+                        )
+                        total_budget_tokens = max(1000, total_budget_tokens)
+                        total_budget_chars = int(total_budget_tokens * ratio)
+                        per_key_budget_chars = total_budget_chars // key_count
+                    else:
+                        total_budget_chars = 0  # 关闭预算制
+                        per_key_budget_chars = 10**9  # 不设上限
+
+                    per_key_hard_limit = report_cfg.outputs_per_key_max_chars
+                    if per_key_hard_limit > 0:
+                        per_key_limit = min(per_key_budget_chars, per_key_hard_limit)
+                    else:
+                        per_key_limit = per_key_budget_chars
+
                     outputs_parts: list[str] = []
                     truncated_count = 0
-                    for key, value in outputs.items():
-                        if key == "report":
-                            continue
-                        if len(value) > 3000:
+                    for key in active_keys:
+                        value = outputs[key]
+                        if per_key_limit > 0 and len(value) > per_key_limit:
                             truncated_count += 1
-                            truncated = value[:3000] + "\n...[已截断，原始数据更长]"
+                            clipped = value[:per_key_limit]
                         else:
-                            truncated = value
-                        outputs_parts.append(f"### {key}\n```json\n{truncated}\n```")
+                            clipped = value
+                        outputs_parts.append(f"### {key}\n```json\n{clipped}\n```")
 
                     outputs_text = (
                         "\n\n".join(outputs_parts) if outputs_parts else "（无数据输出）"
                     )
+
+                    # 兜底：合并后仍超总预算（连接符 + 小头部叠加），从最长的 part
+                    # 尾部继续切，保证总长度不超 total_budget_chars。
+                    if total_budget_chars > 0 and len(outputs_text) > total_budget_chars:
+                        overflow = len(outputs_text) - total_budget_chars
+                        # 找最长 part 并切
+                        longest_idx = max(
+                            range(len(outputs_parts)),
+                            key=lambda i: len(outputs_parts[i]),
+                        )
+                        longest = outputs_parts[longest_idx]
+                        cut = max(0, len(longest) - overflow)
+                        outputs_parts[longest_idx] = longest[:cut]
+                        truncated_count += 1
+                        outputs_text = "\n\n".join(outputs_parts)
+
                     merge_attrs["input_keys_count"] = len(outputs_parts)
                     merge_attrs["outputs_total_chars"] = sum(
                         len(v) for v in outputs.values()
                     )
                     merge_attrs["truncated_outputs"] = truncated_count
                     merge_attrs["outputs_text_chars"] = len(outputs_text)
+                    merge_attrs["outputs_text_tokens_est"] = estimate_tokens(outputs_text)
+                    merge_attrs["total_budget_chars"] = total_budget_chars
+                    merge_attrs["per_key_limit_chars"] = per_key_limit
 
                 # —— 2) Prompt 模板渲染 ——
                 with record_span("report.prep", "format_prompt") as fmt_attrs:

@@ -27,9 +27,15 @@ def settings() -> Settings:
 class _FakeChunk:
     """模拟 langchain AIMessageChunk 的最小接口。"""
 
-    def __init__(self, content: str, usage_metadata: Any = None) -> None:
+    def __init__(
+        self,
+        content: Any = "",
+        usage_metadata: Any = None,
+        additional_kwargs: dict | None = None,
+    ) -> None:
         self.content = content
         self.usage_metadata = usage_metadata
+        self.additional_kwargs = additional_kwargs or {}
 
 
 class _FakeStreamingLLM:
@@ -66,6 +72,103 @@ def event_bus() -> MemoryEventBus:
         yield bus
     finally:
         events_mod._bus = None  # noqa: SLF001
+
+
+class TestExtractChunkText:
+    """_extract_chunk_text 必须兼容三种 chunk 结构。"""
+
+    def test_content_is_plain_string(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        ch = _FakeChunk(content="hello world")
+        assert ReportAgent._extract_chunk_text(ch) == "hello world"
+
+    def test_content_is_list_of_text_blocks(self) -> None:
+        """多模态 / reasoning 模型的 content-blocks 结构。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        ch = _FakeChunk(
+            content=[
+                {"type": "text", "text": "hello "},
+                {"type": "text", "text": "world"},
+            ]
+        )
+        assert ReportAgent._extract_chunk_text(ch) == "hello world"
+
+    def test_qwen3_thinking_bug_reasoning_content_fallback(self) -> None:
+        """Qwen3 enable_thinking=False + stream=True 已知 bug：
+        内容错落在 additional_kwargs.reasoning_content，不是 content。
+        """
+        from modules.p2p.report_agent import ReportAgent
+
+        ch = _FakeChunk(
+            content="",
+            additional_kwargs={"reasoning_content": "qwen3 answer"},
+        )
+        assert ReportAgent._extract_chunk_text(ch) == "qwen3 answer"
+
+    def test_content_priority_over_reasoning_content(self) -> None:
+        """content 非空时优先用 content，不拿 reasoning_content。"""
+        from modules.p2p.report_agent import ReportAgent
+
+        ch = _FakeChunk(
+            content="real answer",
+            additional_kwargs={"reasoning_content": "should be ignored"},
+        )
+        assert ReportAgent._extract_chunk_text(ch) == "real answer"
+
+    def test_all_empty_returns_empty_string(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        ch = _FakeChunk(content="", additional_kwargs={})
+        assert ReportAgent._extract_chunk_text(ch) == ""
+
+
+@pytest.mark.asyncio
+async def test_astream_raises_empty_response_when_no_text_collected(
+    settings: Settings, event_bus: MemoryEventBus
+) -> None:
+    """astream 跑完一片空白时抛 EMPTY_RESPONSE，不静默返回空串。"""
+    from modules.p2p.errors import ReportGenerationError
+    from modules.p2p.report_agent import ReportAgent
+
+    agent = ReportAgent(settings=settings)
+    # 只有 usage_metadata，没有任何文本内容的 chunk（模拟 Qwen3 兼容性炸裂）
+    llm = _FakeStreamingLLM(
+        [_FakeChunk(content="", usage_metadata={"total_tokens": 1})]
+    )
+
+    with pytest.raises(ReportGenerationError) as exc_info:
+        await agent._astream_with_publish(
+            llm, prompt="p", trace_id="t-empty", message_id="m-empty",
+        )
+    assert exc_info.value.code == "EMPTY_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_astream_uses_reasoning_content_when_content_empty(
+    settings: Settings, event_bus: MemoryEventBus
+) -> None:
+    """Qwen3 bug 场景：所有文本都落在 reasoning_content，仍能完整累加。"""
+    from modules.p2p.report_agent import ReportAgent
+
+    agent = ReportAgent(settings=settings)
+    llm = _FakeStreamingLLM(
+        [
+            _FakeChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "# 报告\n"},
+            ),
+            _FakeChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "正文内容。"},
+            ),
+        ]
+    )
+    content, _ = await agent._astream_with_publish(
+        llm, prompt="p", trace_id="t-rc", message_id="m-rc",
+    )
+    assert content == "# 报告\n正文内容。"
 
 
 @pytest.mark.asyncio

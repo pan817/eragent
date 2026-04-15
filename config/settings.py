@@ -315,6 +315,15 @@ class ObservabilitySettings(BaseSettings):
     # 不影响低频里程碑（analyze/route/DAG/ReAct/ReportAgent 等）。
     verbose_calls: bool = True
 
+    # LLM / Tool 调用内容日志开关。开启后 verbose_calls 成功 INFO 与异常
+    # WARNING 均会附带 prompt/response/args/output 预览（截断到
+    # log_content_truncate 字符），方便直接在 stderr 排障不必查 trace DB。
+    # ERP 场景业务数据敏感，生产可按合规要求关闭，或将
+    # log_on_error_only 置 true 让正常路径只留摘要、异常路径才打内容。
+    log_llm_content: bool = True
+    log_content_truncate: int = 500
+    log_on_error_only: bool = False
+
     model_config = {"env_prefix": "OBS_"}
 
     @field_validator("console_stream")
@@ -428,6 +437,21 @@ class OntologyContextSettings(BaseSettings):
     model_config = {"env_prefix": "ONTOLOGY_"}
 
 
+class ToolOutputSettings(BaseSettings):
+    """P2P tool 返回值裁剪配置。
+
+    ERP 真实数据量级下，单次 tool 调用可能返回几十万字符的 anomalies 列表，
+    直接回灌到 ReAct 消息历史或 ReportAgent prompt 会冲爆 context_window。
+    在 tool 返回端做源头裁剪：超过 ``max_items`` 的列表只保留前 N 条 + 一条
+    "还有 M 条同类结果未列出" 的摘要记录；最终 JSON 再受 ``max_chars`` 兜底。
+    """
+
+    max_items: int = 200            # 列表型返回最多保留的条目数（0 关闭）
+    max_chars: int = 30000          # 单次 tool 返回 JSON 字符数硬上限（0 关闭）
+
+    model_config = {"env_prefix": "P2P_TOOLS_"}
+
+
 class P2PSettings(BaseSettings):
     """P2P 模块整体配置。"""
 
@@ -444,6 +468,7 @@ class P2PSettings(BaseSettings):
     ontology: OntologyContextSettings = Field(
         default_factory=OntologyContextSettings
     )
+    tool_output: ToolOutputSettings = Field(default_factory=ToolOutputSettings)
 
     model_config = {"env_prefix": "P2P_"}
 
@@ -462,6 +487,18 @@ class ReportSettings(BaseSettings):
     detailed_max_chars: int = 800
     brief_max_chars: int = 500
     table_max_chars: int = 300
+    # 单个 tool 输出拼入报告 prompt 时的字符硬上限；超过部分静默截断，
+    # 仅在 span attr 中记录 truncated_outputs 计数，不在 prompt 中暴露截断标记，
+    # 避免模型被"已截断"文本引导、在报告里反复提示数据不全。
+    outputs_per_key_max_chars: int = 12000
+    # tool outputs 整体 token 预算占 ``llm_fast.context_window`` 的百分比。
+    # 预算 = context_window * pct - max_output_tokens - 模板常量开销；
+    # 按 key 数量做均摊配额，单 key 再受 ``outputs_per_key_max_chars`` 上限约束。
+    # 0 表示关闭预算制，仅走 per-key 字符上限（老逻辑）。
+    outputs_context_max_tokens_pct: int = 60
+    # 模板常量（固定 prompt 骨架 + 本体规则 + 日期等）的 token 预留，
+    # 从总预算中扣除，防止模板本身把窗口占满。
+    outputs_template_overhead_tokens: int = 1500
 
     model_config = {"env_prefix": "REPORT_"}
 

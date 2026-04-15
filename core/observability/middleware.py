@@ -110,6 +110,51 @@ def _slow_model_ms() -> int:
         return 5000
 
 
+def _log_llm_content() -> bool:
+    """是否在 verbose_calls / 异常 WARNING 中附带 LLM/Tool 内容预览。"""
+    try:
+        from config.settings import get_settings
+
+        return bool(get_settings().observability.log_llm_content)
+    except Exception as exc:
+        _logger.info("failed to load observability.log_llm_content: %s", exc)
+        return True
+
+
+def _log_content_truncate() -> int:
+    """LLM/Tool 内容日志截断长度（字符）。"""
+    try:
+        from config.settings import get_settings
+
+        return int(get_settings().observability.log_content_truncate)
+    except Exception as exc:
+        _logger.info("failed to load observability.log_content_truncate: %s", exc)
+        return 500
+
+
+def _log_on_error_only() -> bool:
+    """True 表示正常路径仅打摘要，内容仅在异常 WARNING 中输出。"""
+    try:
+        from config.settings import get_settings
+
+        return bool(get_settings().observability.log_on_error_only)
+    except Exception as exc:
+        _logger.info("failed to load observability.log_on_error_only: %s", exc)
+        return False
+
+
+def _model_io_preview(attrs: dict[str, Any]) -> tuple[str, str]:
+    """从 model span attributes 抽取 prompt / response 预览文本。"""
+    limit = _log_content_truncate()
+    raw_in = attrs.get("input")
+    if isinstance(raw_in, dict):
+        raw_in = raw_in.get("messages") or raw_in.get("prompt") or raw_in
+    raw_out = attrs.get("output")
+    if isinstance(raw_out, dict):
+        raw_out = raw_out.get("content") or raw_out.get("text") or raw_out
+    return _truncate_text(raw_in, limit), _truncate_text(raw_out, limit)
+
+
 def _verbose_calls() -> bool:
     """高频调用 INFO 开关（LLM / Tool / Memory / checkpointer）。
 
@@ -639,17 +684,33 @@ class TimingMiddleware(AgentMiddleware):
                 usage = out.get("usage") or {} if isinstance(out, dict) else {}
                 pt = usage.get("input_tokens") or usage.get("prompt_tokens")
                 ct = usage.get("output_tokens") or usage.get("completion_tokens")
-                _logger.info(
-                    "model call ok: name=%s duration=%.1fms msgs=%s tools=%s "
-                    "prompt_tokens=%s completion_tokens=%s",
-                    name, duration_ms,
-                    attributes.get("message_count"),
-                    attributes.get("tool_count"),
-                    pt, ct,
-                )
+                if _log_llm_content() and not _log_on_error_only():
+                    prompt_preview, response_preview = _model_io_preview(attributes)
+                    _logger.info(
+                        "model call ok: name=%s duration=%.1fms msgs=%s tools=%s "
+                        "prompt_tokens=%s completion_tokens=%s prompt=%s response=%s",
+                        name, duration_ms,
+                        attributes.get("message_count"),
+                        attributes.get("tool_count"),
+                        pt, ct, prompt_preview, response_preview,
+                    )
+                else:
+                    _logger.info(
+                        "model call ok: name=%s duration=%.1fms msgs=%s tools=%s "
+                        "prompt_tokens=%s completion_tokens=%s",
+                        name, duration_ms,
+                        attributes.get("message_count"),
+                        attributes.get("tool_count"),
+                        pt, ct,
+                    )
             elif span_type == "tool":
-                args_brief = _truncate_text(attributes.get("args"), 120)
-                out_brief = _truncate_text(attributes.get("output"), 120)
+                if _log_llm_content() and not _log_on_error_only():
+                    limit = _log_content_truncate()
+                    args_brief = _truncate_text(attributes.get("args"), limit)
+                    out_brief = _truncate_text(attributes.get("output"), limit)
+                else:
+                    args_brief = _truncate_text(attributes.get("args"), 120)
+                    out_brief = _truncate_text(attributes.get("output"), 120)
                 _logger.info(
                     "tool call ok: name=%s duration=%.1fms args=%s output=%s",
                     name, duration_ms, args_brief, out_brief,
@@ -685,12 +746,33 @@ class TimingMiddleware(AgentMiddleware):
         elif status == "error":
             # tool / model 失败已在 wrap_*_call 里抛异常，调用方可捕获。
             # 但当前并不自动写 WARNING 到业务日志，这里补一条简报，
-            # 避免只有 trace DB 知道失败。
-            _logger.warning(
-                "span failed: type=%s name=%s duration=%.1fms error_type=%s",
-                span_type, name, duration_ms,
-                attributes.get("error_type") or "-",
-            )
+            # 避免只有 trace DB 知道失败。异常路径始终附带内容预览
+            # （受 log_llm_content 开关控制），排障不必查 trace DB。
+            if _log_llm_content() and span_type == "model":
+                prompt_preview, response_preview = _model_io_preview(attributes)
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms error_type=%s "
+                    "prompt=%s response=%s",
+                    span_type, name, duration_ms,
+                    attributes.get("error_type") or "-",
+                    prompt_preview, response_preview,
+                )
+            elif _log_llm_content() and span_type == "tool":
+                limit = _log_content_truncate()
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms error_type=%s "
+                    "args=%s output=%s",
+                    span_type, name, duration_ms,
+                    attributes.get("error_type") or "-",
+                    _truncate_text(attributes.get("args"), limit),
+                    _truncate_text(attributes.get("output"), limit),
+                )
+            else:
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms error_type=%s",
+                    span_type, name, duration_ms,
+                    attributes.get("error_type") or "-",
+                )
 
     # ------------------------------------------------------------------
     # model hooks（before/after model：捕获 input + output）
@@ -1101,25 +1183,62 @@ def record_span(span_type: str, name: str, **attributes: Any):
         if active_store is not None:
             active_store.enqueue(sp)
         # 与 _record_span 对称：通过 record_span 上下文管理器记录的调用
-        # （如 DAG executor 的 tool / dag.task）同样享受高频调用 INFO。
+        # （如 ReportAgent LLM、DAG executor 的 tool / dag.task、Router L3）
+        # 同样享受高频调用 INFO 与异常 WARNING，且按 log_llm_content 开关
+        # 附带 prompt/response/args/output 预览。
+        attrs = attributes or {}
         if status == "ok" and _verbose_calls() and span_type in ("model", "tool"):
-            attrs = attributes or {}
             if span_type == "model":
                 out = attrs.get("output") if isinstance(attrs.get("output"), dict) else {}
                 usage = out.get("usage") or {} if isinstance(out, dict) else {}
                 pt = usage.get("input_tokens") or usage.get("prompt_tokens")
                 ct = usage.get("output_tokens") or usage.get("completion_tokens")
-                _logger.info(
-                    "model call ok: name=%s duration=%.1fms "
-                    "prompt_tokens=%s completion_tokens=%s",
-                    name, duration_ms, pt, ct,
-                )
+                if _log_llm_content() and not _log_on_error_only():
+                    prompt_preview, response_preview = _model_io_preview(attrs)
+                    _logger.info(
+                        "model call ok: name=%s duration=%.1fms "
+                        "prompt_tokens=%s completion_tokens=%s prompt=%s response=%s",
+                        name, duration_ms, pt, ct, prompt_preview, response_preview,
+                    )
+                else:
+                    _logger.info(
+                        "model call ok: name=%s duration=%.1fms "
+                        "prompt_tokens=%s completion_tokens=%s",
+                        name, duration_ms, pt, ct,
+                    )
             else:
+                if _log_llm_content() and not _log_on_error_only():
+                    limit = _log_content_truncate()
+                else:
+                    limit = 120
                 _logger.info(
                     "tool call ok: name=%s duration=%.1fms args=%s output=%s",
                     name, duration_ms,
-                    _truncate_text(attrs.get("args") or attrs.get("input"), 120),
-                    _truncate_text(attrs.get("output"), 120),
+                    _truncate_text(attrs.get("args") or attrs.get("input"), limit),
+                    _truncate_text(attrs.get("output"), limit),
+                )
+        elif status == "error" and span_type in ("model", "tool"):
+            # record_span 上下文管理器的异常路径原先仅 re-raise，
+            # 业务侧若只 warning 异常消息就会丢失 prompt/args 等上下文。
+            # 这里补一条 WARNING，与 _record_span 错误分支对齐。
+            if _log_llm_content() and span_type == "model":
+                prompt_preview, response_preview = _model_io_preview(attrs)
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms prompt=%s response=%s",
+                    span_type, name, duration_ms, prompt_preview, response_preview,
+                )
+            elif _log_llm_content() and span_type == "tool":
+                limit = _log_content_truncate()
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms args=%s output=%s",
+                    span_type, name, duration_ms,
+                    _truncate_text(attrs.get("args") or attrs.get("input"), limit),
+                    _truncate_text(attrs.get("output"), limit),
+                )
+            else:
+                _logger.warning(
+                    "span failed: type=%s name=%s duration=%.1fms",
+                    span_type, name, duration_ms,
                 )
 
 
