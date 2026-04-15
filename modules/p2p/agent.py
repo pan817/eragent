@@ -467,6 +467,15 @@ class P2PAgent:
         max_retries: int = self._settings.llm.max_retries
         last_error: Exception | None = None
 
+        _logger.info(
+            "ReAct start: query='%s' user=%s session=%s days=%d max_retries=%d",
+            query,
+            user_id,
+            session_id,
+            time_range_days,
+            max_retries,
+        )
+
         # ── 构建本轮消息（重试循环外部，避免重复注入系统消息）──
         output_hint = f"\n[输出格式] {output_mode_prompt}" if output_mode_prompt else ""
         user_message: str = (
@@ -622,6 +631,14 @@ class P2PAgent:
 
                 elapsed_ms: float = (time.monotonic() - start_time) * 1000
 
+                _logger.info(
+                    "ReAct done: type=%s anomalies=%d duration=%.1fms attempts=%d",
+                    analysis_type.value,
+                    summary.get("anomaly_count", 0) if isinstance(summary, dict) else 0,
+                    elapsed_ms,
+                    attempt + 1,
+                )
+
                 return AnalysisResult(
                     report_id=report_id,
                     status=AnalysisStatus.SUCCESS,
@@ -659,6 +676,14 @@ class P2PAgent:
         # 所有重试均失败
         elapsed_ms = (time.monotonic() - start_time) * 1000
         error_msg: str = str(last_error) if last_error else "未知错误"
+
+        _logger.error(
+            "ReAct exhausted retries: error='%s' attempts=%d duration=%.1fms query='%s'",
+            error_msg,
+            max_retries,
+            elapsed_ms,
+            query,
+        )
 
         return AnalysisResult(
             report_id=report_id,

@@ -116,6 +116,11 @@ observability:
   trace_queue_maxsize: 10000          # trace 异步写入队列上限
   trace_batch_size: 50                # 批量写入条数
   trace_flush_interval: 1.0           # 批量写入间隔（秒）
+  console_enabled: true               # 控制台是否打印 trace 树 + 汇总
+  console_stream: "stdout"            # trace 专用输出流 (stdout|stderr)，与业务日志分流
+  console_io_panel: false             # 每次 model/tool 调用的 I/O 面板；生产默认关，排查时开启
+  slow_tool_ms: 2000                  # 超过此耗时的 tool 调用打 WARNING
+  slow_model_ms: 5000                 # 超过此耗时的 model 调用打 WARNING
 
 async_analysis:
   max_concurrent_tasks: 5             # 同进程并发分析任务上限，超出 queued 排队
@@ -200,5 +205,6 @@ memory:
 
 logging:
   level: "INFO"
-  format: "json"               # json | console
+  format: "console"            # json | console（生产推荐 json 便于采集）
   include_trace_id: true
+  business_stream: "stderr"    # 业务日志输出流；trace 日志走 observability.console_stream

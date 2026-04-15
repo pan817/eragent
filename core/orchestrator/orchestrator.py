@@ -724,8 +724,19 @@ class Orchestrator:
 
         timeout = self._settings.analysis.response_timeout_seconds
 
+        _logger.info(
+            "analyze start: query='%s' user=%s session=%s output_mode=%s "
+            "analysis_type=%s report_id=%s",
+            request.query,
+            request.user_id,
+            session_id,
+            request.output_mode,
+            request.analysis_type.value if request.analysis_type else "auto",
+            report_id,
+        )
+
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._analyze_inner(
                     request=request,
                     start_time=start_time,
@@ -736,6 +747,16 @@ class Orchestrator:
                 ),
                 timeout=timeout,
             )
+            _logger.info(
+                "analyze done: status=%s duration=%.1fms report_id=%s "
+                "type=%s anomalies=%d",
+                result.status.value,
+                result.duration_ms,
+                result.report_id,
+                result.analysis_type.value,
+                len(result.anomalies or []),
+            )
+            return result
         except asyncio.TimeoutError:
             trace_status = "error"
             duration_ms = (time.monotonic() - start_time) * 1000.0
@@ -770,6 +791,14 @@ class Orchestrator:
             trace_status = "error"
             trace_error = format_error_chain(exc)
             duration_ms = (time.monotonic() - start_time) * 1000.0
+            _logger.error(
+                "analyze failed: %s: %s elapsed=%.0fms query='%s'",
+                type(exc).__name__,
+                exc,
+                duration_ms,
+                request.query,
+                exc_info=True,
+            )
             return AnalysisResult(
                 report_id=report_id,
                 trace_id=trace_id,
@@ -878,6 +907,13 @@ class Orchestrator:
                 )
 
             analysis_type: AnalysisType = request.analysis_type or self._intent_router.resolve_type(signal)
+            _logger.info(
+                "intent resolved: type=%s level=L%d confidence=%.3f keywords=%s",
+                analysis_type.value,
+                signal.route_level,
+                signal.confidence,
+                signal.keywords,
+            )
             # SSE 阶段事件：意图已解析
             _publish_stage_safe(
                 "intent_resolved",
@@ -935,6 +971,14 @@ class Orchestrator:
 
             output_mode_prompt = _build_output_mode_prompts(self._settings).get(
                 request.output_mode, ""
+            )
+
+            _logger.info(
+                "route decision: path=%s analysis_type=%s days=%d entities=%s",
+                "DAG" if use_dag else "ReAct",
+                analysis_type.value,
+                time_range_days,
+                {k: v for k, v in parsed_params.items() if k != "days" and v},
             )
 
             if use_dag:

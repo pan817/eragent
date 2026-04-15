@@ -298,7 +298,23 @@ class ObservabilitySettings(BaseSettings):
     trace_batch_size: int = 50
     trace_flush_interval: float = 1.0
 
+    # Console trace 输出控制（通过独立 logger 原子写入，避免被业务日志切断）
+    console_enabled: bool = True          # 是否在控制台打印 trace 树 + 汇总
+    console_stream: str = "stdout"        # stdout | stderr
+    console_io_panel: bool = False        # 每次 model/tool 调用的 I/O 面板；生产默认关
+    slow_tool_ms: int = 2000              # 超过该阈值的 tool 调用打 WARNING
+    slow_model_ms: int = 5000             # 超过该阈值的 model 调用打 WARNING
+
     model_config = {"env_prefix": "OBS_"}
+
+    @field_validator("console_stream")
+    @classmethod
+    def _validate_console_stream(cls, v: str) -> str:
+        if v not in {"stdout", "stderr"}:
+            raise ValueError(
+                f"observability.console_stream 只支持 stdout / stderr，当前值: {v}"
+            )
+        return v
 
 
 class AsyncAnalysisSettings(BaseSettings):
@@ -456,8 +472,10 @@ class LoggingSettings(BaseSettings):
     """日志配置。"""
 
     level: str = "INFO"
-    format: str = "json"
+    format: str = "console"              # json | console
     include_trace_id: bool = True
+    # 业务日志输出流；trace 日志走 observability.console_stream
+    business_stream: str = "stderr"      # stdout | stderr
 
     model_config = {"env_prefix": "LOG_"}
 
@@ -469,6 +487,22 @@ class LoggingSettings(BaseSettings):
         if v.upper() not in valid_levels:
             raise ValueError(f"日志级别必须是 {valid_levels} 之一，当前值: {v}")
         return v.upper()
+
+    @field_validator("format")
+    @classmethod
+    def validate_format(cls, v: str) -> str:
+        if v.lower() not in {"json", "console"}:
+            raise ValueError(f"logging.format 只支持 json / console，当前值: {v}")
+        return v.lower()
+
+    @field_validator("business_stream")
+    @classmethod
+    def _validate_business_stream(cls, v: str) -> str:
+        if v not in {"stdout", "stderr"}:
+            raise ValueError(
+                f"logging.business_stream 只支持 stdout / stderr，当前值: {v}"
+            )
+        return v
 
 
 class Settings(BaseSettings):

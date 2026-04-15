@@ -62,6 +62,12 @@ class DAGExecutor:
             t["task_id"]: asyncio.Event() for t in tasks
         }
 
+        _logger.info(
+            "DAG execute start: tasks=%d tools=%s",
+            len(tasks),
+            [t.get("tool_name", "") for t in tasks],
+        )
+
         async def run_task(task: dict[str, Any]) -> None:
             nonlocal report_error
             task_id = task["task_id"]
@@ -167,7 +173,11 @@ class DAGExecutor:
                     completed.append(task_id)
                     span_attrs["status"] = "ok"
                     span_attrs["output"] = _truncate_text(result)
-                    _logger.debug("task %s completed: %s", task_id, tool_name)
+                    _logger.info(
+                        "DAG task ok: task=%s tool=%s",
+                        task_id,
+                        tool_name,
+                    )
 
                 except asyncio.TimeoutError:
                     failed[task_id] = f"工具 '{tool_name}' 超时（{timeout_sec}s）"
@@ -203,6 +213,16 @@ class DAGExecutor:
             dag_attrs["completed_tasks"] = completed
             dag_attrs["failed_tasks"] = failed
             dag_attrs["duration_sec"] = round(duration, 2)
+
+        log_fn = _logger.info if status == "ok" else _logger.warning
+        log_fn(
+            "DAG execute done: status=%s completed=%d failed=%d duration=%.2fs%s",
+            status,
+            len(completed),
+            len(failed),
+            duration,
+            f" failures={failed}" if failed else "",
+        )
 
         return {
             "status": status,

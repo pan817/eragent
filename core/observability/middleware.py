@@ -24,12 +24,13 @@ from langchain.agents.middleware.types import (
     ToolCallRequest,
 )
 
-from core.logging_utils import get_logger
+from core.logging_utils import get_logger, get_trace_logger
 from core.observability.console import format_io_panel, format_summary, format_tree
 from core.observability.store import RunEvent, SpanEvent, TraceStore, get_trace_store
 from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
+_trace_logger = get_trace_logger()
 
 
 # 单条 input/output 文本的最大长度。超出截断，避免 attributes JSON 膨胀。
@@ -65,6 +66,48 @@ def _max_error_text() -> int:
             "failed to load observability.max_error_text, using default: %s", exc
         )
         return _MAX_ERROR_TEXT_DEFAULT
+
+
+def _console_enabled() -> bool:
+    """控制台 trace 输出总开关（默认开）。"""
+    try:
+        from config.settings import get_settings
+
+        return bool(get_settings().observability.console_enabled)
+    except Exception as exc:
+        _logger.debug("failed to load observability.console_enabled: %s", exc)
+        return True
+
+
+def _console_io_panel() -> bool:
+    """每次 model/tool 调用的 I/O 面板开关（默认关，排查时开启）。"""
+    try:
+        from config.settings import get_settings
+
+        return bool(get_settings().observability.console_io_panel)
+    except Exception as exc:
+        _logger.debug("failed to load observability.console_io_panel: %s", exc)
+        return False
+
+
+def _slow_tool_ms() -> int:
+    try:
+        from config.settings import get_settings
+
+        return int(get_settings().observability.slow_tool_ms)
+    except Exception as exc:
+        _logger.debug("failed to load observability.slow_tool_ms: %s", exc)
+        return 2000
+
+
+def _slow_model_ms() -> int:
+    try:
+        from config.settings import get_settings
+
+        return int(get_settings().observability.slow_model_ms)
+    except Exception as exc:
+        _logger.debug("failed to load observability.slow_model_ms: %s", exc)
+        return 5000
 
 
 def format_error_chain(exc: BaseException, *, max_len: int | None = None) -> str:
@@ -429,10 +472,18 @@ class TimingMiddleware(AgentMiddleware):
                 tool_call_count=ctx.tool_count,
             )
         )
-        if self._print:
+        if self._print and _console_enabled():
             tree_spans = [s for s in ctx.spans if s.span_type != "agent"]
-            print(format_tree(tree_spans, ctx.trace_id), flush=True)
-            print(format_summary(tree_spans, total_ms), flush=True)
+            # 把一次 trace 的 tree + summary 拼成单个字符串后一次性交给 trace logger。
+            # StreamHandler.emit 内置锁保证整块原子写入，并发 trace 只会在块之间
+            # 交错，不会在行内被业务日志切断。
+            block = "\n".join(
+                [
+                    format_tree(tree_spans, ctx.trace_id),
+                    format_summary(tree_spans, total_ms),
+                ]
+            )
+            _trace_logger.info(block)
         _current_trace.set(None)
 
     # ------------------------------------------------------------------
@@ -534,9 +585,43 @@ class TimingMiddleware(AgentMiddleware):
             duration_ms=round(duration_ms, 3),
             status=status,
         )
-        if self._print:
-            # 每次调用结束后立即打印结构化 I/O 面板，方便实时观察
-            print(format_io_panel(sp), flush=True)
+        if self._print and _console_enabled() and _console_io_panel():
+            # I/O 面板每次调用一个块，照样走 trace_logger 单次 info 原子输出。
+            # 生产默认关闭（observability.console_io_panel=false），排查时开启。
+            panel = format_io_panel(sp)
+            if panel:
+                _trace_logger.info(panel)
+
+        # 慢调用告警：tool / model 耗时超过阈值打 WARNING，辅助生产定位
+        # 性能瓶颈（超时风险、速率限制、LLM 响应变慢等）。
+        if status == "ok":
+            if span_type == "tool":
+                threshold = _slow_tool_ms()
+                if threshold > 0 and duration_ms > threshold:
+                    _logger.warning(
+                        "slow tool: name=%s duration=%.1fms threshold=%dms",
+                        name, duration_ms, threshold,
+                    )
+            elif span_type == "model":
+                threshold = _slow_model_ms()
+                if threshold > 0 and duration_ms > threshold:
+                    _logger.warning(
+                        "slow model: name=%s duration=%.1fms threshold=%dms "
+                        "prompt_tokens=%s",
+                        name, duration_ms, threshold,
+                        (attributes.get("output") or {}).get("usage", {}).get(
+                            "input_tokens"
+                        ) if isinstance(attributes.get("output"), dict) else None,
+                    )
+        elif status == "error":
+            # tool / model 失败已在 wrap_*_call 里抛异常，调用方可捕获。
+            # 但当前并不自动写 WARNING 到业务日志，这里补一条简报，
+            # 避免只有 trace DB 知道失败。
+            _logger.warning(
+                "span failed: type=%s name=%s duration=%.1fms error_type=%s",
+                span_type, name, duration_ms,
+                attributes.get("error_type") or "-",
+            )
 
     # ------------------------------------------------------------------
     # model hooks（before/after model：捕获 input + output）
