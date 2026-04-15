@@ -293,15 +293,27 @@ def _publish_span_start(span_type: str, name: str) -> None:
     ctx = _current_trace.get()
     if ctx is None:
         return
+    from core.observability.display_labels import resolve_tool_label
+
     if span_type == "tool":
         _publish_to_event_bus(
             ctx.trace_id,
-            {"type": "tool", "action": "start", "name": name},
+            {
+                "type": "tool",
+                "action": "start",
+                "name": name,
+                "label": resolve_tool_label(name),
+            },
         )
     elif span_type == "dag.task":
         _publish_to_event_bus(
             ctx.trace_id,
-            {"type": "dag_task", "action": "start", "task_name": name},
+            {
+                "type": "dag_task",
+                "action": "start",
+                "task_name": name,
+                "label": resolve_tool_label(name),
+            },
         )
 
 
@@ -316,6 +328,8 @@ def _publish_span_end(
     ctx = _current_trace.get()
     if ctx is None:
         return
+    from core.observability.display_labels import resolve_tool_label
+
     if span_type == "tool":
         _publish_to_event_bus(
             ctx.trace_id,
@@ -323,6 +337,7 @@ def _publish_span_end(
                 "type": "tool",
                 "action": "end",
                 "name": name,
+                "label": resolve_tool_label(name),
                 "duration_ms": duration_ms,
                 "status": status,
             },
@@ -334,6 +349,7 @@ def _publish_span_end(
                 "type": "dag_task",
                 "action": "end",
                 "task_name": name,
+                "label": resolve_tool_label(name),
                 "duration_ms": duration_ms,
                 "status": status,
             },
@@ -348,7 +364,13 @@ def publish_stage(name: str, attrs: dict[str, Any] | None = None) -> None:
     ctx = _current_trace.get()
     if ctx is None:
         return
-    payload: dict[str, Any] = {"type": "stage", "name": name}
+    from core.observability.display_labels import resolve_stage_label
+
+    payload: dict[str, Any] = {
+        "type": "stage",
+        "name": name,
+        "label": resolve_stage_label(name),
+    }
     if attrs:
         payload["attrs"] = attrs
     _publish_to_event_bus(ctx.trace_id, payload)

@@ -201,45 +201,68 @@ class ReportAgent:
 
             # 子 span: 输出合并 + Prompt 构建 + LLM 懒加载初始化
             with record_span("report.prep", "prompt_build") as prep_attrs:
-                outputs_parts: list[str] = []
-                truncated_count = 0
-                for key, value in outputs.items():
-                    if key == "report":
-                        continue
-                    if len(value) > 3000:
-                        truncated_count += 1
-                        truncated = value[:3000] + "\n...[已截断，原始数据更长]"
-                    else:
-                        truncated = value
-                    outputs_parts.append(f"### {key}\n```json\n{truncated}\n```")
+                # —— 1) outputs 合并/截断 ——
+                with record_span("report.prep", "merge_outputs") as merge_attrs:
+                    outputs_parts: list[str] = []
+                    truncated_count = 0
+                    for key, value in outputs.items():
+                        if key == "report":
+                            continue
+                        if len(value) > 3000:
+                            truncated_count += 1
+                            truncated = value[:3000] + "\n...[已截断，原始数据更长]"
+                        else:
+                            truncated = value
+                        outputs_parts.append(f"### {key}\n```json\n{truncated}\n```")
 
-                outputs_text = (
-                    "\n\n".join(outputs_parts) if outputs_parts else "（无数据输出）"
-                )
-
-                from core.time_utils import get_timezone_name, now_cn
-
-                anomaly_cfg = self._settings.p2p.anomaly_severity
-                prompt = _REPORT_PROMPT.format(
-                    scenario=scenario,
-                    outputs_text=outputs_text,
-                    high_amount=f"{int(anomaly_cfg.high_amount_threshold):,}",
-                    variance_mult=f"{anomaly_cfg.variance_high_multiplier:g}",
-                    current_date=now_cn().strftime("%Y-%m-%d"),
-                    timezone=get_timezone_name(),
-                )
-                if output_mode_prompt:
-                    # 输出模式（brief / table 等）优先级高于上文"报告要求"的结构/字数规定；
-                    # 冲突时以此节为准，避免默认 4 段结构与 brief 500 字限制相互拉扯。
-                    prompt += (
-                        f"\n\n## 输出格式要求（优先级高于上文\"报告要求\"）\n"
-                        f"{output_mode_prompt}\n"
-                        f"若与上文\"报告要求\"的结构或字数规定冲突，以本节为准。"
+                    outputs_text = (
+                        "\n\n".join(outputs_parts) if outputs_parts else "（无数据输出）"
                     )
+                    merge_attrs["input_keys_count"] = len(outputs_parts)
+                    merge_attrs["outputs_total_chars"] = sum(
+                        len(v) for v in outputs.values()
+                    )
+                    merge_attrs["truncated_outputs"] = truncated_count
+                    merge_attrs["outputs_text_chars"] = len(outputs_text)
 
-                import hashlib
+                # —— 2) Prompt 模板渲染 ——
+                with record_span("report.prep", "format_prompt") as fmt_attrs:
+                    from core.time_utils import get_timezone_name, now_cn
 
-                prompt_hash = hashlib.md5(prompt.encode("utf-8")).hexdigest()[:12]
+                    anomaly_cfg = self._settings.p2p.anomaly_severity
+                    prompt = _REPORT_PROMPT.format(
+                        scenario=scenario,
+                        outputs_text=outputs_text,
+                        high_amount=f"{int(anomaly_cfg.high_amount_threshold):,}",
+                        variance_mult=f"{anomaly_cfg.variance_high_multiplier:g}",
+                        current_date=now_cn().strftime("%Y-%m-%d"),
+                        timezone=get_timezone_name(),
+                    )
+                    if output_mode_prompt:
+                        # 输出模式（brief / table 等）优先级高于上文"报告要求"的结构/字数规定；
+                        # 冲突时以此节为准，避免默认 4 段结构与 brief 500 字限制相互拉扯。
+                        prompt += (
+                            f"\n\n## 输出格式要求（优先级高于上文\"报告要求\"）\n"
+                            f"{output_mode_prompt}\n"
+                            f"若与上文\"报告要求\"的结构或字数规定冲突，以本节为准。"
+                        )
+                    fmt_attrs["prompt_length"] = len(prompt)
+                    fmt_attrs["has_output_mode_prompt"] = bool(output_mode_prompt)
+
+                # —— 3) 哈希指纹 ——
+                with record_span("report.prep", "hash_prompt") as hash_attrs:
+                    import hashlib
+
+                    prompt_hash = hashlib.md5(prompt.encode("utf-8")).hexdigest()[:12]
+                    hash_attrs["prompt_length"] = len(prompt)
+                    hash_attrs["prompt_hash"] = prompt_hash
+
+                # —— 4) LLM 懒加载（疑点：tiktoken / ChatOpenAI 构造）——
+                with record_span("report.prep", "ensure_llm") as llm_attrs:
+                    llm_attrs["cached"] = self._llm is not None
+                    llm = self._ensure_llm()
+                    llm_attrs["llm_ready"] = True
+
                 prep_attrs["input_keys_count"] = len(outputs_parts)
                 prep_attrs["outputs_total_chars"] = sum(len(v) for v in outputs.values())
                 prep_attrs["truncated_outputs"] = truncated_count
@@ -247,9 +270,6 @@ class ReportAgent:
                 prep_attrs["prompt_hash"] = prompt_hash
                 prep_attrs["has_output_mode_prompt"] = bool(output_mode_prompt)
                 span_attrs["prompt_hash"] = prompt_hash
-
-                llm = self._ensure_llm()
-                prep_attrs["llm_ready"] = True
 
             span_attrs["prompt_length"] = len(prompt)
 
