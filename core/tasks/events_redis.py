@@ -306,7 +306,7 @@ class RedisEventBus:
             if result:
                 return int(result[0][1])
         except Exception:  # noqa: BLE001
-            _logger.debug(
+            _logger.info(
                 "redis pubsub_numsub failed on trace %s",
                 trace_id,
                 exc_info=True,
@@ -318,7 +318,7 @@ class RedisEventBus:
         try:
             return bool(client.exists(self._closed_key(trace_id)))
         except Exception:  # noqa: BLE001
-            _logger.debug(
+            _logger.info(
                 "redis is_closed failed on trace %s", trace_id, exc_info=True
             )
             return False
@@ -338,11 +338,11 @@ class RedisEventBus:
             try:
                 await self._async.aclose()
             except Exception:  # noqa: BLE001
-                _logger.debug("redis async client aclose failed", exc_info=True)
+                _logger.info("redis async client aclose failed", exc_info=True)
             self._async = None
         if self._sync is not None:
             try:
                 self._sync.close()
             except Exception:  # noqa: BLE001
-                _logger.debug("redis sync client close failed", exc_info=True)
+                _logger.info("redis sync client close failed", exc_info=True)
             self._sync = None

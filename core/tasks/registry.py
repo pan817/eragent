@@ -80,6 +80,7 @@ class TaskRegistry:
         # publish_done 前等 trace_runs 落库的最长阻塞时间。
         # 正常 DB 写入 10-50ms；超时就降级 WARNING，不阻塞 SSE。
         self._trace_flush_barrier_timeout = trace_flush_barrier_timeout
+        self._max_concurrent_tasks = max_concurrent_tasks
         self._semaphore = asyncio.Semaphore(max_concurrent_tasks)
         self._entries: dict[str, TaskEntry] = {}
         self._lock = asyncio.Lock()
@@ -174,6 +175,12 @@ class TaskRegistry:
             self._run(entry, runner_factory),
             name=f"analyze-async:{trace_id}",
         )
+        _logger.info(
+            "task queued: trace=%s user=%s session=%s concurrent=%d/%d",
+            trace_id, entry.user_id, entry.session_id,
+            self._max_concurrent_tasks - self._semaphore._value,  # noqa: SLF001
+            self._max_concurrent_tasks,
+        )
         return entry
 
     def _seed_trace_run(self, entry: TaskEntry) -> None:
@@ -223,6 +230,10 @@ class TaskRegistry:
                 entry.started_at = now_cn()
                 entry.state = TaskState.RUNNING
                 self._publish_status(entry, TaskState.RUNNING)
+                _logger.info(
+                    "task running: trace=%s user=%s",
+                    entry.trace_id, entry.user_id,
+                )
                 result = await runner_factory(entry)
                 entry.result = result
                 # 分析本身可能以"业务失败"结束（status=FAILED），
@@ -260,6 +271,12 @@ class TaskRegistry:
             await self._await_trace_run_flushed(entry.trace_id)
             self._publish_done(entry)
             self._bus.close(entry.trace_id)
+            _logger.info(
+                "task finished: trace=%s state=%s duration=%.1fms",
+                entry.trace_id,
+                entry.state.value if hasattr(entry.state, "value") else entry.state,
+                entry.duration_ms or 0,
+            )
 
     async def _await_trace_run_flushed(self, trace_id: str) -> None:
         """发 done 前阻塞等 trace_runs 的 run_end commit 到 DB。
@@ -352,7 +369,7 @@ class TaskRegistry:
             self._entries.pop(trace_id, None)
             self._bus.drop(trace_id)
         if to_drop:
-            _logger.debug("task registry swept %d expired entries", len(to_drop))
+            _logger.info("task registry swept %d expired entries", len(to_drop))
 
     # ------------------------------------------------------------------
     # 启动兜底：把跨进程残留状态收敛

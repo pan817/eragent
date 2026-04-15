@@ -36,7 +36,10 @@ import core.orchestrator.dag.tables  # noqa: E402,F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False 是关键：alembic.ini 的 fileConfig 默认会把
+    # 所有未在 ini 中声明的 logger（如 eragent.*）设为 disabled=True，导致应用
+    # 内 create_tables 触发 alembic 后，所有业务 / trace 日志静默消失。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 注入运行时 DSN
 _settings = get_settings()

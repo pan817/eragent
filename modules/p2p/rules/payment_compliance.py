@@ -103,7 +103,7 @@ class PaymentComplianceChecker:
             payment_date = safe_date(payment.get("payment_date"))
             due_date = safe_date(invoice.get("due_date"))
             if payment_date is None or due_date is None:
-                _logger.debug(
+                _logger.info(
                     "skip payment %s: invalid date(s)", payment.get("payment_number")
                 )
                 continue

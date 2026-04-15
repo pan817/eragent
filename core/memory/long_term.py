@@ -589,6 +589,9 @@ class MemoryRepository:
             sparse_ids = self._sparse_search_ids(user_id, query, candidate_size)
             dense_ids = self._dense_search_ids(user_id, query, candidate_size)
             if not sparse_ids and not dense_ids:
+                _logger.info(
+                    "ltm.search hybrid empty: user_id=%s limit=%d", user_id, limit,
+                )
                 return []
             fused = _rrf_fuse([sparse_ids, dense_ids], k=self._fusion_k)
             top_ids = [doc_id for doc_id, _ in fused[:limit]]
@@ -596,6 +599,12 @@ class MemoryRepository:
                 return []
             rows_by_id = self._fetch_by_ids(user_id, top_ids)
             results = [rows_by_id[mid] for mid in top_ids if mid in rows_by_id]
+        _logger.info(
+            "ltm.search hybrid ok: user_id=%s limit=%d sparse=%d dense=%d "
+            "fused=%d returned=%d",
+            user_id, limit, len(sparse_ids), len(dense_ids),
+            len(fused), len(results),
+        )
         return results
 
     def search_semantic(self, user_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:

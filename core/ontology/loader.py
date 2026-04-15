@@ -92,7 +92,7 @@ class OntologyLoader:
             self._world = cached._world
             self._ontology = cached._ontology
             self._loaded = True
-            logger.debug("命中本体缓存", path=cache_key[0])
+            logger.info("命中本体缓存", path=cache_key[0])
             return self
 
         logger.info("加载 OWL 本体", path=str(self._owl_path))

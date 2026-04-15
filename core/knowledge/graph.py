@@ -129,7 +129,7 @@ class KnowledgeGraph:
             try:
                 self._driver.close()
             except Exception as exc:
-                _logger.debug("neo4j driver close failed: %s", exc)
+                _logger.info("neo4j driver close failed: %s", exc)
             finally:
                 self._driver = None
 

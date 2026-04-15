@@ -90,21 +90,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Yields:
         None
     """
+    _logger.info(
+        "lifespan startup: app=%s version=%s debug=%s",
+        get_settings().app_name,
+        get_settings().app_version,
+        get_settings().debug,
+    )
+
     settings = get_settings()
+    _logger.info(
+        "settings loaded: llm=%s llm_fast=%s timezone=%s",
+        settings.llm.model, settings.llm_fast.model, settings.timezone,
+    )
     engine = get_engine(settings.postgresql)
+    _logger.info("postgresql engine ready: dsn=%s", settings.postgresql.dsn.split("@")[-1])
     create_tables(engine)
+    _logger.info("database migrations applied (alembic upgrade head)")
     session_factory = get_session_factory(engine)
     app.state.settings = settings
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     set_repository(P2PRepository(session_factory))
     init_trace_store(session_factory)
+    _logger.info("trace store ready (TimingMiddleware observable)")
 
     # 初始化会话历史 Repository（全局 + 路由模块双注入）
     chat_repo = ChatRepository(session_factory)
     init_chat_repository(chat_repo)
     from api.routes.sessions import init_chat_repo
     init_chat_repo(chat_repo)
+    _logger.info("chat repository ready")
 
     # 初始化异步分析基础设施：EventBus + TaskRegistry
     async_cfg = settings.async_analysis
@@ -143,7 +158,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 跨进程残留收敛：把上次进程中残留的 running / pending 标记为 aborted / error
     registry.recover_on_startup()
     registry.start_background()
+    _logger.info(
+        "task registry ready: backend=%s max_concurrent=%d",
+        async_cfg.event_backend, async_cfg.max_concurrent_tasks,
+    )
+    _logger.info("lifespan startup complete — serving traffic")
     yield
+    _logger.info("lifespan shutdown: draining tasks")
     await registry.shutdown()
     shutdown_task_registry()
     # 如果是 Redis 后端，关闭底层连接；memory 后端此调用是 no-op
@@ -155,6 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     shutdown_event_bus()
     shutdown_trace_store()
     engine.dispose()
+    _logger.info("lifespan shutdown complete")
 
 
 def create_app() -> FastAPI:

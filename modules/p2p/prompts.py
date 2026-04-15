@@ -67,7 +67,7 @@ def get_ontology_context() -> str:
             )
             text = trim_to_token_budget(text, max_tokens, "本体上下文")
     except Exception as exc:
-        _logger.debug("ontology trim config load failed, keeping original text: %s", exc)
+        _logger.info("ontology trim config load failed, keeping original text: %s", exc)
 
     return text
 
@@ -141,7 +141,7 @@ def format_long_term_memory(records: list[dict[str, Any]]) -> str:
             )
             text = trim_to_token_budget(text, max_tokens, "长期记忆")
     except Exception as exc:
-        _logger.debug("long-term memory trim config load failed, keeping original text: %s", exc)
+        _logger.info("long-term memory trim config load failed, keeping original text: %s", exc)
 
     return text
 

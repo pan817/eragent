@@ -20,8 +20,12 @@ def _resolve_disable_thinking(provider: str, model: str) -> dict[str, Any] | Non
 
     provider / model 统一按小写前缀匹配，兼容用户配置大小写差异及厂商子品牌命名：
     - provider 以 ``qwen`` 开头 **且** model 以 ``qwen3`` 开头:
-      ``{"enable_thinking": False}``。仅 qwen3 系列文档化支持；对 ``qwen-max`` /
-      ``qwen-plus`` 等非 thinking 模型发送该参数可能被服务端拒绝，故保留 model 护栏。
+      同时下发两种键名，覆盖两类后端（彼此对对方的键名静默忽略，不会 400）：
+        * ``enable_thinking``：阿里云 DashScope / OpenAI 兼容模式识别
+        * ``chat_template_kwargs.enable_thinking``：自建 vLLM / SGLang / LMDeploy
+          等推理引擎按 chat template 参数识别
+      仅 qwen3 系列文档化支持；对 ``qwen-max`` / ``qwen-plus`` 等非 thinking
+      模型发送该参数可能被服务端拒绝，故保留 model 护栏。
     - provider 以 ``zhipu`` 或 ``minimax`` 开头: ``{"thinking": {"type": "disabled"}}``。
     - 其他组合（deepseek / openai / 未识别 provider 等）: 返回 None，不注入 extra_body。
     """
@@ -29,11 +33,14 @@ def _resolve_disable_thinking(provider: str, model: str) -> dict[str, Any] | Non
     model_norm = model.lower()
 
     if provider_norm.startswith("qwen") and model_norm.startswith("qwen3"):
-        return {"enable_thinking": False}
+        return {
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
     if provider_norm.startswith("zhipu") or provider_norm.startswith("minimax"):
         return {"thinking": {"type": "disabled"}}
 
-    _logger.debug(
+    _logger.info(
         "disable_thinking skipped: provider=%s model=%s (no matching rule)",
         provider,
         model,

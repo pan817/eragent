@@ -79,6 +79,17 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
     Returns:
         包含异常记录、KPI 报告、Markdown 报告等内容的分析结果。
     """
+    import time as _time
+    _api_start = _time.monotonic()
+    _logger.info(
+        "POST /analyze inbound: user=%s session=%s output_mode=%s auto_persist=%s "
+        "query_len=%d",
+        request.user_id,
+        request.session_id or "-",
+        request.output_mode,
+        request.auto_persist,
+        len(request.query or ""),
+    )
     try:
         # 自动生成 session_id
         if not request.session_id:
@@ -98,6 +109,14 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
         if request.auto_persist and chat_repo:
             await _persist_messages(chat_repo, request, result)
 
+        _logger.info(
+            "POST /analyze outbound: status=%s trace_id=%s report_id=%s "
+            "total_duration=%.1fms",
+            result.status.value,
+            result.trace_id,
+            result.report_id,
+            (_time.monotonic() - _api_start) * 1000,
+        )
         return result
 
     except Exception as exc:
@@ -121,6 +140,12 @@ async def analyze(request: AnalysisRequest) -> AnalysisResult:
                 await _persist_messages(chat_repo, request, error_result)
             except Exception as persist_exc:
                 _logger.warning("failed to persist error messages: %s", persist_exc)
+        _logger.info(
+            "POST /analyze outbound: status=failed code=API_ERROR "
+            "total_duration=%.1fms error=%s",
+            (_time.monotonic() - _api_start) * 1000,
+            exc,
+        )
         return error_result
 
 

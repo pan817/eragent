@@ -171,6 +171,26 @@ def _configure() -> None:
         _configured = True
 
 
+def _heal_if_disabled(logger: logging.Logger) -> None:
+    """防御性恢复被 ``dictConfig``/``fileConfig`` 第三方调用标记为 disabled 的 logger。
+
+    典型触发场景：alembic 在 ``migrations/env.py`` 里调用
+    ``logging.config.fileConfig(...)``（默认 ``disable_existing_loggers=True``），
+    会把 ini 中未列出的 logger（包括 ``eragent.*``）全部置为 ``disabled=True``，
+    导致后续 ``logger.info(...)`` 静默丢失。我们也在 env.py 里传了
+    ``disable_existing_loggers=False`` 作为根治，此处为第二道防线：应用内
+    只要任何模块通过 ``get_logger`` 取用，就能即时把状态纠回来。
+    """
+    if logger.disabled:
+        logger.disabled = False
+    # 子 logger 被 disable 时父 logger 通常也被 disable，顺带恢复
+    parent = logger.parent
+    while parent is not None and parent is not logging.getLogger():
+        if parent.disabled:
+            parent.disabled = False
+        parent = parent.parent
+
+
 def get_logger(name: str) -> logging.Logger:
     """获取业务 logger。命名空间化到 ``eragent.<name>``。"""
     _configure()
@@ -179,13 +199,17 @@ def get_logger(name: str) -> logging.Logger:
         return get_trace_logger()
     if not name.startswith("eragent"):
         name = f"eragent.{name}"
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+    _heal_if_disabled(logger)
+    return logger
 
 
 def get_trace_logger() -> logging.Logger:
     """获取 trace 专用 logger。调用方负责把一整块 trace 文本拼好后一次 info(msg)。"""
     _configure()
-    return logging.getLogger("eragent.trace")
+    logger = logging.getLogger("eragent.trace")
+    _heal_if_disabled(logger)
+    return logger
 
 
 def reset_for_tests() -> None:

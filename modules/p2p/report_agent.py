@@ -102,6 +102,14 @@ class ReportAgent:
             Markdown 格式的分析报告。
         """
         from core.observability.middleware import record_span
+        import time as _time
+
+        _start = _time.monotonic()
+        _logger.info(
+            "report generate start: scenario=%s input_keys=%s",
+            scenario,
+            [k for k in outputs if k != "report"],
+        )
 
         with record_span("report", "generate_report") as span_attrs:
             span_attrs["scenario"] = scenario
@@ -218,4 +226,10 @@ class ReportAgent:
 
             span_attrs["output_length"] = len(content)
             span_attrs["status"] = "ok"
+            _logger.info(
+                "report generate done: scenario=%s output_length=%d "
+                "prompt_length=%d duration=%.1fms",
+                scenario, len(content), len(prompt),
+                (_time.monotonic() - _start) * 1000,
+            )
             return content

@@ -52,7 +52,7 @@ def _max_io_text() -> int:
 
         return get_settings().observability.max_io_text
     except Exception as exc:
-        _logger.debug("failed to load observability.max_io_text, using default: %s", exc)
+        _logger.info("failed to load observability.max_io_text, using default: %s", exc)
         return _MAX_IO_TEXT_DEFAULT
 
 
@@ -62,7 +62,7 @@ def _max_error_text() -> int:
 
         return get_settings().observability.max_error_text
     except Exception as exc:
-        _logger.debug(
+        _logger.info(
             "failed to load observability.max_error_text, using default: %s", exc
         )
         return _MAX_ERROR_TEXT_DEFAULT
@@ -75,7 +75,7 @@ def _console_enabled() -> bool:
 
         return bool(get_settings().observability.console_enabled)
     except Exception as exc:
-        _logger.debug("failed to load observability.console_enabled: %s", exc)
+        _logger.info("failed to load observability.console_enabled: %s", exc)
         return True
 
 
@@ -86,7 +86,7 @@ def _console_io_panel() -> bool:
 
         return bool(get_settings().observability.console_io_panel)
     except Exception as exc:
-        _logger.debug("failed to load observability.console_io_panel: %s", exc)
+        _logger.info("failed to load observability.console_io_panel: %s", exc)
         return False
 
 
@@ -96,7 +96,7 @@ def _slow_tool_ms() -> int:
 
         return int(get_settings().observability.slow_tool_ms)
     except Exception as exc:
-        _logger.debug("failed to load observability.slow_tool_ms: %s", exc)
+        _logger.info("failed to load observability.slow_tool_ms: %s", exc)
         return 2000
 
 
@@ -106,8 +106,24 @@ def _slow_model_ms() -> int:
 
         return int(get_settings().observability.slow_model_ms)
     except Exception as exc:
-        _logger.debug("failed to load observability.slow_model_ms: %s", exc)
+        _logger.info("failed to load observability.slow_model_ms: %s", exc)
         return 5000
+
+
+def _verbose_calls() -> bool:
+    """高频调用 INFO 开关（LLM / Tool / Memory / checkpointer）。
+
+    默认开启便于生产排查。高并发场景下运维可把
+    ``observability.verbose_calls`` 改为 ``false``，相关成功路径 INFO 将
+    彻底静默（不打 DEBUG——项目策略不设 DEBUG 日志）。
+    """
+    try:
+        from config.settings import get_settings
+
+        return bool(get_settings().observability.verbose_calls)
+    except Exception as exc:
+        _logger.info("failed to load observability.verbose_calls: %s", exc)
+        return True
 
 
 def format_error_chain(exc: BaseException, *, max_len: int | None = None) -> str:
@@ -154,7 +170,7 @@ def _token_estimate_ratio() -> float:
 
         return get_settings().llm.token_estimate_ratio
     except Exception as exc:
-        _logger.debug("failed to load llm.token_estimate_ratio, using default: %s", exc)
+        _logger.info("failed to load llm.token_estimate_ratio, using default: %s", exc)
         return _DEFAULT_TOKEN_RATIO
 
 
@@ -592,6 +608,37 @@ class TimingMiddleware(AgentMiddleware):
             if panel:
                 _trace_logger.info(panel)
 
+        # 高频调用成功 INFO：让排查时能直接通过业务日志看每次 LLM/Tool/Memory
+        # 调用的关键指标，不用每次都翻 trace DB。受 observability.verbose_calls
+        # 开关控制，高并发场景可一键静默。
+        if status == "ok" and _verbose_calls():
+            if span_type == "model":
+                out = attributes.get("output") if isinstance(attributes.get("output"), dict) else {}
+                usage = out.get("usage") or {} if isinstance(out, dict) else {}
+                pt = usage.get("input_tokens") or usage.get("prompt_tokens")
+                ct = usage.get("output_tokens") or usage.get("completion_tokens")
+                _logger.info(
+                    "model call ok: name=%s duration=%.1fms msgs=%s tools=%s "
+                    "prompt_tokens=%s completion_tokens=%s",
+                    name, duration_ms,
+                    attributes.get("message_count"),
+                    attributes.get("tool_count"),
+                    pt, ct,
+                )
+            elif span_type == "tool":
+                args_brief = _truncate_text(attributes.get("args"), 120)
+                out_brief = _truncate_text(attributes.get("output"), 120)
+                _logger.info(
+                    "tool call ok: name=%s duration=%.1fms args=%s output=%s",
+                    name, duration_ms, args_brief, out_brief,
+                )
+            elif span_type == "memory":
+                _logger.info(
+                    "memory op ok: name=%s duration=%.1fms attrs=%s",
+                    name, duration_ms,
+                    {k: v for k, v in attributes.items() if k not in ("input", "output")},
+                )
+
         # 慢调用告警：tool / model 耗时超过阈值打 WARNING，辅助生产定位
         # 性能瓶颈（超时风险、速率限制、LLM 响应变慢等）。
         if status == "ok":
@@ -890,7 +937,7 @@ def _truncate_text(value: Any, max_len: int | None = None) -> str:
 
             value = json.dumps(value, ensure_ascii=False, default=str)
         except Exception as exc:
-            _logger.debug("_truncate_text json serialization failed, falling back to str(): %s", exc)
+            _logger.info("_truncate_text json serialization failed, falling back to str(): %s", exc)
             value = str(value)
     if len(value) > max_len:
         return value[: max_len - 3] + "..."
@@ -950,6 +997,18 @@ def record_memory_span(operation: str, **attributes: Any):
         active_store = ctx.store or get_trace_store()
         if active_store is not None:
             active_store.enqueue(sp)
+        if status == "ok" and _verbose_calls():
+            _logger.info(
+                "memory op ok: name=%s duration=%.1fms attrs=%s",
+                operation, duration_ms,
+                {k: v for k, v in (attributes or {}).items()
+                 if k not in ("input", "output")},
+            )
+        elif status == "error":
+            _logger.warning(
+                "memory op failed: name=%s duration=%.1fms",
+                operation, duration_ms,
+            )
 
 
 @contextmanager
@@ -1019,6 +1078,27 @@ def record_span(span_type: str, name: str, **attributes: Any):
         active_store = ctx.store or get_trace_store()
         if active_store is not None:
             active_store.enqueue(sp)
+        # 与 _record_span 对称：通过 record_span 上下文管理器记录的调用
+        # （如 DAG executor 的 tool / dag.task）同样享受高频调用 INFO。
+        if status == "ok" and _verbose_calls() and span_type in ("model", "tool"):
+            attrs = attributes or {}
+            if span_type == "model":
+                out = attrs.get("output") if isinstance(attrs.get("output"), dict) else {}
+                usage = out.get("usage") or {} if isinstance(out, dict) else {}
+                pt = usage.get("input_tokens") or usage.get("prompt_tokens")
+                ct = usage.get("output_tokens") or usage.get("completion_tokens")
+                _logger.info(
+                    "model call ok: name=%s duration=%.1fms "
+                    "prompt_tokens=%s completion_tokens=%s",
+                    name, duration_ms, pt, ct,
+                )
+            else:
+                _logger.info(
+                    "tool call ok: name=%s duration=%.1fms args=%s output=%s",
+                    name, duration_ms,
+                    _truncate_text(attrs.get("args") or attrs.get("input"), 120),
+                    _truncate_text(attrs.get("output"), 120),
+                )
 
 
 def _safe_jsonable(value: Any) -> Any:
@@ -1029,9 +1109,9 @@ def _safe_jsonable(value: Any) -> Any:
         json.dumps(value, ensure_ascii=False, default=str)
         return value
     except Exception as exc:
-        _logger.debug("_safe_jsonable first-pass failed: %s", exc)
+        _logger.info("_safe_jsonable first-pass failed: %s", exc)
         try:
             return json.loads(json.dumps(value, ensure_ascii=False, default=str))
         except Exception as exc2:
-            _logger.debug("_safe_jsonable second-pass failed, falling back to str(): %s", exc2)
+            _logger.info("_safe_jsonable second-pass failed, falling back to str(): %s", exc2)
             return str(value)

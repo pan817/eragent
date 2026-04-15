@@ -60,7 +60,10 @@ class TestModelFactory:
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
-            assert kwargs["extra_body"] == {"enable_thinking": False}
+            assert kwargs["extra_body"] == {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
 
     def test_disable_thinking_qwen_non_qwen3(self) -> None:
         """disable_thinking=True + 非 qwen3 模型：不应注入 extra_body。"""
@@ -120,7 +123,10 @@ class TestModelFactory:
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
-            assert kwargs["extra_body"] == {"enable_thinking": False}
+            assert kwargs["extra_body"] == {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
 
     def test_disable_thinking_case_insensitive_zhipu(self) -> None:
         """provider 大小写混写也应命中 zhipu 分支。"""
@@ -156,7 +162,10 @@ class TestModelFactory:
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
-            assert kwargs["extra_body"] == {"enable_thinking": False}
+            assert kwargs["extra_body"] == {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
 
     def test_disable_thinking_qwen_prefix_non_qwen3_still_skipped(self) -> None:
         """provider 前缀匹配 qwen 但 model 非 qwen3 系列仍应跳过（护栏不拆）。"""

@@ -39,7 +39,7 @@ def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
     try:
         _publish_stage(name, attrs)
     except Exception:  # noqa: BLE001
-        _logger.debug("publish_stage failed", exc_info=True)
+        _logger.info("publish_stage failed", exc_info=True)
 
 # 输出模式 → prompt 后缀
 # 输出模式覆盖指令：拼接在 _REPORT_PROMPT 末尾，声明优先级高于上文"报告要求"。
@@ -183,7 +183,7 @@ class Orchestrator:
         try:
             cm.__exit__(None, None, None)
         except Exception as exc:
-            _logger.debug("checkpointer close failed (non-critical): %s", exc)
+            _logger.info("checkpointer close failed (non-critical): %s", exc)
 
     def _ensure_checkpointer(self) -> Any | None:
         """获取 checkpointer，初始化失败时返回 None（不阻塞主流程）。"""
@@ -941,7 +941,7 @@ class Orchestrator:
                 for key, val in relevant_entities.items():
                     if key not in parsed_params or not parsed_params[key]:
                         parsed_params[key] = val
-                        _logger.debug(
+                        _logger.info(
                             "entity '%s'='%s' inherited from session context", key, val
                         )
 
@@ -1253,7 +1253,7 @@ class Orchestrator:
                 content=content,
                 metadata=metadata,
             )
-            _logger.debug(
+            _logger.info(
                 "DAG analysis conclusion saved to long-term memory: user=%s session=%s",
                 user_id,
                 session_id,
@@ -1315,7 +1315,7 @@ class Orchestrator:
 
                 span_attrs["status"] = "ok"
                 span_attrs["n_messages"] = 2
-                _logger.debug(
+                _logger.info(
                     "DAG result saved to short-term memory: session=%s", session_id
                 )
 

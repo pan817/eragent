@@ -70,6 +70,14 @@ async def analyze_async(
         request = request.model_copy(update={"session_id": str(uuid.uuid4())})
     trace_id = str(uuid.uuid4())
 
+    _logger.info(
+        "POST /analyze/async inbound: user=%s session=%s trace_id=%s "
+        "regenerate_of=%s query_len=%d",
+        request.user_id, request.session_id, trace_id,
+        request.regenerate_of or "-",
+        len(request.query or ""),
+    )
+
     user_message_id: str | None = None
     assistant_message_id: str | None = None
 
@@ -147,6 +155,11 @@ async def analyze_async(
     stream_url = http_request.url_for(
         "stream_task_events", trace_id=entry.trace_id
     ).path
+    _logger.info(
+        "POST /analyze/async accepted: trace_id=%s state=%s user=%s session=%s",
+        entry.trace_id, entry.state.value if hasattr(entry.state, "value") else entry.state,
+        request.user_id, request.session_id,
+    )
     return AnalysisTaskAck(
         trace_id=entry.trace_id,
         status=entry.state,

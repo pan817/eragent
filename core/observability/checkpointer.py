@@ -38,7 +38,7 @@ def _thread_id(config: Any) -> str | None:
     try:
         return (config or {}).get("configurable", {}).get("thread_id")  # type: ignore[union-attr]
     except Exception as exc:
-        _logger.debug("_thread_id extraction failed: %s", exc)
+        _logger.info("_thread_id extraction failed: %s", exc)
         return None
 
 
@@ -46,7 +46,7 @@ def _checkpoint_id(config: Any) -> str | None:
     try:
         return (config or {}).get("configurable", {}).get("checkpoint_id")  # type: ignore[union-attr]
     except Exception as exc:
-        _logger.debug("_checkpoint_id extraction failed: %s", exc)
+        _logger.info("_checkpoint_id extraction failed: %s", exc)
         return None
 
 
@@ -71,7 +71,7 @@ def _summarize_tuple(result: Any) -> dict[str, Any]:
             if "source" in md:
                 info["source"] = md.get("source")
     except Exception as exc:  # noqa: BLE001
-        _logger.debug("_summarize_tuple failed: %s", exc)
+        _logger.info("_summarize_tuple failed: %s", exc)
     return info
 
 
@@ -85,7 +85,7 @@ def _summarize_checkpoint(checkpoint: Any) -> dict[str, Any]:
             if isinstance(messages, list):
                 info["n_messages"] = len(messages)
     except Exception as exc:  # noqa: BLE001
-        _logger.debug("_summarize_checkpoint failed: %s", exc)
+        _logger.info("_summarize_checkpoint failed: %s", exc)
     return info
 
 
@@ -124,6 +124,20 @@ def _emit_span(
         ctx.spans.append(sp)
     # 直接入 store 队列;若 middleware 未配置 store 会静默丢弃
     middleware._emit(sp)  # noqa: SLF001
+
+    # 高频调用 INFO：checkpointer 每次读写成功也打一条，受 verbose_calls 控制。
+    from core.observability.middleware import _verbose_calls as _vc  # 延迟导入避免循环
+
+    if status == "ok" and _vc():
+        _logger.info(
+            "checkpoint %s ok: duration=%.1fms attrs=%s",
+            name, duration_ms, attributes,
+        )
+    elif status == "error":
+        _logger.warning(
+            "checkpoint %s failed: duration=%.1fms attrs=%s",
+            name, duration_ms, attributes,
+        )
 
 
 def attach_tracing(saver: Any, middleware: TimingMiddleware) -> Any:

@@ -305,6 +305,11 @@ class ObservabilitySettings(BaseSettings):
     slow_tool_ms: int = 2000              # 超过该阈值的 tool 调用打 WARNING
     slow_model_ms: int = 5000             # 超过该阈值的 model 调用打 WARNING
 
+    # 高频调用日志开关（LLM / Tool / Memory / checkpointer 每次调用的成功 INFO）
+    # 默认开启便于生产排查；高并发场景下可关闭降噪，关闭后这批日志彻底静默。
+    # 不影响低频里程碑（analyze/route/DAG/ReAct/ReportAgent 等）。
+    verbose_calls: bool = True
+
     model_config = {"env_prefix": "OBS_"}
 
     @field_validator("console_stream")

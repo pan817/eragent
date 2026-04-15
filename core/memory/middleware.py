@@ -203,4 +203,4 @@ class MemoryMiddleware(AgentMiddleware):  # type: ignore[type-arg]
             ):
                 pass  # 纯记录，无业务逻辑
         except Exception:  # noqa: BLE001
-            logger.debug("memory_trim span recording failed", exc_info=True)
+            logger.info("memory_trim span recording failed", exc_info=True)

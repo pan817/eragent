@@ -121,6 +121,7 @@ observability:
   console_io_panel: false             # 每次 model/tool 调用的 I/O 面板；生产默认关，排查时开启
   slow_tool_ms: 2000                  # 超过此耗时的 tool 调用打 WARNING
   slow_model_ms: 5000                 # 超过此耗时的 model 调用打 WARNING
+  verbose_calls: true                 # 高频调用 INFO 开关（LLM/Tool/Memory/checkpointer）；高并发场景可关闭降噪
 
 async_analysis:
   max_concurrent_tasks: 5             # 同进程并发分析任务上限，超出 queued 排队

@@ -450,7 +450,7 @@ class IntentRouter:
                 for r in results
             ]
         except Exception as exc:
-            _logger.debug("_search_seeds_for_trace vector search failed: %s", exc)
+            _logger.info("_search_seeds_for_trace vector search failed: %s", exc)
             return []
 
     # ── Level 1：关键词命中率 ────────────────────────────────────────
@@ -563,7 +563,7 @@ class IntentRouter:
         if length_ratio < _L2_LENGTH_RATIO_THRESHOLD:
             original = similarity
             similarity *= _L2_LENGTH_RATIO_DISCOUNT
-            _logger.debug(
+            _logger.info(
                 "L2 length-ratio discount: query=%d seed=%d ratio=%.2f sim=%.3f→%.3f",
                 len(query), len(seed_text), length_ratio, original, similarity,
             )
@@ -577,6 +577,10 @@ class IntentRouter:
         except ValueError:
             return None
 
+        _logger.info(
+            "L2 matched: type=%s similarity=%.3f seed='%s'",
+            analysis_type.value, similarity, (best.get("text", "") or "")[:30],
+        )
         return QuerySignal(
             raw_query=query,
             keywords=[analysis_type.value],
@@ -735,6 +739,11 @@ confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9�
             merged_params = {**llm_params, **params}  # 正则提取的覆盖 LLM 的
             confidence: float = data.get("confidence", 0.5)
 
+            _logger.info(
+                "L3 classified: type=%s confidence=%.3f entities=%s",
+                analysis_type.value, confidence,
+                {k: v for k, v in merged_params.items() if v},
+            )
             return QuerySignal(
                 raw_query=query,
                 keywords=[analysis_type.value],
