@@ -48,11 +48,29 @@ def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
 # - "brief" / "table" 给出具体结构/字数约束，覆盖基础 prompt 的 4 段规定。
 # 取值由 AnalysisRequest.output_mode 的 Pydantic pattern 校验，非法值在 API 层 400，
 # 此字典不承担二次校验职责。
-_OUTPUT_MODE_PROMPTS: dict[str, str] = {
-    "detailed": "",
-    "brief": "请以简报摘要形式输出，控制在 3-5 个要点，突出关键数据和结论，总字数不超过 500 字。",
-    "table": "请优先使用 Markdown 表格呈现核心数据，辅以不超过 2 句话的结论。",
-}
+def _build_output_mode_prompts(settings: Settings) -> dict[str, str]:
+    """根据当前配置渲染 output_mode → prompt 后缀表。
+
+    三种模式都会注入字数上限（取自 ``settings.report.*_max_chars``），
+    用于抑制 LLM 过度展开、降低生成延迟；硬上限由 ``report.max_output_tokens``
+    在 ReportAgent 侧兜底。
+    """
+    cfg = settings.report
+    return {
+        "detailed": (
+            f"请将报告总字数控制在 {cfg.detailed_max_chars} 字以内，"
+            f"保持 4 段结构，优先保留关键数据、异常清单和建议；"
+            f"数据充分时可精简例证，避免长段落复述。"
+        ),
+        "brief": (
+            f"请以简报摘要形式输出，控制在 3-5 个要点，"
+            f"突出关键数据和结论，总字数不超过 {cfg.brief_max_chars} 字。"
+        ),
+        "table": (
+            f"请优先使用 Markdown 表格呈现核心数据，"
+            f"辅以不超过 2 句话的结论，总字数不超过 {cfg.table_max_chars} 字。"
+        ),
+    }
 
 
 def _resolve_time_range(time_range: str | None) -> int | None:
@@ -909,7 +927,9 @@ class Orchestrator:
                     or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
                 )
 
-            output_mode_prompt = _OUTPUT_MODE_PROMPTS.get(request.output_mode, "")
+            output_mode_prompt = _build_output_mode_prompts(self._settings).get(
+                request.output_mode, ""
+            )
 
             if use_dag:
                 _publish_stage_safe(

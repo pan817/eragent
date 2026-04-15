@@ -409,6 +409,24 @@ class P2PSettings(BaseSettings):
     model_config = {"env_prefix": "P2P_"}
 
 
+class ReportSettings(BaseSettings):
+    """报告生成配置。
+
+    控制 ReportAgent 输出长度，用于平衡报告信息量与生成延迟：
+      - ``max_output_tokens``：LLM 硬性 token 上限（覆盖 ``llm_fast.max_tokens``）；
+        0 表示不覆盖，继续沿用 ``llm_fast`` 的配置。
+      - ``*_max_chars``：注入 prompt 的软性字数引导，由各 ``output_mode`` 取用。
+        字数引导靠模型自觉遵守，硬上限由 ``max_output_tokens`` 兜底。
+    """
+
+    max_output_tokens: int = 1500
+    detailed_max_chars: int = 1200
+    brief_max_chars: int = 500
+    table_max_chars: int = 300
+
+    model_config = {"env_prefix": "REPORT_"}
+
+
 class MemorySettings(BaseSettings):
     """记忆管理配置。"""
 
@@ -475,6 +493,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     async_analysis: AsyncAnalysisSettings = Field(default_factory=AsyncAnalysisSettings)
     p2p: P2PSettings = Field(default_factory=P2PSettings)
+    report: ReportSettings = Field(default_factory=ReportSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 

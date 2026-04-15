@@ -45,6 +45,7 @@ def build_chat_model(
     llm_cfg: LLMSettings,
     *,
     disable_thinking: bool = False,
+    max_tokens_override: int | None = None,
 ) -> ChatOpenAI:
     """根据配置构造 ChatOpenAI 兼容客户端。
 
@@ -58,15 +59,21 @@ def build_chat_model(
             provider / model 匹配大小写不敏感且按前缀匹配，仅对支持参数级关闭的
             组合生效（qwen 系 + qwen3* 模型 / zhipu* / minimax*）。
             用于 ReportAgent 等纯文本格式化场景，无需推理能力。
+        max_tokens_override: 覆盖 ``llm_cfg.max_tokens`` 的输出 token 硬上限。
+            None 或 0 表示沿用 ``llm_cfg.max_tokens``。用于 ReportAgent 等
+            对输出长度有专属限制的场景，避免直接修改共享的 LLMSettings。
     """
     import httpx
 
+    max_tokens = (
+        max_tokens_override if max_tokens_override else llm_cfg.max_tokens
+    )
     kwargs: dict[str, Any] = dict(
         model=llm_cfg.model,
         api_key=llm_cfg.api_key,
         base_url=llm_cfg.api_base,
         temperature=llm_cfg.temperature,
-        max_tokens=llm_cfg.max_tokens,
+        max_tokens=max_tokens,
         timeout=llm_cfg.timeout,
     )
     if not llm_cfg.use_system_proxy:

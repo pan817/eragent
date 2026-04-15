@@ -77,7 +77,12 @@ class ReportAgent:
         if self._llm is not None:
             return self._llm
         from modules.p2p.model_factory import build_chat_model
-        self._llm = build_chat_model(self._settings.llm_fast, disable_thinking=True)
+        max_tok = self._settings.report.max_output_tokens
+        self._llm = build_chat_model(
+            self._settings.llm_fast,
+            disable_thinking=True,
+            max_tokens_override=max_tok if max_tok else None,
+        )
         return self._llm
 
     async def generate(

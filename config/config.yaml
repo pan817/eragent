@@ -165,6 +165,15 @@ p2p:
     high_amount_threshold: 500000     # 金额超过50万自动升为HIGH
     variance_high_multiplier: 2.0     # 超容差2倍以上为HIGH
 
+report:
+  # ReportAgent LLM 输出硬上限（token）；覆盖 llm_fast.max_tokens。
+  # 0 表示不覆盖，沿用 llm_fast.max_tokens 的值。
+  max_output_tokens: 1500
+  # 各 output_mode 对应的软性字数引导，注入到 ReportAgent prompt 中。
+  detailed_max_chars: 1200            # detailed：保持 4 段结构但限定总字数
+  brief_max_chars: 500                # brief：简报摘要模式
+  table_max_chars: 300                # table：表格 + 简短结论
+
 memory:
   short_term:
     max_messages: 20            # 滑动窗口最大消息数
