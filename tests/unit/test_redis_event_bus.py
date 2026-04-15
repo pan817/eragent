@@ -96,6 +96,42 @@ async def test_subscribe_last_event_id_filters(bus_pair) -> None:
 
 
 @pytest.mark.asyncio
+async def test_subscribe_passes_through_seq_zero_after_buffer_replay(
+    bus_pair,
+) -> None:
+    """seq=0 的 ephemeral 事件（chunk / heartbeat）不应被订阅端去重误杀。
+
+    回归测试：早期 RedisEventBus.subscribe 使用 ``seq <= max_replayed`` 过滤重放，
+    导致 buffer replay 后 max_replayed 上升，之后到来的所有 seq=0 事件都被
+    当作"已重放过"吃掉，前端永远收不到 LLM chunk。
+    """
+    # 预先放几条带 seq 的常规事件进 buffer
+    bus_pair.publish("t1", {"type": "status", "seq": 1})
+    bus_pair.publish("t1", {"type": "status", "seq": 2})
+
+    received: list[dict[str, Any]] = []
+
+    async def consume() -> None:
+        async for ev in bus_pair.subscribe("t1"):
+            received.append(ev)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.3)
+    # 订阅建立后发布一批 seq=0 的 ephemeral 事件 + 一条正常事件
+    bus_pair.publish("t1", {"type": "chunk", "seq": 0, "delta": "a"}, ephemeral=True)
+    bus_pair.publish("t1", {"type": "chunk", "seq": 0, "delta": "b"}, ephemeral=True)
+    bus_pair.publish("t1", {"type": "chunk", "seq": 0, "delta": "c"}, ephemeral=True)
+    bus_pair.publish("t1", {"type": "done", "seq": 3})
+    await asyncio.sleep(0.3)
+    bus_pair.close("t1")
+    await asyncio.wait_for(task, timeout=3.0)
+
+    # 所有 seq=0 chunk 都必须透传，不能被去重丢弃
+    chunks = [e for e in received if e.get("type") == "chunk"]
+    assert [e["delta"] for e in chunks] == ["a", "b", "c"], received
+
+
+@pytest.mark.asyncio
 async def test_subscribe_after_close_replays_only(bus_pair) -> None:
     bus_pair.publish("t1", {"type": "s", "seq": 1})
     bus_pair.publish("t1", {"type": "s", "seq": 2})

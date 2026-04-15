@@ -233,6 +233,16 @@ class TaskRegistry:
         entry: TaskEntry,
         runner_factory: RunnerFactory,
     ) -> None:
+        # 注入 assistant_message_id 到 ContextVar，供 ReportAgent 流式输出时
+        # 把 chunk 事件绑定到正确的 pending 气泡。trace_id 由 observability
+        # 中间件维护，此处不重复。
+        from core.tasks.context import current_assistant_message_id
+
+        msg_id_token = current_assistant_message_id.set(
+            str(entry.assistant_message_id)
+            if entry.assistant_message_id is not None
+            else None
+        )
         try:
             async with self._semaphore:
                 entry.started_at = now_cn()
@@ -309,6 +319,8 @@ class TaskRegistry:
             await self._await_trace_run_flushed(entry.trace_id)
             self._publish_done(entry)
             self._bus.close(entry.trace_id)
+            # 恢复 ContextVar，避免协程复用线程时污染后续任务。
+            current_assistant_message_id.reset(msg_id_token)
             _logger.info(
                 "task finished: trace=%s state=%s duration=%.1fms",
                 entry.trace_id,

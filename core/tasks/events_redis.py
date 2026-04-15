@@ -127,20 +127,35 @@ class RedisEventBus:
             )
             return 0
 
-    def publish(self, trace_id: str, event: dict[str, Any]) -> None:
+    def publish(
+        self,
+        trace_id: str,
+        event: dict[str, Any],
+        *,
+        ephemeral: bool = False,
+    ) -> None:
         """发布事件到所有订阅者 + 写入环形缓冲。
 
         - 关闭后的 trace 不再发布（与 MemoryEventBus 语义对齐）
         - 用 pipeline 打包 RPUSH / LTRIM / PUBLISH，减少 RTT
         - 失败吞掉 + WARNING，不影响业务主流程
+
+        Args:
+            ephemeral: 若为 True，事件仅 ``PUBLISH`` 给 live 订阅者，**不写入
+                环形 LIST**（跳过 RPUSH / LTRIM）。用于 LLM 流式 chunk 等高频、
+                丢失可接受的事件，避免短时间内撑爆 Redis 内存。默认 False。
         """
         client = self._ensure_sync()
         try:
             if client.exists(self._closed_key(trace_id)):
                 return
             payload = json.dumps(event, ensure_ascii=False, default=str)
-            buf_key = self._buffer_key(trace_id)
             chan_key = self._channel_key(trace_id)
+            if ephemeral:
+                # 仅广播，不持久化到环形缓冲
+                client.publish(chan_key, payload)
+                return
+            buf_key = self._buffer_key(trace_id)
             pipe = client.pipeline(transaction=False)
             pipe.rpush(buf_key, payload)
             # 保留最新 N 条，LTRIM 的 start/stop 都是闭区间
@@ -214,10 +229,16 @@ class RedisEventBus:
                     ev = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                # 去重：seq ≤ buffer 已 yield 的最大值，跳过
+                # 去重：seq ≤ buffer 已 yield 的最大值，跳过。
+                # **例外**：seq == 0 的事件（chunk / heartbeat 等 ephemeral
+                # 事件）不参与 Last-Event-ID 重放，也不入环形缓冲，因此
+                # 天然不会与 buffer 有重复。这些事件必须直接透传，否则
+                # 一旦 max_replayed > 0 就会把所有 seq=0 事件吃掉，导致
+                # 前端永远收不到 LLM chunk。
                 seq = ev.get("seq")
                 if (
                     isinstance(seq, int)
+                    and seq > 0
                     and seq <= max_replayed
                 ):
                     continue

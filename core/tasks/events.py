@@ -32,7 +32,13 @@ class EventBusProtocol(Protocol):
 
     def next_seq(self, trace_id: str) -> int: ...
 
-    def publish(self, trace_id: str, event: dict[str, Any]) -> None: ...
+    def publish(
+        self,
+        trace_id: str,
+        event: dict[str, Any],
+        *,
+        ephemeral: bool = False,
+    ) -> None: ...
 
     def subscribe(
         self,
@@ -84,18 +90,31 @@ class MemoryEventBus:
             self._seq_counters[trace_id] = seq
             return seq
 
-    def publish(self, trace_id: str, event: dict[str, Any]) -> None:
+    def publish(
+        self,
+        trace_id: str,
+        event: dict[str, Any],
+        *,
+        ephemeral: bool = False,
+    ) -> None:
         """发布事件到指定 trace_id 的所有订阅者 + 环形缓冲。
 
         ``event`` 应当已经包含 ``type/trace_id/ts/seq`` 字段。
+
+        Args:
+            ephemeral: 若为 True，事件仅推送给 live 订阅者，**不写入环形缓冲**，
+                因此 Last-Event-ID 断线重放不会拿到该事件。专用于 LLM 流式
+                chunk 等高频、丢失可接受的事件（最终一致性由 ``done`` 后的
+                task 快照保证）。默认 False，与改造前行为一致。
         """
         with self._lock:
             if trace_id in self._closed:
                 return
-            buf = self._buffers.setdefault(
-                trace_id, deque(maxlen=self._buffer_size)
-            )
-            buf.append(event)
+            if not ephemeral:
+                buf = self._buffers.setdefault(
+                    trace_id, deque(maxlen=self._buffer_size)
+                )
+                buf.append(event)
             subs = list(self._subscribers.get(trace_id, ()))
         dropped = 0
         for q in subs:

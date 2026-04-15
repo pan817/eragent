@@ -69,6 +69,12 @@ _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以�
 class ReportAgent:
     """报告生成 Agent（轻量 LLM 调用）。"""
 
+    # 流式 micro-batching 参数：每累计 ``_STREAM_FLUSH_CHARS`` 字符或每
+    # ``_STREAM_FLUSH_INTERVAL`` 秒（以先到者为准）往 EventBus flush 一次，
+    # 目的是把 token 级事件聚合成 ~20 Hz 的 chunk 事件，兼顾体验与带宽。
+    _STREAM_FLUSH_CHARS: int = 16
+    _STREAM_FLUSH_INTERVAL: float = 0.05
+
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._llm: Any = None
@@ -84,6 +90,84 @@ class ReportAgent:
             max_tokens_override=max_tok if max_tok else None,
         )
         return self._llm
+
+    async def _astream_with_publish(
+        self,
+        llm: Any,
+        prompt: str,
+        trace_id: str,
+        message_id: str,
+        *,
+        node: str = "report",
+    ) -> tuple[str, Any]:
+        """调用 ``llm.astream(prompt)``，按 micro-batch 推送 chunk 事件。
+
+        Args:
+            llm: 已构造的 ChatOpenAI 实例（``streaming=True``）。
+            prompt: 发给 LLM 的完整 prompt。
+            trace_id: 当前异步任务 ID，用于 EventBus 分发。
+            message_id: 前端 pending 气泡的 assistant_message_id（字符串）。
+            node: ChunkEvent.node 字段，Phase 1 固定为 "report"。
+
+        Returns:
+            ``(完整文本, usage_metadata)``；usage_metadata 来自最后一个非空 chunk。
+        """
+        from core.tasks.events import get_event_bus
+        from core.time_utils import now_cn
+        import time as _time
+
+        bus = get_event_bus()
+        accumulated: list[str] = []
+        pending: list[str] = []
+        last_flush_ts = _time.monotonic()
+        chunk_index = 0
+        final_meta: Any = None
+
+        def _pending_chars() -> int:
+            return sum(len(s) for s in pending)
+
+        def _flush(eos: bool = False) -> None:
+            """把 pending buffer flush 成一条 chunk 事件推送。"""
+            nonlocal chunk_index, last_flush_ts
+            delta = "".join(pending)
+            pending.clear()
+            # 空 delta 且非 eos 不发，避免冗余事件
+            if bus is not None and (delta or eos):
+                bus.publish(
+                    trace_id,
+                    {
+                        "type": "chunk",
+                        "trace_id": trace_id,
+                        "ts": now_cn().isoformat(),
+                        "seq": 0,
+                        "node": node,
+                        "message_id": message_id,
+                        "delta": delta,
+                        "index": chunk_index,
+                        "eos": eos,
+                    },
+                    ephemeral=True,
+                )
+                chunk_index += 1
+            last_flush_ts = _time.monotonic()
+
+        async for chunk in llm.astream(prompt):
+            text = getattr(chunk, "content", "") or ""
+            if text:
+                pending.append(text)
+                accumulated.append(text)
+            meta = getattr(chunk, "usage_metadata", None)
+            if meta:
+                final_meta = meta
+            # 达到字符阈值或时间阈值即 flush
+            if (
+                _pending_chars() >= self._STREAM_FLUSH_CHARS
+                or (_time.monotonic() - last_flush_ts) >= self._STREAM_FLUSH_INTERVAL
+            ):
+                _flush()
+        # 末尾兜底 flush（空 delta 也要带 eos=True 让前端结束累加状态）
+        _flush(eos=True)
+        return "".join(accumulated), final_meta
 
     async def generate(
         self,
@@ -174,6 +258,27 @@ class ReportAgent:
 
             model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
 
+            # 判定是否走流式路径：
+            #   - 配置开关 llm_fast.streaming_enabled 打开（可一键降级）
+            #   - 当前上下文能拿到 trace_id（EventBus 按 trace_id 分发事件）
+            # message_id 不作为流式的开关条件：缺失时（例如 auto_persist=False
+            # 或 chat_repo 未配置）用 trace_id 作为 fallback 填充 ChunkEvent.message_id，
+            # 保证"只要有 trace_id 就能流式"。前端有 auto_persist 时按 assistant_message_id
+            # 绑定气泡，没有时按 trace_id 绑定。
+            from core.observability.middleware import _current_trace
+            from core.tasks.context import get_current_message_id
+            from core.tasks.events import get_event_bus
+
+            _trace_ctx = _current_trace.get()
+            _trace_id = _trace_ctx.trace_id if _trace_ctx is not None else None
+            _message_id = get_current_message_id() or _trace_id
+            _bus_ready = get_event_bus() is not None
+            streaming_on = bool(
+                self._settings.llm_fast.streaming_enabled
+                and _trace_id
+                and _bus_ready
+            )
+
             try:
                 async for attempt in AsyncRetrying(
                     stop=stop_after_attempt(3),
@@ -186,18 +291,28 @@ class ReportAgent:
                             model_attrs["model"] = str(model_name)
                             model_attrs["input"] = prompt[:2000]
                             model_attrs["estimated_input_tokens"] = estimate_tokens(prompt)
+                            model_attrs["streaming"] = streaming_on
                             if attempt.retry_state.attempt_number > 1:
                                 model_attrs["retry_attempt"] = attempt.retry_state.attempt_number
-                            response = await llm.ainvoke(prompt)
-                            content: str = (
-                                response.content
-                                if hasattr(response, "content")
-                                else str(response)
-                            )
+                            if streaming_on:
+                                content, usage = await self._astream_with_publish(
+                                    llm,
+                                    prompt,
+                                    trace_id=_trace_id,  # type: ignore[arg-type]
+                                    message_id=_message_id,  # type: ignore[arg-type]
+                                    node="report",
+                                )
+                            else:
+                                response = await llm.ainvoke(prompt)
+                                content = (
+                                    response.content
+                                    if hasattr(response, "content")
+                                    else str(response)
+                                )
+                                usage = getattr(response, "usage_metadata", None) or getattr(
+                                    response, "response_metadata", None
+                                )
                             model_attrs["output"] = content[:2000]
-                            usage = getattr(response, "usage_metadata", None) or getattr(
-                                response, "response_metadata", None
-                            )
                             if usage:
                                 model_attrs["usage"] = (
                                     usage if isinstance(usage, dict) else str(usage)

@@ -128,3 +128,32 @@ class DoneEvent(BaseEvent):
     duration_ms: float | None = None
     anomaly_count: int | None = None
     error: ErrorInfo | None = None
+
+
+class ChunkEvent(BaseEvent):
+    """LLM 流式输出的 token 级 / micro-batch 级增量事件。
+
+    协议约定（见 docs/sse_issue.md §6）：
+
+    - ``seq`` 固定 0：不参与全局 seq 序列，不入环形缓冲，不参与 Last-Event-ID 重放；
+      语义上与 ``heartbeat`` 一致，属于"体验增强型"轻量事件。
+    - ``delta`` 是增量文本，不是累计；前端直接 append。
+    - ``index`` 在同一 ``message_id`` 内单调递增；若前端观察到 ``index`` 回退到 0
+      且 ``lastChunkIndex > 0``，视为后端 tenacity 重试，须清空累加 buffer。
+    - ``eos=True`` 表示该 message 的最后一帧；通常 ``delta`` 为空串。
+    - 最终一致性由 ``done`` 事件后的 ``GET /analyze/tasks/{trace_id}`` 快照保证：
+      前端用 ``result.report_markdown`` 覆盖累加 buffer，避免 chunk 丢失导致残缺。
+    """
+
+    type: str = "chunk"
+    #: 生成节点标识。Phase 1 仅 "report"（ReportAgent 最终 Markdown）；
+    #: Phase 2 可能引入 "agent_final"（ReAct 兜底路径的最终消息）。
+    node: str
+    #: 对应 AnalysisTaskAck.assistant_message_id（转字符串），前端用来绑定 pending 气泡。
+    message_id: str
+    #: 增量文本，直接 append 到 chunkBuffer。
+    delta: str
+    #: 单 message 内 0-based 序号，调试 + 检测后端重试重置。
+    index: int
+    #: end-of-stream 标记，默认 False。
+    eos: bool = False

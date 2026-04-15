@@ -132,6 +132,11 @@ class LLMSettings(BaseSettings):
     context_window: int = 32768
     # 字符数 → token 数的估算比率（中文为主文本约 1.5 字符/token）
     token_estimate_ratio: float = 1.5
+    # 是否启用流式输出（astream）。ReportAgent 等支持流式的调用点会在
+    # trace_id 上下文可用时走 llm.astream()，按 chunk 推送到 EventBus，
+    # 改善前端 TTFB 体验（详见 docs/sse_issue.md）。关闭则回退为 ainvoke，
+    # 用作出现流式异常时的一键降级开关。
+    streaming_enabled: bool = True
 
     model_config = {"populate_by_name": True, "env_prefix": "LLM_"}
 
