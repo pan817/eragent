@@ -56,17 +56,23 @@ def _build_output_mode_prompts(settings: Settings) -> dict[str, str]:
     在 ReportAgent 侧兜底。
     """
     cfg = settings.report
+    # 每个模式都重申"中文输出"：本节优先级高于 _REPORT_PROMPT 的"报告要求"，
+    # 小模型可能把上文整块视为低优先级，需要在此处再次锚定语言，避免漂移为英文。
+    lang_anchor = "全文使用简体中文输出。"
     return {
         "detailed": (
+            f"{lang_anchor}"
             f"请将报告总字数控制在 {cfg.detailed_max_chars} 字以内，"
             f"保持 4 段结构，优先保留关键数据、异常清单和建议；"
             f"数据充分时可精简例证，避免长段落复述。"
         ),
         "brief": (
+            f"{lang_anchor}"
             f"请以简报摘要形式输出，控制在 3-5 个要点，"
             f"突出关键数据和结论，总字数不超过 {cfg.brief_max_chars} 字。"
         ),
         "table": (
+            f"{lang_anchor}"
             f"请优先使用 Markdown 表格呈现核心数据，"
             f"辅以不超过 2 句话的结论，总字数不超过 {cfg.table_max_chars} 字。"
         ),

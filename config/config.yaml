@@ -168,9 +168,12 @@ p2p:
 report:
   # ReportAgent LLM 输出硬上限（token）；覆盖 llm_fast.max_tokens。
   # 0 表示不覆盖，沿用 llm_fast.max_tokens 的值。
-  max_output_tokens: 1500
+  # 经验值：硬上限需预留软上限 2~3 倍余量，应对小模型前置 reasoning 吐字
+  # 与英文展开导致的 token 膨胀，避免触顶截断。
+  max_output_tokens: 3000
   # 各 output_mode 对应的软性字数引导，注入到 ReportAgent prompt 中。
-  detailed_max_chars: 1200            # detailed：保持 4 段结构但限定总字数
+  # 软上限按中文字数给，硬上限按 token 给；两者需留出安全比，不要贴得太近。
+  detailed_max_chars: 800             # detailed：保持 4 段结构但限定总字数
   brief_max_chars: 500                # brief：简报摘要模式
   table_max_chars: 300                # table：表格 + 简短结论
 

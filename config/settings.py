@@ -419,8 +419,8 @@ class ReportSettings(BaseSettings):
         字数引导靠模型自觉遵守，硬上限由 ``max_output_tokens`` 兜底。
     """
 
-    max_output_tokens: int = 1500
-    detailed_max_chars: int = 1200
+    max_output_tokens: int = 3000
+    detailed_max_chars: int = 800
     brief_max_chars: int = 500
     table_max_chars: int = 300
 
