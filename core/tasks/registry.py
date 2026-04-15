@@ -72,6 +72,8 @@ class TaskRegistry:
         result_cache_ttl_sec: int = 600,
         sweep_interval_sec: int = 60,
         trace_flush_barrier_timeout: float = 2.0,
+        runner_hard_timeout_seconds: float = 600.0,
+        runner_stall_grace_seconds: float = 60.0,
     ) -> None:
         self._bus = event_bus
         self._session_factory = session_factory
@@ -80,6 +82,12 @@ class TaskRegistry:
         # publish_done 前等 trace_runs 落库的最长阻塞时间。
         # 正常 DB 写入 10-50ms；超时就降级 WARNING，不阻塞 SSE。
         self._trace_flush_barrier_timeout = trace_flush_barrier_timeout
+        # runner 协程硬超时 + 僵尸纠偏宽限：防止 entry.state 卡 RUNNING。
+        # wait_for 是第一道闸；sweep 扫 started_at 超龄的 RUNNING entry 是第二道闸
+        # （覆盖 wait_for 自身失灵或被屏蔽的边缘场景）。
+        self._runner_hard_timeout = runner_hard_timeout_seconds
+        self._runner_stall_grace = runner_stall_grace_seconds
+        self._stalled_count = 0
         self._max_concurrent_tasks = max_concurrent_tasks
         self._semaphore = asyncio.Semaphore(max_concurrent_tasks)
         self._entries: dict[str, TaskEntry] = {}
@@ -234,25 +242,55 @@ class TaskRegistry:
                     "task running: trace=%s user=%s",
                     entry.trace_id, entry.user_id,
                 )
-                result = await runner_factory(entry)
-                entry.result = result
-                # 分析本身可能以"业务失败"结束（status=FAILED），
-                # 即使 runner 没抛异常也要把 entry.state 映射为 ERROR，
-                # 这样 SSE done / 快照 / chat_messages 三处状态保持一致。
-                if getattr(result, "status", None) == AnalysisStatus.FAILED:
+                # 硬超时兜底：覆盖 orchestrator + 持久化 + chat 收尾的所有 I/O。
+                # 正常路径 orchestrator 内部还有 response_timeout_seconds 精细超时；
+                # 这里只是防止任何遗漏的无保护 I/O 把 entry.state 卡在 RUNNING。
+                try:
+                    result = await asyncio.wait_for(
+                        runner_factory(entry),
+                        timeout=self._runner_hard_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    self._stalled_count += 1
+                    _logger.error(
+                        "runner stalled beyond hard timeout %.1fs: "
+                        "trace=%s (stalled_count=%d); forcing ERROR(RUNNER_STALLED). "
+                        "trace_runs 可能已由 observability worker 写终态，"
+                        "但 runner 尾部 I/O 卡住导致内存 entry 未转状态。",
+                        self._runner_hard_timeout,
+                        entry.trace_id,
+                        self._stalled_count,
+                    )
                     entry.state = TaskState.ERROR
-                    entry.error = getattr(result, "error", None) or ErrorInfo(
-                        code="ANALYZE_FAILED",
-                        message="分析失败（详情缺失）",
+                    entry.error = ErrorInfo(
+                        code="RUNNER_STALLED",
+                        message=(
+                            f"runner 协程在 {self._runner_hard_timeout:.0f}s 内未返回，"
+                            "已强制终结；详情请查 trace_runs 表。"
+                        ),
                     )
                 else:
-                    entry.state = TaskState.OK
-                    entry.error = None
+                    entry.result = result
+                    # 分析本身可能以"业务失败"结束（status=FAILED），
+                    # 即使 runner 没抛异常也要把 entry.state 映射为 ERROR，
+                    # 这样 SSE done / 快照 / chat_messages 三处状态保持一致。
+                    if getattr(result, "status", None) == AnalysisStatus.FAILED:
+                        entry.state = TaskState.ERROR
+                        entry.error = getattr(result, "error", None) or ErrorInfo(
+                            code="ANALYZE_FAILED",
+                            message="分析失败（详情缺失）",
+                        )
+                    else:
+                        entry.state = TaskState.OK
+                        entry.error = None
         except asyncio.CancelledError:
-            entry.state = TaskState.ABORTED
-            entry.error = ErrorInfo(
-                code="ABORTED", message="任务被取消（通常由服务关闭触发）"
-            )
+            # Plan C 的 sweep 会在外部 cancel 前先把 entry 强制转到 ERROR(RUNNER_STALLED)。
+            # 此时若再覆盖为 ABORTED 会丢失"被 sweep 纠偏"的归因信息。
+            if entry.state not in TERMINAL_STATES:
+                entry.state = TaskState.ABORTED
+                entry.error = ErrorInfo(
+                    code="ABORTED", message="任务被取消（通常由服务关闭触发）"
+                )
             raise
         except Exception as exc:  # noqa: BLE001
             _logger.exception("async analyze task failed: trace=%s", entry.trace_id)
@@ -341,6 +379,68 @@ class TaskRegistry:
             payload["error"] = entry.error.model_dump()
         self._bus.publish(entry.trace_id, payload)
 
+    def _force_stalled(self, entry: TaskEntry, age_seconds: float) -> None:
+        """Plan C：sweep 发现僵尸 RUNNING entry 时的强制纠偏。
+
+        - 直接把 entry 转成 ERROR(RUNNER_STALLED) + 补齐 finished_at / duration_ms
+        - 发 done 让 SSE / poll 感知终态
+        - close 事件总线，后续 publish 会被 RedisEventBus 的 is_closed 短路
+        - cancel 协程释放资源；_run 的 except CancelledError 分支会检查
+          ``entry.state in TERMINAL_STATES``，不会覆盖为 ABORTED
+
+        调用时 entry.state 必然是 RUNNING（由 _sweep_once 筛选保证）。
+        """
+        self._stalled_count += 1
+        threshold = self._runner_hard_timeout + self._runner_stall_grace
+        _logger.error(
+            "task registry sweep detected stalled RUNNING entry: trace=%s "
+            "age=%.1fs (threshold=%.1fs, stalled_count=%d); "
+            "forcing ERROR(RUNNER_STALLED). wait_for 兜底失灵或被屏蔽，"
+            "可能是事件循环被长时间阻塞。",
+            entry.trace_id,
+            age_seconds,
+            threshold,
+            self._stalled_count,
+        )
+        entry.state = TaskState.ERROR
+        entry.error = ErrorInfo(
+            code="RUNNER_STALLED",
+            message=(
+                f"runner 协程运行 {age_seconds:.0f}s 未终结（阈值 {threshold:.0f}s，"
+                "sweep 强制纠偏）；详情请查 trace_runs 表。"
+            ),
+        )
+        entry.finished_at = now_cn()
+        if entry.started_at is not None:
+            entry.duration_ms = (
+                entry.finished_at - entry.started_at
+            ).total_seconds() * 1000.0
+        try:
+            self._publish_done(entry)
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "publish_done failed during stall sweep: trace=%s",
+                entry.trace_id,
+                exc_info=True,
+            )
+        try:
+            self._bus.close(entry.trace_id)
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "bus.close failed during stall sweep: trace=%s",
+                entry.trace_id,
+                exc_info=True,
+            )
+        if entry.task is not None and not entry.task.done():
+            entry.task.cancel()
+
+    def stalled_count(self) -> int:
+        """累计被强制终结的僵尸 entry 数量（wait_for + sweep 两个路径共享计数）。
+
+        供外部监控 / 告警读取；运行期只增不减，进程重启清零。
+        """
+        return self._stalled_count
+
     # ------------------------------------------------------------------
     # 后台清理
     # ------------------------------------------------------------------
@@ -359,12 +459,25 @@ class TaskRegistry:
     def _sweep_once(self) -> None:
         now = time.time()
         to_drop: list[str] = []
+        to_force: list[tuple[TaskEntry, float]] = []
+        stall_threshold = self._runner_hard_timeout + self._runner_stall_grace
         for trace_id, entry in list(self._entries.items()):
+            # 僵尸 RUNNING 纠偏（Plan C）：_run 的 wait_for 兜底是第一道闸；
+            # 极端场景下事件循环被阻塞、wait_for 本身失灵时，这里作为第二道闸
+            # 强制把老化的 RUNNING entry 推到 ERROR(RUNNER_STALLED)。
+            if entry.state == TaskState.RUNNING:
+                if entry.started_at is not None:
+                    age = now - entry.started_at.timestamp()
+                    if age >= stall_threshold:
+                        to_force.append((entry, age))
+                continue
             if entry.state not in TERMINAL_STATES or entry.finished_at is None:
                 continue
             age = now - entry.finished_at.timestamp()
             if age >= self._ttl:
                 to_drop.append(trace_id)
+        for entry, age in to_force:
+            self._force_stalled(entry, age)
         for trace_id in to_drop:
             self._entries.pop(trace_id, None)
             self._bus.drop(trace_id)
@@ -424,6 +537,8 @@ def init_task_registry(
     result_cache_ttl_sec: int = 600,
     sweep_interval_sec: int = 60,
     trace_flush_barrier_timeout: float = 2.0,
+    runner_hard_timeout_seconds: float = 600.0,
+    runner_stall_grace_seconds: float = 60.0,
 ) -> TaskRegistry:
     """初始化全局 TaskRegistry（幂等）。"""
     global _registry
@@ -435,6 +550,8 @@ def init_task_registry(
             result_cache_ttl_sec=result_cache_ttl_sec,
             sweep_interval_sec=sweep_interval_sec,
             trace_flush_barrier_timeout=trace_flush_barrier_timeout,
+            runner_hard_timeout_seconds=runner_hard_timeout_seconds,
+            runner_stall_grace_seconds=runner_stall_grace_seconds,
         )
     return _registry
 

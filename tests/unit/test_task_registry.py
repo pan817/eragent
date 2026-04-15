@@ -263,3 +263,155 @@ async def test_shutdown_cancels_running_tasks(registry, db_session_factory) -> N
     await started.wait()
     await registry.shutdown(timeout=2.0)
     assert entry.state == TaskState.ABORTED
+
+
+# ---------------------------------------------------------------------------
+# Plan A：runner 硬超时兜底（wait_for）——防止 entry.state 卡 RUNNING
+# 背景：registry._run 内的 runner_factory 协程里存在无 wait_for 保护的 DB I/O
+# （如 orchestrator._persist_report），生产上观察到 poll 一直返回 running。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def short_timeout_registry(bus, db_session_factory) -> TaskRegistry:
+    """硬超时 0.2s / 宽限 0.1s 的 registry，用于超时类测试快速验证。"""
+    return TaskRegistry(
+        event_bus=bus,
+        session_factory=db_session_factory,
+        max_concurrent_tasks=2,
+        result_cache_ttl_sec=60,
+        sweep_interval_sec=60,
+        runner_hard_timeout_seconds=0.2,
+        runner_stall_grace_seconds=0.1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_hard_timeout_forces_error_state(short_timeout_registry, bus) -> None:
+    """runner 卡超过 runner_hard_timeout_seconds 时 entry 必须转 ERROR(RUNNER_STALLED)。"""
+
+    async def stuck_runner(_entry: TaskEntry) -> AnalysisResult:
+        # 故意睡远超硬超时的时间；wait_for 应该先于 sleep 完成前把我们 cancel
+        await asyncio.sleep(5.0)
+        raise AssertionError("runner should have been cancelled by wait_for")
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-stalled-wait-for",
+        assistant_message_id=None, user_message_id=None,
+        runner_factory=stuck_runner,
+    )
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+
+    assert entry.state == TaskState.ERROR
+    assert entry.error is not None
+    assert entry.error.code == "RUNNER_STALLED"
+    assert entry.finished_at is not None
+    assert entry.duration_ms is not None
+    # done 事件应带 RUNNER_STALLED 错误，前端与 SSE 订阅都能感知终态
+    dones = [e for e in bus.buffered("t-stalled-wait-for") if e.get("type") == "done"]
+    assert dones and dones[0]["status"] == "error"
+    assert dones[0]["error"]["code"] == "RUNNER_STALLED"
+    assert short_timeout_registry.stalled_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_under_hard_timeout_still_ok(short_timeout_registry) -> None:
+    """runner 在硬超时内正常返回时，行为不应被破坏。"""
+
+    async def fast_runner(entry: TaskEntry) -> AnalysisResult:
+        await asyncio.sleep(0.02)  # 远低于 0.2s 硬超时
+        return _ok_result(entry.trace_id)
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-fast",
+        assistant_message_id=None, user_message_id=None,
+        runner_factory=fast_runner,
+    )
+    await entry.task  # type: ignore[arg-type]
+
+    assert entry.state == TaskState.OK
+    assert entry.error is None
+    assert short_timeout_registry.stalled_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Plan C：sweep 扫僵尸 RUNNING entry——wait_for 兜底失灵时的纵深防御
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sweep_forces_stalled_running_entry(short_timeout_registry, bus) -> None:
+    """模拟 wait_for 失灵：人为保持 entry.state=RUNNING 且 started_at 已经超龄，
+    sweep 必须把它强制转到 ERROR(RUNNER_STALLED) 并发出 done + close bus。"""
+    # 构造一个活跃的 RUNNING entry（runner 会被我们显式 cancel）
+    started = asyncio.Event()
+
+    async def hang_runner(_entry: TaskEntry) -> AnalysisResult:
+        started.set()
+        await asyncio.sleep(30)
+        raise AssertionError
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-zombie",
+        assistant_message_id=None, user_message_id=None,
+        runner_factory=hang_runner,
+    )
+    await started.wait()
+    # 短超时 fixture 下 wait_for 本会提前生效；
+    # 这里把 started_at 人工往前拉，确保 sweep 判断为"超龄"时走 Plan C 路径。
+    entry.started_at = now_cn() - timedelta(seconds=10)  # 远超 0.2+0.1
+    # 先切掉 wait_for 那条路径：把 state 重置回 RUNNING（模拟 wait_for 失灵）
+    entry.state = TaskState.RUNNING
+    entry.error = None
+    entry.finished_at = None
+
+    short_timeout_registry._sweep_once()
+
+    # sweep 应把 entry 转到 ERROR(RUNNER_STALLED) 并计数+1
+    assert entry.state == TaskState.ERROR
+    assert entry.error is not None and entry.error.code == "RUNNER_STALLED"
+    assert entry.finished_at is not None
+    assert short_timeout_registry.stalled_count() >= 1
+    # done 事件被发出
+    dones = [e for e in bus.buffered("t-zombie") if e.get("type") == "done"]
+    assert dones and dones[-1]["status"] == "error"
+    assert dones[-1]["error"]["code"] == "RUNNER_STALLED"
+    # bus 被关闭，新订阅只会拿到 replay
+    assert bus.is_closed("t-zombie")
+    # 协程被 cancel；等它收尾
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+    # 外部 cancel 不应覆盖 Plan C 已设的 ERROR → 仍然是 ERROR(RUNNER_STALLED)
+    assert entry.state == TaskState.ERROR
+    assert entry.error is not None and entry.error.code == "RUNNER_STALLED"
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_running_within_threshold(short_timeout_registry) -> None:
+    """未超龄的 RUNNING entry 不能被误杀。"""
+    started = asyncio.Event()
+    done_event = asyncio.Event()
+
+    async def slow_but_within_budget(_entry: TaskEntry) -> AnalysisResult:
+        started.set()
+        await done_event.wait()
+        return _ok_result(_entry.trace_id)
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-within",
+        assistant_message_id=None, user_message_id=None,
+        runner_factory=slow_but_within_budget,
+    )
+    await started.wait()
+    # 人为把 started_at 推早 0.05s（小于 threshold=0.3s）模拟"跑了一会儿但还没超"
+    entry.started_at = now_cn() - timedelta(seconds=0.05)
+    entry.state = TaskState.RUNNING
+
+    short_timeout_registry._sweep_once()
+
+    # 不被 sweep 纠偏；stalled_count 不变
+    assert entry.state == TaskState.RUNNING
+    assert short_timeout_registry.stalled_count() == 0
+
+    # 放行 runner 让 entry.task 正常收尾，避免影响其它用例
+    done_event.set()
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]

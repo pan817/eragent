@@ -336,6 +336,19 @@ class AsyncAnalysisSettings(BaseSettings):
     # 正常 DB 写入 10-50ms；超时会降级 WARNING 不阻塞 SSE。
     trace_flush_barrier_timeout: float = 2.0
 
+    # registry._run 里 runner_factory 协程的硬超时秒数（覆盖 orchestrator + 持久化 + chat 收尾）。
+    # 触达此超时即 cancel runner 协程，把 entry 标为 ERROR(RUNNER_STALLED)，
+    # 防止内存 entry.state 永远停在 RUNNING 导致 poll 一直返回 running（见
+    # docs/issue/async_analyze_backend_issue.md 的僵尸 entry 章节）。
+    # 该阈值必须大于正常业务最坏耗时，否则会误杀；小于 orchestrator 内部
+    # response_timeout_seconds 时，外层 guard 会提前于 orchestrator 自身超时触发。
+    runner_hard_timeout_seconds: float = 600.0
+
+    # 僵尸 entry 纠偏宽限秒数：sweep 发现 state=RUNNING 且 started_at 已经超过
+    # (runner_hard_timeout_seconds + runner_stall_grace_seconds) 的 entry 时，
+    # 主动 cancel 协程 + 强制转终态 + publish done。这是对 wait_for 兜底失灵的纵深防御。
+    runner_stall_grace_seconds: float = 60.0
+
     # SSE 事件总线后端：memory=进程内（仅 workers=1）/ redis=跨进程（多 worker 必须）
     event_backend: str = "memory"
     redis_url: str = "redis://localhost:6379/0"

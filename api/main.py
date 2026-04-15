@@ -154,6 +154,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         result_cache_ttl_sec=async_cfg.result_cache_ttl_sec,
         sweep_interval_sec=async_cfg.sweep_interval_sec,
         trace_flush_barrier_timeout=async_cfg.trace_flush_barrier_timeout,
+        runner_hard_timeout_seconds=async_cfg.runner_hard_timeout_seconds,
+        runner_stall_grace_seconds=async_cfg.runner_stall_grace_seconds,
     )
     # 跨进程残留收敛：把上次进程中残留的 running / pending 标记为 aborted / error
     registry.recover_on_startup()
