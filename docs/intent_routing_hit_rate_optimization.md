@@ -1189,7 +1189,7 @@ curl -X POST 'http://localhost:8000/analyze' \
 | 版本 | 日期 | 改动 |
 |---|---|---|
 | v1.0 | 2026-04-16 | 初稿：覆盖 5 批次方案 + punt 决策 + 验证回滚 + 术语表 |
-| v1.1 | 2026-04-16 | 增补：DATA_LOOKUP 模板化分析（第 12-15 章）+ 与"DAG 模板扩展"专题的关系（D 节）|
+| v1.1 | 2026-04-16 | 增补：第 12-16 章。DATA_LOOKUP 模板化分析（5 类 Lookup 模板）+ 综合结论与方案融合（新增批 6/7、修订执行顺序、累计预估 ReAct 下降 45~70pp）。配套独立文档 [dag_template_expansion_analysis.md](dag_template_expansion_analysis.md) v1.0 |
 
 ---
 
@@ -1238,6 +1238,360 @@ DATA_LOOKUP 查询有强重复倾向（运营场景常用，如每日"查最新�
 DATA_LOOKUP **不是不能优化**，当前"强制 ReAct"是 intent_kind 改造期的过渡设计。本专题应正面回答：是否要把这部分流量从 ReAct 拆出来？怎么拆？
 
 ---
+
+## 13. DATA_LOOKUP 模板化设计（追加）
+
+### 13.1 五类实体查询模板（Lookup DAG）
+
+设计 5 个轻量"查询型 DAG"，每个对应一种业务实体的事实查询。与现有"分析型 DAG"在结构上有显著差异。
+
+| 模板名 | 业务实体 | 典型 query | 节点数 |
+|---|---|---|---|
+| **`PO_LOOKUP`** | 采购订单 | "查最新 5 笔 PO" / "看下 SUP-001 的 PO" | 2 |
+| **`AP_LOOKUP`** | 应付（发票+付款合并视图）| "应付明细" / "未付发票列表" | 3 |
+| **`INVOICE_LOOKUP`** | 发票 | "查 INV-001 详情" / "最近的发票" | 2 |
+| **`RECEIPT_LOOKUP`** | 收货 | "最近的收货记录" / "RCV-001 详情" | 2 |
+| **`SUPPLIER_LOOKUP`** | 供应商 | "SUP-001 信息" / "供应商列表" | 2 |
+
+### 13.2 通用查询型 DAG 形态
+
+与"分析型 DAG"的三段式（采集 → 分析 → 报告）不同，"查询型 DAG"采用更轻的两段式：
+
+```
+[采集层]   调 1 个 query_* tool 拿数据（按 supplier_id/编号/时间范围筛选）
+   ↓
+[呈现层]   调 lookup_formatter（新增）渲染**结构化表格** + 简短总结
+           （不调 report_agent，避免不必要的"4 段报告"形态）
+```
+
+**关键差异**：
+- **不强制经过 LLM 的 report_agent**——直接由格式化函数渲染 Markdown 表格
+- **支持"详情"和"列表"两种形态**——通过 query 参数自动判断
+- **可缓存**——结构稳定，case_store 可直接复用 dag_definition
+
+### 13.3 各模板入参与输出
+
+#### PO_LOOKUP
+
+**入参**（解析自 query）：
+- `supplier_id?: str` —— 限定供应商
+- `po_number?: str` —— 单 PO 详情
+- `status?: str` —— 状态过滤
+- `days: int = 30` —— 时间窗口
+- `limit: int = 10` —— 返回条数
+- `order: str = "desc"` —— 时间排序
+
+**输出**：Markdown 表格（PO 号 / 供应商 / 金额 / 状态 / 创建日期 / 收货状态）+ 一句总结。
+
+#### AP_LOOKUP（应付明细，合并 invoice + payment 视角）
+
+**入参**：
+- `supplier_id?: str`
+- `status: str = "unpaid"` —— 默认查未付
+- `days: int = 90`
+- `limit: int = 20`
+
+**任务编排**（3 节点）：
+```
+T1: query_invoices (status=unpaid)         ┐
+                                            ├─→ T3: lookup_formatter (合并视图)
+T2: query_payments (跨期匹配未销账)         ┘
+```
+
+**输出**：发票号 / 供应商 / 应付金额 / 已付金额 / 余额 / 账期 / 到期日。
+
+#### INVOICE_LOOKUP / RECEIPT_LOOKUP / SUPPLIER_LOOKUP
+
+形态与 PO_LOOKUP 类似，单 tool 调用 + 格式化。
+
+### 13.4 与现有"实体维度模板"的边界
+
+| 维度 | 现有 `_PO_RISK_DAG` 等 | 新增 `PO_LOOKUP` 等 |
+|---|---|---|
+| **意图** | 综合风险分析（含三路匹配/合规/KPI）| 单纯查事实 |
+| **触发** | COMPREHENSIVE + 单 PO 号 | DATA_LOOKUP + (任意/单 PO 号) |
+| **节点** | 5-6 个（多 rule + report）| 1-3 个（query + format）|
+| **输出** | Markdown 风险报告（4 段）| Markdown 表格 + 简短总结 |
+| **典型 query** | "分析 PO-001 的风险" | "查 PO-001" / "看下 SUP-001 最近的 PO" |
+
+**关键判断**：DATA_LOOKUP 与 COMPREHENSIVE 实体模板**不冲突**——前者满足"我只想看数据"，后者满足"分析这个对象的风险"，是两种不同的用户意图。
+
+---
+
+## 14. 模板化 vs ReAct：边界判定（追加）
+
+模板化能解决一部分 DATA_LOOKUP，但**不应也不可能覆盖全部事实查询**。明确边界至关重要。
+
+### 14.1 适合模板化的查询特征
+
+| 特征 | 说明 | 示例 query |
+|---|---|---|
+| **单实体类型** | 只涉及 PO/INV/PAY/RCV/Vendor 中的一类 | "查最新 PO" |
+| **过滤维度有限** | 仅按"时间窗口 / 编号 / 供应商 / 状态"组合 | "SUP-001 最近的发票" |
+| **输出形态确定** | 列表 or 详情，结构稳定 | "PO-001 详情" |
+| **零运算** | 不需要 LLM 推理或跨表 join | "未付发票列表" |
+
+→ 这类查询占 DATA_LOOKUP 流量的预估 **70-80%**，模板化效果好。
+
+### 14.2 不适合模板化、应保留 ReAct 的查询
+
+| 特征 | 说明 | 示例 query |
+|---|---|---|
+| **跨实体关联** | 需要从多个表 join 出关系 | "SUP-001 的所有 PO 各对应几张发票" |
+| **自然语言条件** | 过滤条件用模糊语言表达 | "找一笔金额比较大的 PO" |
+| **多步推理** | 第一步结果决定第二步查什么 | "看下最近异常的 PO，再查它的供应商背景" |
+| **未知实体** | 用户提到的对象不属于 5 类标准实体 | "查一下'紧急'类的 PO" |
+| **格式定制** | 用户明确要求特殊输出 | "把最近的发票按金额降序，给我一个 CSV" |
+
+→ 这类查询占 DATA_LOOKUP 流量的预估 **20-30%**，必须保留 ReAct 的灵活性。
+
+### 14.3 边界判定机制
+
+DATA_LOOKUP 进路由层后增加一步**子分类判定**：
+
+```
+DATA_LOOKUP signal 进 orchestrator
+   ↓
+[Lookup 模板适配判断]
+   ↓
+   命中某 Lookup 模板的形态  →  Lookup DAG 路径（5 类模板择一）
+                              ↓
+                              快速返回结构化表格
+   ↓
+   不命中任何 Lookup 模板    →  ReAct 兜底（保持现状）
+                              ↓
+                              LLM 自由组合 query_* tools
+```
+
+**判定策略**：
+- **基于实体抽取**：query 中能稳定抽出 ≥ 1 个标准实体（po_number / supplier_id / invoice_number / payment_number / receipt_number）→ 优先尝试对应 Lookup 模板
+- **基于关键词**：query 含"列出 / 列表 / list / 全部 / 所有 / 最新 / 最近"等列表型动词 + 标准实体名词 → 触发对应 Lookup 模板
+- **基于显式排除**：query 含"为什么 / 怎么样 / 是不是 / 有没有"等推理动词 → 不模板化，走 ReAct
+- **case_store 优先**：如果 case_store 已有此 query 的成功 ReAct 案例（含 dag_definition），直接复用（与主方案批 4 的 L2.5 共享机制）
+
+### 14.4 取舍的核心原则
+
+**模板化不是为了"全覆盖"，而是为了"高频、结构化、可缓存"**。三个标准必须同时满足：
+1. 高频（占 DATA_LOOKUP 流量 > 5%）
+2. 结构化（输入输出形态固定）
+3. 可缓存（多次查询结果稳定，可走 case_store）
+
+不满足任一标准的查询应该让 ReAct 处理，强行模板化会导致：
+- 模板边界不清，路由判断成本上升
+- 用户的灵活查询被 schema 卡住，体验下降
+- 模板膨胀（参考 [dag_template_expansion_analysis.md 第 6 章](dag_template_expansion_analysis.md)）
+
+---
+
+## 15. 对路由决策的影响（追加）
+
+### 15.1 当前 DATA_LOOKUP 在 orchestrator 中的处理
+
+[orchestrator.py](../core/orchestrator/orchestrator.py) `use_dag` 决策：
+
+```python
+# 当前逻辑：DATA_LOOKUP 强制 ReAct
+if signal.intent_kind == _IntentKindRoute.DATA_LOOKUP:
+    use_dag = False
+```
+
+### 15.2 引入 Lookup 模板后的新逻辑
+
+```python
+# 新逻辑：DATA_LOOKUP 走"模板优先 + ReAct 兜底"两段决策
+if signal.intent_kind == _IntentKindRoute.DATA_LOOKUP:
+    lookup_template_key = _select_lookup_template(query, parsed_params)
+    if lookup_template_key is not None:
+        use_dag = True
+        dag_template_key = lookup_template_key  # 走 Lookup DAG
+    else:
+        use_dag = False  # 兜底 ReAct（保持现有行为）
+```
+
+### 15.3 `_select_lookup_template` 设计草案
+
+```
+输入：query 文本 + parsed_params（已抽出的实体）
+输出：Optional[str]——若适合则返回 lookup 模板键名，否则 None
+
+判定流程：
+  1. 含推理动词（"为什么 / 怎么样 / 是不是"）→ return None（让 ReAct 处理）
+  2. 含 invoice_number → "invoice_lookup"
+  3. 含 payment_number → "ap_lookup" (单付款详情)
+  4. 含 receipt_number → "receipt_lookup"
+  5. 含 po_number → "po_lookup"
+  6. 含 supplier_id 或"供应商" → "supplier_lookup"
+  7. 含"应付 / 未付 / 账款" → "ap_lookup"
+  8. 含"PO / 订单 / 采购单" + 列表词 → "po_lookup"
+  9. 含"发票 / 开票" + 列表词 → "invoice_lookup"
+  10. 含"收货 / 入库" + 列表词 → "receipt_lookup"
+  11. 都不命中 → return None
+```
+
+### 15.4 与主方案各批次的交互
+
+| 与本方案批次 | 交互 |
+|---|---|
+| 批 1（监控）| Lookup 模板触发也要在 trace span 标记 `execution=lookup_dag`（区别于 dag/react），便于聚合 |
+| 批 2（L1 词库）| L1 词库已含 lookup 动词；本方案不重复，但 Lookup 模板的触发依赖 L1 抽取的实体 |
+| 批 3（L2 top-k）| L2 已包含 `data_lookup` 类目种子；新增 5 类 Lookup 模板时可考虑给 L2 种子加 `lookup_subtype` 元数据，提升 Lookup 模板选择精度 |
+| 批 4（case_store + L2.5）| **强协同**——Lookup DAG 也写入 case_store；高频 Lookup query 直接走 L2.5 复用 dag_definition，零 LLM 调用 |
+| 批 5（通用模板）| 触发条件互斥（DATA_LOOKUP vs COMPREHENSIVE 无实体），无冲突 |
+
+### 15.5 对 use_dag 决策表的更新
+
+完整决策树（含本次新增的 Lookup 分支）：
+
+```
+intent_kind == RECALL
+  → ReAct（强制，保持现状）
+
+intent_kind == DATA_LOOKUP
+  → _select_lookup_template(query) 命中
+      → Lookup DAG（新增）
+  → _select_lookup_template(query) 未命中
+      → ReAct（兜底，保持现状）
+
+intent_kind == ANALYSIS, route_level==3, confidence < l3_dag_min_confidence
+  → ReAct（保持现状）
+
+intent_kind == ANALYSIS, analysis_type == COMPREHENSIVE, has_entity
+  → DAG（实体维度模板）
+
+intent_kind == ANALYSIS, analysis_type == COMPREHENSIVE, !has_entity, 含概览触发词
+  → DAG（通用模板，主方案批 5）
+
+intent_kind == ANALYSIS, analysis_type != COMPREHENSIVE, route_level in {1,2,25}
+  → DAG（具体分析模板）
+
+否则
+  → ReAct
+```
+
+### 15.6 预估收益
+
+- **DATA_LOOKUP 流量分流**：70-80% 的 DATA_LOOKUP 流量走 Lookup DAG，剩余 20-30% 保留 ReAct
+- **延迟收益**：Lookup DAG 不调 LLM（除非 case_store 未命中需要 format LLM 兜底），P50 延迟从 ReAct 的 1-3s 降到 200-500ms
+- **缓存收益**：Lookup DAG 输出稳定，case_store 命中率高，进一步降低延迟
+- **可观测性**：明确 `execution=lookup_dag` 标记便于监控和优化
+
+---
+
+## 16. 综合结论与方案融合（追加）
+
+### 16.1 方向一合理性结论：扩充更多 P2P 分析模板
+
+**结论：合理，但需严格控制节奏**。详细分析见 [dag_template_expansion_analysis.md](dag_template_expansion_analysis.md)。
+
+**核心判断**：
+- ✅ **业界标准 P2P 至少 20+ 个常见分析场景，当前覆盖 14 个**——存在客观缺口
+- ✅ **AP 财务侧（GR/IR、AP aging、现金流）是高频盲区**——业务价值高、工程成本低
+- ⚠️ **不能"为加而加"**——模板膨胀风险真实存在（详见独立文档第 6 章）
+- ⚠️ **上游流程模板（PR/合同/RFQ）需要先解决数据源接入**——属于另立专题
+
+**推荐立即做的 3 个高 ROI 模板**：
+1. `AP_AGING`（应付账款老化）— ROI 25
+2. `GR_IR_RECONCILIATION`（GR/IR 暂记差异）— ROI 10
+3. `CASH_FLOW_FORECAST`（现金流预测）— ROI 10
+
+**与本路由优化主方案的关系**：方向一不直接提升路由命中率（命中率取决于路由算法，不取决于模板数量），但**新模板 = DAG 有去处**，间接降低 ReAct 触发率（因为以前可能落 ReAct 的 query 现在有对应模板了）。
+
+### 16.2 方向二合理性结论：原子查询能力开放（DATA_LOOKUP 模板化）
+
+**结论：合理，且与本主方案高度协同**。
+
+**核心判断**：
+- ✅ **DATA_LOOKUP 当前 100% 走 ReAct，是路由层最大的"未优化区"**——延迟高、不可缓存、报告形态不匹配
+- ✅ **70-80% 的 DATA_LOOKUP 流量符合"高频/结构化/可缓存"三标准**，适合模板化
+- ✅ **基础设施已就绪**——5 个 query_* tools 全部可用，只需加 1 个 lookup_formatter 工具
+- ✅ **与批 4 的 case_store + L2.5 强协同**——Lookup DAG 输出稳定，案例命中率高
+- ⚠️ **必须保留 ReAct 兜底**——20-30% 的灵活查询不能模板化
+
+**5 个 Lookup 模板**（详见第 13 章）：
+1. `PO_LOOKUP` — 采购订单查询
+2. `AP_LOOKUP` — 应付明细（合并 invoice + payment）
+3. `INVOICE_LOOKUP` — 发票查询
+4. `RECEIPT_LOOKUP` — 收货查询
+5. `SUPPLIER_LOOKUP` — 供应商查询
+
+**核心创新**：与现有"分析型 DAG"的 3 段式（采集→分析→报告）不同，"查询型 DAG"采用 2 段式（采集→格式化），不强制经过 LLM report_agent，能显著降低延迟。
+
+### 16.3 与原 5 批方案的融合
+
+**结论：扩充原方案为 7 批，新增批 6（Lookup 模板）+ 批 7（AP 财务模板）**。
+
+#### 新的批次结构
+
+| 批次 | 主题 | 来源 | 工作量预估 |
+|---|---|---|---|
+| 批 1 | 阈值配置化 + 命中率监控 | 原方案 | ~400 行 |
+| 批 2 | L1 词库扩展 | 原方案 | ~200 行 |
+| 批 3 | L2 top-k 投票 | 原方案 | ~250 行 |
+| 批 4 | case_store 闭环 + L2.5 检索 | 原方案 | ~700 行 |
+| 批 5 | 通用 DAG 模板 RECENT_PROCUREMENT_HEALTH | 原方案 | ~500 行 |
+| **批 6（新）** | **DATA_LOOKUP 模板化（5 个 Lookup 模板 + 路由分流）** | **方向二** | **~800 行** |
+| **批 7（新）** | **AP 财务模板（AP_AGING + GR_IR + CASH_FLOW）** | **方向一阶段 A** | **~600 行** |
+
+#### 推荐执行顺序（修订）
+
+```
+批 1 → 批 2 → 批 3 → 批 5 → 批 6 → 批 4 → 批 7
+```
+
+**修订理由**：
+- **批 6 提到批 4 之前**——Lookup DAG 是 case_store 的天然受益者（输出稳定、可缓存），先有 Lookup 模板，case_store 才有"高质量案例"可积累
+- **批 7 放最后**——AP 财务模板是新增能力，不依赖路由优化；放最后让前面 6 批先验证基础设施稳定性
+
+#### 累计预估收益
+
+| 改动 | ReAct 触发率影响 |
+|---|---|
+| 批 1 | 0pp（基础设施）|
+| 批 2 | -8~15pp |
+| 批 3 | -5~10pp |
+| 批 5 | -5~10pp（吃 COMPREHENSIVE 无实体的"概览"流量）|
+| **批 6** | **-15~20pp（吃 DATA_LOOKUP 流量的 70-80%）** |
+| 批 4 | -10~20pp（需案例积累后生效）|
+| **批 7** | **-3~5pp（边缘流量收编）** |
+
+**总累计**：ReAct 触发率从基线下降 **45~70 pp**（保守估计），相比原方案的 30-45pp 提升 1.5 倍。
+
+### 16.4 文档更新方案
+
+**已更新的文档**：
+
+1. **[intent_routing_hit_rate_optimization.md](intent_routing_hit_rate_optimization.md)** v1.1（本文档）
+   - 新增第 12-16 章（DATA_LOOKUP 模板化全套设计 + 综合结论）
+   - 文档版本历史标记为 v1.1
+   - 后续若批 6/7 立项，应进一步增加专门的"批 6"/"批 7"章节，与现有"批 1-5"对齐结构
+
+2. **[dag_template_expansion_analysis.md](dag_template_expansion_analysis.md)** v1.0（独立新建）
+   - 完整的方向一分析：现状调研 + 12 候选模板 + 三维评分 + 风险 + 执行梯度
+   - 与本主文档 16.1 节互引
+
+**后续更新建议**：
+
+| 触发条件 | 应更新的文档 / 章节 |
+|---|---|
+| 批 1 上线 + 监控数据采集 1 周 | 主文档 1.2 节"目标指标"基线值 + 16.3 节累计预估 |
+| 批 6 立项 | 主文档新增"第 17 章 批 6：DATA_LOOKUP 模板化"，详细原子步骤 |
+| 批 7 立项 | 主文档新增"第 18 章 批 7：AP 财务模板"，引用 dag_template_expansion_analysis.md 阶段 A |
+| 业务方确认要做 PR/合同 | dag_template_expansion_analysis.md 阶段 C 升级为正式立项文档 |
+| 任何批次完成 | 文档版本历史 + 对应批次的"实施记录"小节 |
+
+### 16.5 不在本次范围的事项（重申）
+
+明确**本次（v1.1）不写入文档**的事项：
+- 批 6 / 批 7 的原子步骤详细设计（等立项后再写）
+- Lookup DAG 触发条件的详细 prompt（依赖批 6 立项）
+- 各 Lookup 模板的具体节点定义（依赖批 6 立项）
+- 新增 lookup_formatter tool 的实现签名（依赖批 6 立项）
+- DAG 模板膨胀的"模板骨架重构"专题（独立专题）
+
+---
+
+
+
 
 
 
