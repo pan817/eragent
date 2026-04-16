@@ -348,7 +348,16 @@ class AsyncAnalysisSettings(BaseSettings):
     # registry._run 在 publish_done 之前等 trace_runs 落库的最长阻塞秒数。
     # 保证前端收到 SSE done 时再查 /tasks/{id} 一定能看到终态。
     # 正常 DB 写入 10-50ms；超时会降级 WARNING 不阻塞 SSE。
-    trace_flush_barrier_timeout: float = 2.0
+    # 2026-04 生产复盘：2s 在 PG 抖动或大批量 trace span flush 时偶尔不够,
+    # 放宽到 10s;正常路径仍是 10-50ms,不影响吞吐。
+    trace_flush_barrier_timeout: float = 10.0
+
+    # 周期性 sweep 扫"超龄仍 pending 的 chat_messages"的年龄阈值（秒）。
+    # registry.finalizer 是第一道闸（覆盖绝大多数路径）；
+    # _mark_stale_as_aborted 在启动/关闭时触发，是第二道闸；
+    # 本阈值用于进程存活期间的周期性第三道闸，默认 30 分钟。
+    # 值必须大于 runner_hard_timeout_seconds + 余量，否则会误杀还在跑的任务。
+    orphan_pending_chat_max_age_sec: int = 1800
 
     # registry._run 里 runner_factory 协程的硬超时秒数（覆盖 orchestrator + 持久化 + chat 收尾）。
     # 触达此超时即 cancel runner 协程，把 entry 标为 ERROR(RUNNER_STALLED)，

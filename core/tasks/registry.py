@@ -38,6 +38,11 @@ _logger = get_logger(__name__)
 RunnerFactory = Callable[["TaskEntry"], Awaitable[AnalysisResult]]
 """把 TaskEntry 转化为可运行协程的工厂；由 API 路由注入具体实现。"""
 
+Finalizer = Callable[["TaskEntry"], Awaitable[None]]
+"""任务终态收尾回调：由 API 路由注入，在所有终止路径里统一更新 chat_messages
+等业务副作用表（success/error/abort/timeout/stall 全覆盖）。registry 不直接依赖
+chat_repository，仅通过此回调解耦。"""
+
 
 @dataclass
 class TaskEntry:
@@ -58,6 +63,8 @@ class TaskEntry:
     result: AnalysisResult | None = None
     error: ErrorInfo | None = None
     task: asyncio.Task[Any] | None = None
+    finalizer: Finalizer | None = None
+    finalized: bool = False
 
 
 class TaskRegistry:
@@ -74,6 +81,7 @@ class TaskRegistry:
         trace_flush_barrier_timeout: float = 2.0,
         runner_hard_timeout_seconds: float = 600.0,
         runner_stall_grace_seconds: float = 60.0,
+        orphan_pending_chat_max_age_sec: int = 1800,
     ) -> None:
         self._bus = event_bus
         self._session_factory = session_factory
@@ -87,6 +95,10 @@ class TaskRegistry:
         # （覆盖 wait_for 自身失灵或被屏蔽的边缘场景）。
         self._runner_hard_timeout = runner_hard_timeout_seconds
         self._runner_stall_grace = runner_stall_grace_seconds
+        # 孤儿 pending chat_messages 纠偏阈值：finalizer 是第一道闸，
+        # _mark_stale_as_aborted(启动/关闭) 是第二道闸，本周期性 sweep 是第三道闸，
+        # 覆盖"进程存活但 finalizer 全链路失败"的极端尾部场景。默认 30 分钟。
+        self._orphan_pending_chat_max_age = orphan_pending_chat_max_age_sec
         self._stalled_count = 0
         self._max_concurrent_tasks = max_concurrent_tasks
         self._semaphore = asyncio.Semaphore(max_concurrent_tasks)
@@ -150,11 +162,13 @@ class TaskRegistry:
         assistant_message_id: str | None,
         user_message_id: str | None,
         runner_factory: RunnerFactory,
+        finalizer: Finalizer | None = None,
     ) -> TaskEntry:
         """登记并启动一个异步分析任务。
 
-        runner_factory 负责实际调用 orchestrator + 持久化 chat 消息；
-        本方法只管 entry 生命周期与并发控制。
+        runner_factory 负责调用 orchestrator.analyze；finalizer 在任务终结
+        的 finally 链路里统一触发（覆盖 success / FAILED / timeout / cancel /
+        sweep-stall 所有路径），用于把 pending 态的 chat_messages 落成终态。
         """
         if self._closed:
             raise RuntimeError("task registry has been shut down")
@@ -166,6 +180,7 @@ class TaskRegistry:
             request=request,
             assistant_message_id=assistant_message_id,
             user_message_id=user_message_id,
+            finalizer=finalizer,
         )
         async with self._lock:
             self._entries[trace_id] = entry
@@ -315,8 +330,12 @@ class TaskRegistry:
             # 发 done 之前先等 trace_runs 的 run_end 被 commit 到 DB，
             # 避免前端收到 done 后立刻查快照落到其他 worker，
             # 后者回落 DB 时 trace_runs 仍是 running（docs/issue SSE 与快照不一致问题）。
-            # 失败只降级 WARNING，仍照常 publish_done——不能因为 DB 抖动把 SSE 吊死。
+            # 失败只降级 WARNING,仍照常 publish_done——不能因为 DB 抖动把 SSE 吊死。
             await self._await_trace_run_flushed(entry.trace_id)
+            # 业务收尾（chat_messages 等）必须在 publish_done 之前执行:
+            # 前端收到 SSE done 后会立刻拉 sessions 判断消息终态,这条顺序保证
+            # done 到达时 chat_messages 已经落到 success / error(Issue 3 修复核心)。
+            await self._run_finalizer(entry)
             self._publish_done(entry)
             self._bus.close(entry.trace_id)
             # 恢复 ContextVar，避免协程复用线程时污染后续任务。
@@ -360,6 +379,35 @@ class TaskRegistry:
                 "trace-run flush barrier timed out on trace %s; "
                 "snapshot may lag behind SSE done briefly",
                 trace_id,
+            )
+
+    async def _run_finalizer(self, entry: TaskEntry) -> None:
+        """在 publish_done 前执行业务收尾回调（如 chat_messages 终态写入）。
+
+        - 幂等：通过 ``entry.finalized`` 标志防止 _run.finally 与 sweep 两条
+          路径重复调度时真的跑两次（首先进入的 coroutine 抢到标志位，后到的
+          短路返回）
+        - 隔离：finalizer 自身异常只记 WARNING，不阻塞 publish_done；SSE 前
+          端的终态可见性优先级高于 chat_messages 的一致性
+        - 超时：5 秒硬超时，避免 DB 死锁把整个任务吊死
+        """
+        if entry.finalizer is None or entry.finalized:
+            return
+        entry.finalized = True
+        try:
+            await asyncio.wait_for(entry.finalizer(entry), timeout=5.0)
+        except asyncio.TimeoutError:
+            _logger.warning(
+                "finalizer timed out on trace %s after 5.0s; "
+                "chat_messages 可能仍停在 pending,将靠启动期 recover 或后续 sweep 收敛",
+                entry.trace_id,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "finalizer failed on trace %s; "
+                "chat_messages 可能仍停在 pending",
+                entry.trace_id,
+                exc_info=True,
             )
 
     def _publish_status(self, entry: TaskEntry, state: TaskState) -> None:
@@ -427,6 +475,21 @@ class TaskRegistry:
             entry.duration_ms = (
                 entry.finished_at - entry.started_at
             ).total_seconds() * 1000.0
+        # 僵尸纠偏路径也要触发 finalizer,否则 chat_messages 会永远停在 pending
+        # (_run.finally 在 CancelledError 后虽然也会走 finalizer,但那时
+        # entry.state 可能已被 _run 的 except 分支覆盖,此处先占位更可靠)。
+        if entry.finalizer is not None and not entry.finalized:
+            try:
+                asyncio.create_task(
+                    self._run_finalizer(entry),
+                    name=f"stalled-finalize:{entry.trace_id}",
+                )
+            except Exception:  # noqa: BLE001
+                _logger.warning(
+                    "failed to schedule finalizer during stall sweep: trace=%s",
+                    entry.trace_id,
+                    exc_info=True,
+                )
         try:
             self._publish_done(entry)
         except Exception:  # noqa: BLE001
@@ -495,10 +558,56 @@ class TaskRegistry:
             self._bus.drop(trace_id)
         if to_drop:
             _logger.info("task registry swept %d expired entries", len(to_drop))
+        # 孤儿 pending 消息兜底：finalizer + 启动 recover 都失效的极端场景
+        # （进程 OOM/Kill 在 POST 之后、finalizer 未跑之前就挂掉且立刻重启
+        # 也不会触发 _mark_stale_as_aborted；或 finalizer 连续 5s 超时）。
+        try:
+            affected = self._sweep_orphan_pending_chat_messages()
+            if affected:
+                _logger.warning(
+                    "task registry sweep marked %d orphan pending chat_messages as error "
+                    "(age>%ds); 这批消息对应的 finalizer 链路全部失败",
+                    affected,
+                    self._orphan_pending_chat_max_age,
+                )
+        except Exception:  # noqa: BLE001
+            _logger.exception("orphan pending chat_messages sweep failed")
 
     # ------------------------------------------------------------------
     # 启动兜底：把跨进程残留状态收敛
     # ------------------------------------------------------------------
+
+    def _sweep_orphan_pending_chat_messages(self) -> int:
+        """把超龄且仍处于 pending 的 chat_messages 推到 error。
+
+        该 sweep 是 finalizer 的最后一道兜底：
+        1. registry._run_finalizer 是第一道闸（覆盖绝大多数终态路径）
+        2. _mark_stale_as_aborted 是第二道闸（仅在启动/关闭触发）
+        3. 本方法是第三道闸（进程存活期间的周期性清理）
+
+        阈值由 ``orphan_pending_chat_max_age_sec`` 控制，默认 1800 秒。
+        必须足够大以避开正常业务最坏耗时（runner_hard_timeout 600 + 余量），
+        太小会误杀仍在正常运行的任务。
+        """
+        from datetime import timedelta
+
+        threshold = now_cn() - timedelta(
+            seconds=self._orphan_pending_chat_max_age
+        )
+        with self._session_factory() as session:
+            affected = session.execute(
+                update(chat_messages_table)
+                .where(
+                    chat_messages_table.c.status == "pending",
+                    chat_messages_table.c.created_at < threshold,
+                )
+                .values(
+                    status="error",
+                    content="任务在后端无响应中终结,请重新发起",
+                )
+            ).rowcount or 0
+            session.commit()
+        return int(affected)
 
     def _mark_stale_as_aborted(self) -> dict[str, int]:
         """同步方法：跨进程启动/关闭时调用。"""
@@ -551,6 +660,7 @@ def init_task_registry(
     trace_flush_barrier_timeout: float = 2.0,
     runner_hard_timeout_seconds: float = 600.0,
     runner_stall_grace_seconds: float = 60.0,
+    orphan_pending_chat_max_age_sec: int = 1800,
 ) -> TaskRegistry:
     """初始化全局 TaskRegistry（幂等）。"""
     global _registry
@@ -564,6 +674,7 @@ def init_task_registry(
             trace_flush_barrier_timeout=trace_flush_barrier_timeout,
             runner_hard_timeout_seconds=runner_hard_timeout_seconds,
             runner_stall_grace_seconds=runner_stall_grace_seconds,
+            orphan_pending_chat_max_age_sec=orphan_pending_chat_max_age_sec,
         )
     return _registry
 

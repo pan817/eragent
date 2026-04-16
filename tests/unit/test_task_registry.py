@@ -415,3 +415,277 @@ async def test_sweep_skips_running_within_threshold(short_timeout_registry) -> N
     # 放行 runner 让 entry.task 正常收尾，避免影响其它用例
     done_event.set()
     await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Finalizer 收尾：所有终止路径（成功/业务失败/运行时异常/硬超时/cancel/stall-sweep）
+# 都必须触发一次 finalizer，否则依赖它落地的 chat_messages.status 会停在 pending。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_success(registry) -> None:
+    calls: list[TaskState] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        calls.append(entry.state)
+
+    async def runner(entry: TaskEntry) -> AnalysisResult:
+        return _ok_result(entry.trace_id)
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-ok",
+        assistant_message_id="m1", user_message_id=None,
+        runner_factory=runner, finalizer=finalizer,
+    )
+    await entry.task  # type: ignore[arg-type]
+    assert calls == [TaskState.OK]
+    assert entry.finalized is True
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_business_failure(registry) -> None:
+    from api.schemas.analysis import ErrorInfo
+
+    calls: list[tuple[TaskState, str | None]] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        err_code = entry.error.code if entry.error else None
+        calls.append((entry.state, err_code))
+
+    async def runner(entry: TaskEntry) -> AnalysisResult:
+        return AnalysisResult(
+            report_id=entry.trace_id,
+            trace_id=entry.trace_id,
+            status=AnalysisStatus.FAILED,
+            analysis_type=AnalysisType.COMPREHENSIVE,
+            query="q", user_id="u1", session_id="s1", time_range="",
+            error=ErrorInfo(code="LLM_CONNECTION_ERROR", message="boom"),
+        )
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-failed",
+        assistant_message_id="m2", user_message_id=None,
+        runner_factory=runner, finalizer=finalizer,
+    )
+    await entry.task  # type: ignore[arg-type]
+    assert calls == [(TaskState.ERROR, "LLM_CONNECTION_ERROR")]
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_runner_exception(registry) -> None:
+    """orchestrator 抛异常时,runner 里的老代码收不到 result,旧实现会让
+    chat_messages 停在 pending;finalizer 放到 registry.finally 后必须被调。"""
+    calls: list[TaskState] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        calls.append(entry.state)
+
+    async def runner(_entry: TaskEntry) -> AnalysisResult:
+        raise RuntimeError("boom from orchestrator")
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-raise",
+        assistant_message_id="m3", user_message_id=None,
+        runner_factory=runner, finalizer=finalizer,
+    )
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+    assert calls == [TaskState.ERROR]
+    assert entry.error is not None and "boom" in entry.error.message
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_cancel(registry) -> None:
+    started = asyncio.Event()
+    calls: list[TaskState] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        calls.append(entry.state)
+
+    async def runner(_entry: TaskEntry) -> AnalysisResult:
+        started.set()
+        await asyncio.sleep(10)
+        raise AssertionError
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-cancel",
+        assistant_message_id="m4", user_message_id=None,
+        runner_factory=runner, finalizer=finalizer,
+    )
+    await started.wait()
+    assert entry.task is not None
+    entry.task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await entry.task
+    assert calls == [TaskState.ABORTED]
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_runner_hard_timeout(
+    short_timeout_registry,
+) -> None:
+    calls: list[tuple[TaskState, str | None]] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        err_code = entry.error.code if entry.error else None
+        calls.append((entry.state, err_code))
+
+    async def stuck(_entry: TaskEntry) -> AnalysisResult:
+        await asyncio.sleep(5.0)
+        raise AssertionError
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-fin-timeout",
+        assistant_message_id="m5", user_message_id=None,
+        runner_factory=stuck, finalizer=finalizer,
+    )
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+    assert calls == [(TaskState.ERROR, "RUNNER_STALLED")]
+
+
+@pytest.mark.asyncio
+async def test_finalizer_called_on_stall_sweep(short_timeout_registry) -> None:
+    """sweep 强制纠偏僵尸 RUNNING entry 时也必须触发 finalizer,
+    否则 chat_messages 永远停在 pending(僵尸任务是 P0 场景)。"""
+    started = asyncio.Event()
+    calls: list[TaskState] = []
+
+    async def finalizer(entry: TaskEntry) -> None:
+        calls.append(entry.state)
+
+    async def hang(_entry: TaskEntry) -> AnalysisResult:
+        started.set()
+        await asyncio.sleep(30)
+        raise AssertionError
+
+    entry = await short_timeout_registry.submit(
+        _req(), trace_id="t-fin-sweep",
+        assistant_message_id="m6", user_message_id=None,
+        runner_factory=hang, finalizer=finalizer,
+    )
+    await started.wait()
+    # 模拟 wait_for 失灵:强行把 entry 拉回 RUNNING + 超龄
+    entry.started_at = now_cn() - timedelta(seconds=10)
+    entry.state = TaskState.RUNNING
+    entry.error = None
+    entry.finished_at = None
+
+    short_timeout_registry._sweep_once()
+
+    # sweep 通过 asyncio.create_task 调度 finalizer,给调度器一轮机会
+    for _ in range(10):
+        if calls:
+            break
+        await asyncio.sleep(0.01)
+    assert calls == [TaskState.ERROR]
+
+    # 等 entry.task 自然收尾,防止影响其它用例
+    await asyncio.gather(entry.task, return_exceptions=True)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_finalizer_exception_does_not_block_done(registry, bus) -> None:
+    """finalizer 自身失败只打 WARNING,不能阻塞 publish_done—SSE 可见性优先。"""
+
+    async def boom_finalizer(_entry: TaskEntry) -> None:
+        raise RuntimeError("finalizer boom")
+
+    async def runner(entry: TaskEntry) -> AnalysisResult:
+        return _ok_result(entry.trace_id)
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-boom",
+        assistant_message_id="m7", user_message_id=None,
+        runner_factory=runner, finalizer=boom_finalizer,
+    )
+    await entry.task  # type: ignore[arg-type]
+
+    # done 仍然被发出;前端不受 finalizer 失败影响
+    dones = [e for e in bus.buffered("t-fin-boom") if e.get("type") == "done"]
+    assert dones and dones[-1]["status"] == "ok"
+    # finalized 标志仍被置位,避免后续重试无限循环
+    assert entry.finalized is True
+
+
+@pytest.mark.asyncio
+async def test_finalizer_timeout_degrades_gracefully(registry, bus) -> None:
+    """finalizer 卡超过 5s 硬超时时降级 WARNING,不卡 done。"""
+
+    async def slow_finalizer(_entry: TaskEntry) -> None:
+        await asyncio.sleep(30)
+
+    async def runner(entry: TaskEntry) -> AnalysisResult:
+        return _ok_result(entry.trace_id)
+
+    entry = await registry.submit(
+        _req(), trace_id="t-fin-slow",
+        assistant_message_id="m8", user_message_id=None,
+        runner_factory=runner, finalizer=slow_finalizer,
+    )
+    # 把 registry 的 finalizer 超时从 5s 改到 0.1s 以加速测试
+    original = registry._run_finalizer
+
+    async def _patched(entry: TaskEntry) -> None:
+        if entry.finalizer is None or entry.finalized:
+            return
+        entry.finalized = True
+        try:
+            await asyncio.wait_for(entry.finalizer(entry), timeout=0.1)
+        except asyncio.TimeoutError:
+            pass
+
+    registry._run_finalizer = _patched  # type: ignore[method-assign]
+    try:
+        await asyncio.wait_for(entry.task, timeout=2.0)  # type: ignore[arg-type]
+    finally:
+        registry._run_finalizer = original  # type: ignore[method-assign]
+
+    dones = [e for e in bus.buffered("t-fin-slow") if e.get("type") == "done"]
+    assert dones and dones[-1]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphan_pending_chat_messages(bus, db_session_factory) -> None:
+    """模拟 finalizer 全链路失败留下的超龄 pending 消息,sweep 必须把它们推到 error。"""
+    # 用极短阈值的 registry,方便测试
+    short_orphan_registry = TaskRegistry(
+        event_bus=bus,
+        session_factory=db_session_factory,
+        max_concurrent_tasks=2,
+        result_cache_ttl_sec=60,
+        sweep_interval_sec=60,
+        orphan_pending_chat_max_age_sec=1,  # 1 秒,几乎立即过期
+    )
+
+    # 建一条 session 及两条消息:一条超龄 pending、一条新 pending
+    with db_session_factory() as s:
+        s.execute(chat_sessions_table.insert().values(
+            id="sess-orphan", user_id="u1", title="x",
+            title_auto=True, message_count=2,
+        ))
+        # 超龄 pending:created_at 往前推 10 秒
+        s.execute(chat_messages_table.insert().values(
+            id="m-old-pending", session_id="sess-orphan", role="assistant",
+            content="", status="pending", trace_id="trace-old",
+            created_at=now_cn() - timedelta(seconds=10),
+        ))
+        # 新 pending:不该被扫到
+        s.execute(chat_messages_table.insert().values(
+            id="m-new-pending", session_id="sess-orphan", role="assistant",
+            content="", status="pending", trace_id="trace-new",
+            created_at=now_cn(),
+        ))
+        s.commit()
+
+    short_orphan_registry._sweep_once()
+
+    with db_session_factory() as s:
+        old = s.execute(
+            select(chat_messages_table).where(chat_messages_table.c.id == "m-old-pending")
+        ).fetchone()
+        new = s.execute(
+            select(chat_messages_table).where(chat_messages_table.c.id == "m-new-pending")
+        ).fetchone()
+        assert old is not None and old.status == "error"
+        assert "重新发起" in old.content
+        assert new is not None and new.status == "pending"

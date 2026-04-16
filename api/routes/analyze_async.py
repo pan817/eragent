@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from api.routes.analyze import _get_orchestrator, _run_db_io
-from api.schemas.analysis import AnalysisRequest, AnalysisResult, AnalysisStatus
+from api.schemas.analysis import AnalysisRequest, AnalysisResult
 from config.settings import get_settings
 from core.chat import get_chat_repository
 from core.logging_utils import get_logger
@@ -135,9 +135,13 @@ async def analyze_async(
 
     runner = _build_runner(
         request=request,
-        chat_repo=chat_repo,
         assistant_message_id=assistant_message_id,
         user_message_id=user_message_id,
+    )
+    finalizer = _build_finalizer(
+        request=request,
+        chat_repo=chat_repo,
+        assistant_message_id=assistant_message_id,
     )
 
     entry = await registry.submit(
@@ -146,6 +150,7 @@ async def analyze_async(
         assistant_message_id=assistant_message_id,
         user_message_id=user_message_id,
         runner_factory=runner,
+        finalizer=finalizer,
     )
 
     # 使用 FastAPI 的 url_path_for 自动拼接 router 挂载 prefix
@@ -325,54 +330,91 @@ async def _ensure_session_async(repo: Any, user_id: str, session_id: str) -> Non
 def _build_runner(
     *,
     request: AnalysisRequest,
-    chat_repo: Any,
     assistant_message_id: str | None,
     user_message_id: str | None,
 ):
-    """返回一个闭包，供 TaskRegistry 作为 runner_factory 调用。"""
+    """返回一个闭包，供 TaskRegistry 作为 runner_factory 调用。
+
+    只做 orchestrator.analyze + 给 result 附 chat message id；chat_messages
+    的终态写入由 ``_build_finalizer`` 返回的 finalizer 在 registry 的 finally
+    链路里统一执行，覆盖 timeout / cancel / stall-sweep 所有异常路径。
+    """
 
     orchestrator = _get_orchestrator()
 
     async def runner(entry: TaskEntry) -> AnalysisResult:
         result = await orchestrator.analyze(request, trace_id=entry.trace_id)
-
-        # 统一给 result 附上 chat message id，便于前端直接消费
         if assistant_message_id is not None:
             result.assistant_message_id = assistant_message_id
         if user_message_id is not None:
             result.user_message_id = user_message_id
-
-        # 更新 assistant 消息：pending → success / error
-        if chat_repo is not None and assistant_message_id is not None:
-            content = result.report_markdown or (
-                result.error.message if result.error else "(无内容)"
-            )
-            msg_status = (
-                "error" if result.status == AnalysisStatus.FAILED else "success"
-            )
-            try:
-                await _run_db_io(
-                    chat_repo.update_message,
-                    request.user_id,
-                    request.session_id,
-                    assistant_message_id,
-                    {
-                        "content": content,
-                        "status": msg_status,
-                        "duration_ms": int(result.duration_ms or 0),
-                        "trace_id": result.trace_id or entry.trace_id,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning(
-                    "failed to finalize assistant message %s: %s",
-                    assistant_message_id,
-                    exc,
-                )
-
         return result
 
     return runner
+
+
+def _build_finalizer(
+    *,
+    request: AnalysisRequest,
+    chat_repo: Any,
+    assistant_message_id: str | None,
+):
+    """返回 TaskRegistry 的 finalizer 回调：把 pending 气泡落成 success/error。
+
+    关键点：finalizer 读 ``entry.state/result/error``（registry 在进 finally
+    前已赋值完毕），不依赖 runner 是否正常返回。于是 orchestrator 抛异常、
+    runner 硬超时、CancelledError、stall-sweep 纠偏等所有终止路径都能把
+    chat_messages 更新到正确终态——这是修复 Issue 3 的核心。
+
+    None 表示不需要收尾（auto_persist=False 或没有 assistant 消息）。
+    """
+    if chat_repo is None or assistant_message_id is None:
+        return None
+
+    async def finalize(entry: TaskEntry) -> None:
+        if entry.state == TaskState.OK:
+            content = (
+                entry.result.report_markdown
+                if entry.result and entry.result.report_markdown
+                else "(无内容)"
+            )
+            msg_status = "success"
+        else:
+            # 失败/中止/超时/僵尸：依次从 entry.error、entry.result.error 里找消息
+            err_msg: str | None = None
+            if entry.error is not None and entry.error.message:
+                err_msg = entry.error.message
+            elif (
+                entry.result is not None
+                and entry.result.error is not None
+                and entry.result.error.message
+            ):
+                err_msg = entry.result.error.message
+            content = err_msg or "分析失败"
+            msg_status = "error"
+
+        duration_ms = int(entry.duration_ms or 0)
+        try:
+            await _run_db_io(
+                chat_repo.update_message,
+                request.user_id,
+                request.session_id,
+                assistant_message_id,
+                {
+                    "content": content,
+                    "status": msg_status,
+                    "duration_ms": duration_ms,
+                    "trace_id": entry.trace_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 让 registry._run_finalizer 感知失败（它会打 WARNING 并置 finalized
+            # 避免重试）；不抛 HTTPException 污染 registry 的日志堆栈。
+            raise RuntimeError(
+                f"update_message failed: msg_id={assistant_message_id} err={exc!r}"
+            ) from exc
+
+    return finalize
 
 
 def _entry_to_snapshot(entry: TaskEntry) -> AnalysisTaskSnapshot:

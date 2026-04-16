@@ -171,65 +171,43 @@ async def test_close_with_full_queue_still_delivers_sentinel() -> None:
     await task
 
 
-def test_worker_mismatch_warning(monkeypatch) -> None:
-    """workers>1 且 backend=memory 时打 WARNING。"""
+def test_worker_mismatch_fail_fast(monkeypatch) -> None:
+    """workers>1 且 backend=memory 时必须 fail-fast 抛 RuntimeError。
+
+    历史行为是 WARNING,但生产环境多次忽略该警告导致前端 Issue 1
+    复现(用户看到 15 分钟转圈后失败)。2026-04 复盘后改为直接
+    RuntimeError,逼迫运维在启动期修配置。
+    """
     import api.main as api_main
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        api_main._logger,
-        "warning",
-        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
-    )
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    api_main._check_event_backend_matches_workers("memory")
-    assert any("event_backend=memory" in w for w in warnings)
+    with pytest.raises(RuntimeError, match="event_backend=memory"):
+        api_main._check_event_backend_matches_workers("memory")
 
 
-def test_worker_mismatch_no_warning_when_redis(monkeypatch) -> None:
-    """workers>1 且 backend=redis 时不打 WARNING。"""
+def test_worker_mismatch_ok_when_redis(monkeypatch) -> None:
+    """workers>1 且 backend=redis 时正常放行。"""
     import api.main as api_main
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        api_main._logger,
-        "warning",
-        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
-    )
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
-    api_main._check_event_backend_matches_workers("redis")
-    assert warnings == []
+    api_main._check_event_backend_matches_workers("redis")  # 不抛
 
 
-def test_worker_mismatch_no_warning_single_worker(monkeypatch) -> None:
-    """单 worker 下无论 backend 都不打 WARNING。"""
+def test_worker_mismatch_ok_single_worker(monkeypatch) -> None:
+    """单 worker 下无论 backend 都正常放行。"""
     import api.main as api_main
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        api_main._logger,
-        "warning",
-        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
-    )
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     monkeypatch.delenv("WORKERS", raising=False)
-    api_main._check_event_backend_matches_workers("memory")
-    assert warnings == []
+    api_main._check_event_backend_matches_workers("memory")  # 不抛
 
 
 def test_worker_mismatch_invalid_env_treated_as_single(monkeypatch) -> None:
-    """WEB_CONCURRENCY 非法值应按单 worker 处理。"""
+    """WEB_CONCURRENCY 非法值应按单 worker 处理,不 fail-fast。"""
     import api.main as api_main
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        api_main._logger,
-        "warning",
-        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
-    )
     monkeypatch.setenv("WEB_CONCURRENCY", "not-a-number")
-    api_main._check_event_backend_matches_workers("memory")
-    assert warnings == []
+    api_main._check_event_backend_matches_workers("memory")  # 不抛
 
 
 def test_init_event_bus_memory_default() -> None:

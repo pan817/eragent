@@ -54,12 +54,16 @@ def _mask_redis_url(url: str) -> str:
 
 
 def _check_event_backend_matches_workers(event_backend: str) -> None:
-    """检查 event_backend 与实际 worker 数量是否匹配；不匹配打 WARNING。
+    """检查 event_backend 与实际 worker 数量是否匹配；不匹配直接 fail-fast。
 
     多 worker 部署下 memory backend 会导致 POST 与 SSE 可能落在不同 worker
-    进程，订阅方永远收不到发布方的事件（详见
-    docs/issue/async_analyze_backend_issue.md）。此处仅打 WARNING，不阻止
-    启动——运维可能临时调整 workers 数量做压测；但启动日志里能看到明显提示。
+    进程，订阅方永远收不到发布方的事件（前端 Issue 1 的根因，详见
+    docs/issue/async_analyze_backend_issue.md）。
+
+    2026-04 生产复盘决定升级为 RuntimeError：WARNING 容易被忽略，
+    一旦用户点击"异步分析"就会表现为"界面转圈 15 分钟后失败"，
+    比服务启动不起来更糟糕。压测等临时场景请显式设置
+    ASYNC_ANALYSIS_EVENT_BACKEND=redis 再配合 workers>1 使用。
     """
     import os
 
@@ -69,11 +73,11 @@ def _check_event_backend_matches_workers(event_backend: str) -> None:
     except ValueError:
         workers = 1
     if workers > 1 and event_backend == "memory":
-        _logger.warning(
-            "async_analysis.event_backend=memory 但检测到 workers=%d；"
-            "多 worker 下 SSE 事件无法跨进程送达，请改用 event_backend=redis。"
-            "详见 docs/issue/async_analyze_backend_issue.md",
-            workers,
+        raise RuntimeError(
+            f"async_analysis.event_backend=memory 与 workers={workers} 不兼容: "
+            "多 worker 下 SSE 事件无法跨进程送达,前端将只能收到心跳事件。"
+            "请在 config.yaml 设置 async_analysis.event_backend=redis 并提供 redis_url,"
+            "或把 workers 降回 1。详见 docs/issue/async_analyze_backend_issue.md"
         )
 
 
@@ -175,6 +179,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         trace_flush_barrier_timeout=async_cfg.trace_flush_barrier_timeout,
         runner_hard_timeout_seconds=async_cfg.runner_hard_timeout_seconds,
         runner_stall_grace_seconds=async_cfg.runner_stall_grace_seconds,
+        orphan_pending_chat_max_age_sec=async_cfg.orphan_pending_chat_max_age_sec,
     )
     # 跨进程残留收敛：把上次进程中残留的 running / pending 标记为 aborted / error
     registry.recover_on_startup()

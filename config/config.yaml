@@ -135,6 +135,8 @@ async_analysis:
   sse_heartbeat_sec: 15               # SSE 心跳周期（秒），防代理 idle 超时
   runner_hard_timeout_seconds: 600.0  # runner_factory 协程硬超时，防止 entry.state 卡 RUNNING
   runner_stall_grace_seconds: 60.0    # sweep 纠偏僵尸 RUNNING entry 的宽限窗口
+  trace_flush_barrier_timeout: 10.0   # publish_done 前等 trace_runs commit 的秒数
+  orphan_pending_chat_max_age_sec: 1800  # sweep 纠偏超龄 pending chat_messages 的阈值
 
   # SSE 事件总线后端。
   # - memory：进程内 asyncio.Queue，仅适用于 workers=1 的单进程部署
