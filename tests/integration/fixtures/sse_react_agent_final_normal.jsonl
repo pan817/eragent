@@ -1,0 +1,15 @@
+{"type":"status","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:00.100+08:00","seq":1,"state":"running"}
+{"type":"stage","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:00.150+08:00","seq":2,"name":"intent_parsed","attrs":{"route_level":3,"intent_kind":"data_lookup"}}
+{"type":"tool","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:00.200+08:00","seq":3,"action":"start","name":"query_purchase_orders"}
+{"type":"tool","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.350+08:00","seq":4,"action":"end","name":"query_purchase_orders","duration_ms":1150,"status":"ok"}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.450+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"## 采购订单查询结果\n\n","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.480+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"最近 7 天共 ","index":1,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.510+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"创建 **3 张** 采购订单：\n\n","index":2,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.540+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"1. **PO-2024-0042** ","index":3,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.570+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"— 已收货，待开票\n","index":4,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.600+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"2. **PO-2024-0043** ","index":5,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.630+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"— 部分收货\n","index":6,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.660+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"3. **PO-2024-0044** ","index":7,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.690+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"— 已审批，待发货\n","index":8,"eos":false}
+{"type":"chunk","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.720+08:00","seq":0,"node":"agent_final","message_id":"FIX-NORMAL","delta":"","index":9,"eos":true}
+{"type":"done","trace_id":"FIX-NORMAL","ts":"2026-04-16T10:00:01.750+08:00","seq":5,"status":"ok","duration_ms":1650}

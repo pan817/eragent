@@ -1,0 +1,7 @@
+{"type":"status","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.100+08:00","seq":1,"state":"running"}
+{"type":"stage","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.150+08:00","seq":2,"name":"intent_parsed","attrs":{"route_level":3,"intent_kind":"data_lookup"}}
+{"type":"tool","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.200+08:00","seq":3,"action":"start","name":"query_purchase_orders"}
+{"type":"tool","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.420+08:00","seq":4,"action":"end","name":"query_purchase_orders","duration_ms":220,"status":"ok"}
+{"type":"chunk","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.500+08:00","seq":0,"node":"agent_final","message_id":"FIX-ERROR","delta":"## 查询结果\n\n开始整理数据……","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:00.560+08:00","seq":0,"node":"agent_final","message_id":"FIX-ERROR","delta":"找到 5 条记录，正在","index":1,"eos":false}
+{"type":"done","trace_id":"FIX-ERROR","ts":"2026-04-16T10:00:01.500+08:00","seq":5,"status":"error","duration_ms":1400,"error":{"code":"AGENT_INVOKE_FAILED","message":"P2P 分析失败: LLM 调用超时","retry_count":3}}

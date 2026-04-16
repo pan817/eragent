@@ -197,6 +197,7 @@ report:
   detailed_max_chars: 800             # detailed：保持 4 段结构但限定总字数
   brief_max_chars: 500                # brief：简报摘要模式
   table_max_chars: 300                # table：表格 + 简短结论
+  chat_max_chars: 200                 # chat：自然对话（事实查询场景，自动按 intent_kind 选用）
   # 单个 tool 输出拼入报告 prompt 时的字符硬上限；仅 span attr 记录截断计数，
   # 不把"已截断"标记写入 prompt，避免引导模型在报告里反复强调数据不全。
   outputs_per_key_max_chars: 12000

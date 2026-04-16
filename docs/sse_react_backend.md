@@ -99,10 +99,10 @@ status(running) → stage × N → tool × M → chunk × K → chunk(eos=true) 
 ### 2.3 index 单调性 & 重置协议
 
 - **正常场景**：`index` 从 0 开始严格 +1 递增
-- **重试重置**：tenacity 重试触发 → 新一轮推送的首 chunk `index` **重新从 0 开始**
-- **混输 rollback**：首 chunk 被误判为 text 后续发现是 tool turn → 后端主动发 `{index: 0, delta: "", eos: false}` 重置帧
+- **重试重置**：tenacity 重试触发 → 新一轮推送的首 chunk `index` **重新从 0 开始**（`delta` 是新一轮第一帧的真实增量，**可能非空**）
+- **混输 rollback**：首 chunk 被误判为 text 后续发现是 tool turn → 后端主动发 `{index: 0, delta: "", eos: false}` 重置帧（`delta` 固定空串）
 
-**前端契约**：观察到 `chunk.index <= lastChunkIndex` → **清空 buffer、从 0 开始重新累加**。
+**前端契约**：观察到 `chunk.index <= lastChunkIndex` → **清空 buffer，再 append 当前 `delta`**（两种重置场景的处理逻辑统一，无需区分）。
 
 ### 2.4 node 枚举语义
 
@@ -118,8 +118,10 @@ status(running) → stage × N → tool × M → chunk × K → chunk(eos=true) 
 | 场景 | 后端行为 | 前端契约 |
 |---|---|---|
 | `llm.streaming_enabled=false` | **不发 chunk 事件**，正常走 `done` | 收到 `done` 后拉 `GET /analyze/tasks/{trace_id}` 的 `result.report_markdown` 整体渲染 |
-| streaming 开启但失败（EMPTY_RESPONSE 等） | 发 `error` 事件 + `done(status=failed)` | 展示错误态，不累加不完整内容 |
+| streaming 开启但失败（EMPTY_RESPONSE / AGENT_INVOKE_FAILED 等） | 发 `done(status=error, error=ErrorInfo)` —— **项目无独立 `error` 事件类型** | 展示错误态，不累加不完整内容 |
 | EventBus 不可用 | 降级为 non-streaming，同上 | 透明，前端无感知 |
+| `error` / `aborted` 场景的 `eos` | **不保证发** `eos=true`；任务直接进入 `done(status=error\|aborted)` | 必须把 `done` 作为停止打字的最终权威信号 |
+| `eos=true` 帧的 `delta` | **可能非空**（micro-batch 末轮残留） | 必须先 `accumulated += delta` 再停止累加 |
 
 ### 2.6 禁止项（明确排除）
 

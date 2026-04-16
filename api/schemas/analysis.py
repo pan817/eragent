@@ -92,9 +92,15 @@ class AnalysisRequest(BaseModel):
         description="分析师角色，用于 L3 LLM 分类时提供角色偏好先验",
     )
     output_mode: str = Field(
-        default="detailed",
-        pattern="^(detailed|brief|table)$",
-        description="输出模式：detailed=详细报告, brief=简报摘要, table=数据表格",
+        default="auto",
+        pattern="^(auto|detailed|brief|table|chat)$",
+        description=(
+            "输出模式："
+            "auto=由后端按 intent_kind 自动选（事实查询→chat，分析查询→detailed，**默认推荐**），"
+            "detailed=详细报告，brief=简报摘要，table=数据表格，chat=自然对话。"
+            "显式传非 auto 值时，**后端尊重前端意图、不做覆盖**；"
+            "传 auto 或不传则交由 Orchestrator 根据查询性质决策。"
+        ),
     )
 
     # 会话持久化相关（Section 5）

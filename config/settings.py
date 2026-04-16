@@ -496,6 +496,9 @@ class ReportSettings(BaseSettings):
     detailed_max_chars: int = 800
     brief_max_chars: int = 500
     table_max_chars: int = 300
+    # chat 模式：用于 DATA_LOOKUP/状态确认等事实查询场景，不强加报告结构。
+    # 字数上限较 brief 更紧，因为通常只需要一两句结论。
+    chat_max_chars: int = 200
     # 单个 tool 输出拼入报告 prompt 时的字符硬上限；超过部分静默截断，
     # 仅在 span attr 中记录 truncated_outputs 计数，不在 prompt 中暴露截断标记，
     # 避免模型被"已截断"文本引导、在报告里反复提示数据不全。

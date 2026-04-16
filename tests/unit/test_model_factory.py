@@ -238,6 +238,22 @@ class TestP2PAgentBuild:
         assert "分析方法" in prompt
         assert "按需执行" in prompt or "简单事实查询" in prompt
 
+    def test_system_prompt_format_is_intent_aware(self) -> None:
+        """system prompt 输出格式要求必须按查询性质分档，
+        而非无差别套用"## 报告 + 摘要 + 建议"模板（见 docs/prompt_issue.md）。
+        """
+        from modules.p2p.prompts import build_system_prompt
+
+        prompt = build_system_prompt()
+        # 必须出现"按查询性质分档"或等价措辞
+        assert "查询性质" in prompt or "查询类型" in prompt
+        # 必须明确提到事实查询不要强加标题/建议段落
+        assert "事实查询" in prompt or "状态确认" in prompt
+        assert ("不要" in prompt and ("标题" in prompt or "建议" in prompt))
+        # 历史 bug：旧 prompt "以 Markdown 格式组织报告，包含标题、摘要、详细发现和建议"
+        # 一刀切要求所有回复带标题。修复后这条必须被分档化措辞替代。
+        assert "以 Markdown 格式组织报告，包含标题、摘要、详细发现和建议" not in prompt
+
     def test_system_prompt_drops_tool_listing(self) -> None:
         """删除重复的工具编号清单（P2 - 3.1），避免与 LangChain 注入的 schema 漂移。"""
         from modules.p2p.prompts import build_system_prompt

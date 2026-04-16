@@ -12,6 +12,10 @@
   - 不引入"临时方案"或"待重构标记"，要么做完，要么不做。
   - 数据库变更走 alembic 迁移，不依赖 `create_all` 兜底。
   - 不写"调试用"分支或注释掉的代码。
+  - **技术债登记（双记录）**：所有技术债（架构异味、临时方案、性能隐患、待重构项、已知缺陷）必须**同时**记录到两处：
+    1. **代码注释**：在涉及文件的关键位置写 `# TECH-DEBT(#N): <一句话说明>`，`#N` 为 [docs/agent_issue.md](docs/agent_issue.md) 中的条目编号，便于本地快速定位。
+    2. **汇总清单**：在 [docs/agent_issue.md](docs/agent_issue.md) 追加完整条目（问题/影响/涉及文件/建议修复/发现日期）。代码注释只承担"标记位置"职责，详细信息以汇总清单为准。
+    修复后两处同步移除（代码注释删掉、清单条目移到"已修复"区），并在 commit message 引用条目编号。
   - 修改依赖时必须同步更新 `pyproject.toml` 和 `requirements.txt`，两者的依赖列表必须保持一致。
   - `alembic.ini` 禁止包含非 ASCII 字符（如中文注释）。原因：Alembic 和 `logging.config.fileConfig` 使用 `configparser` 读取 ini 文件时采用系统 locale 编码，Windows 中文系统为 GBK，无法解码 UTF-8 中文，导致启动失败。注释一律使用英文。
 
@@ -34,15 +38,19 @@
 ```
 eragent/
 ├── api/                         # REST API 层
-│   ├── main.py                  # FastAPI 应用入口
+│   ├── main.py                  # FastAPI 应用入口（lifespan 装配 EventBus + TaskRegistry）
 │   ├── routes/
-│   │   ├── analyze.py           # 分析路由
+│   │   ├── analyze.py           # 同步分析路由（POST /analyze）
+│   │   ├── analyze_async.py     # 异步分析 + SSE 流式事件路由
+│   │   ├── sessions.py          # 会话历史 CRUD 路由
 │   │   └── traces.py            # 可观测性 trace 查询路由
 │   └── schemas/
 │       ├── analysis.py          # 分析请求/响应模型
+│       ├── session.py           # 会话历史响应模型
 │       └── trace.py             # trace 响应模型
 ├── config/
 │   ├── config.yaml              # 结构化配置文件
+│   ├── intent_seeds.yaml        # IntentRouter L2 语义检索种子集
 │   ├── crypto.py                # 敏感配置字段加密/解密工具
 │   └── settings.py              # Pydantic Settings 配置管理
 ├── core/                        # 核心基础设施
@@ -60,17 +68,38 @@ eragent/
 │   │   ├── middleware.py        # LangChain 中间件，采集 agent/tool 调用
 │   │   ├── store.py             # trace 持久化
 │   │   ├── console.py           # 控制台输出
+│   │   ├── display_labels.py    # span 类型 → 中文展示名映射
 │   │   └── tables.py            # trace ORM 表
 │   ├── ontology/                # OWL 本体加载和推理
 │   │   ├── loader.py
 │   │   └── reasoner.py          # 推理器 + SWRL 规则
 │   ├── knowledge/
-│   │   ├── embeddings.py        # Embedding Provider 抽象（default/openai/fake）
+│   │   ├── embeddings.py        # Embedding Provider 抽象（default/openai/fake/dashscope/zhipu）
 │   │   ├── graph.py             # Neo4j 封装
 │   │   └── vector_store.py      # Chroma 封装
-│   ├── orchestrator/
-│   │   ├── intent.py            # 意图解析
-│   │   └── orchestrator.py      # 分析任务编排器
+│   ├── orchestrator/            # 编排层
+│   │   ├── orchestrator.py      # 分析任务编排器（同步/异步共用入口）
+│   │   ├── router.py            # IntentRouter 三级路由（bypass→L1→L2→L3）
+│   │   ├── intent.py            # 意图分类辅助 / IntentKind 兼容旧入口
+│   │   ├── signal.py            # QuerySignal / IntentKind 数据契约
+│   │   └── dag/                 # DAG 执行子模块
+│   │       ├── executor.py      # DAGExecutor 并行任务调度
+│   │       ├── templates.py     # 静态 DAG 模板（按 AnalysisType）
+│   │       ├── registry.py      # 任务/工具映射注册
+│   │       ├── validator.py     # DAG 拓扑校验
+│   │       ├── case_store.py    # 自学习案例存储（PG + Chroma）
+│   │       └── tables.py        # DAG 案例 ORM 表
+│   ├── chat/                    # 会话历史持久化（独立于短期记忆 checkpointer）
+│   │   ├── repository.py        # ChatRepository（消息读写 + 搜索）
+│   │   └── tables.py            # 会话/消息 ORM 表
+│   ├── tasks/                   # 异步任务基础设施（POST /analyze/async + SSE）
+│   │   ├── registry.py          # TaskRegistry 后台 runner + 生命周期管理
+│   │   ├── events.py            # MemoryEventBus（单进程）
+│   │   ├── events_redis.py      # RedisEventBus（多 worker 必选）
+│   │   ├── schemas.py           # AnalysisTaskAck / TaskStatus 响应模型
+│   │   ├── context.py           # 任务上下文 + ContextVar
+│   │   └── stream_utils.py      # SSE 帧打包工具
+│   ├── time_utils.py            # 业务时区时间戳工具（now_cn / configure_timezone）
 │   └── logging_utils.py         # 轻量日志工具
 ├── modules/p2p/                 # P2P 业务模块
 │   ├── rules/                   # 业务规则引擎（__init__.py 提供统一导出）
@@ -80,31 +109,36 @@ eragent/
 │   │   ├── supplier_performance.py
 │   │   └── _utils.py            # 规则共享工具
 │   ├── ontology/p2p.owl         # P2P 领域 OWL 本体（非 Python 包）
-│   ├── tools.py                 # LangChain @tool 工具集
+│   ├── tools.py                 # LangChain @tool 工具集（19 个）
 │   ├── prompts.py               # Agent 提示词模板
-│   ├── model_factory.py         # LLM 客户端工厂（配置化切换模型）
+│   ├── model_factory.py         # LLM 客户端工厂（qwen / zhipu / minimax / deepseek / openai）
 │   ├── agent.py                 # P2P Agent（create_agent）
+│   ├── report_agent.py          # ReportAgent（DAG 路径 LLM 报告生成）
+│   ├── errors.py                # 业务异常类型
 │   └── mock_data/generator.py   # 模拟数据生成器
 ├── docs/
+│   ├── agent_issue.md                 # **技术债清单（统一登记入口）**
+│   ├── architecture/                  # 架构图（pyreverse + 手绘 dot）
 │   ├── erp_agent_spec.md              # 系统设计规格
 │   ├── erp_procurement_agent.pdf
-│   ├── thought.md
-│   ├── execute.md
-│   ├── long_term_issue.md             # 长期记忆 12 个设计问题分析
-│   ├── long_term_memory_issue.md      # 长期记忆问题详细分析
-│   └── long_term_memory_refactor.md   # 长期记忆重构完成状态追踪
+│   └── ...                            # 其它专题设计文档（async/long_term/sse/intent 等）
 ├── migrations/                  # Alembic 数据库迁移
 │   ├── env.py
 │   ├── script.py.mako
-│   └── versions/
+│   └── versions/                # 已落地 9 个版本：0001 baseline → 0009 reports_trace_id
 │       ├── 0001_baseline.py
 │       ├── 0002_memories_content_hash.py
 │       ├── 0003_memories_rename_metadata_to_attrs.py
-│       └── 0004_reports_user_created_idx.py
+│       ├── 0004_reports_user_created_idx.py
+│       ├── 0005_dag_cases.py
+│       ├── 0006_chat_sessions.py
+│       ├── 0007_trace_composite_indexes.py
+│       ├── 0008_timezone_normalization.py
+│       └── 0009_reports_trace_id.py
 ├── tests/                       # 测试（无 __init__.py）
 │   ├── conftest.py
-│   ├── unit/                    # 单元测试（19 个文件）
-│   ├── integration/             # 集成测试（含 test_e2e.py）
+│   ├── unit/                    # 单元测试（35 个文件）
+│   ├── integration/             # 集成测试（含 test_e2e.py / test_async_multi_worker.py）
 │   └── http/                    # .http 调试用例
 ├── alembic.ini                  # Alembic 配置（script_location=migrations）
 ├── .env                         # 环境变量（不提交）
@@ -127,7 +161,12 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **统一数据库层**：长期记忆、可观测性 trace、分析报告共用 `core/database` 的 SQLAlchemy engine 与 session，各业务模块在自己的 `tables.py` 中声明表。
 - **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
 - **记忆模块拆包**：原 `core/memory.py` 拆为 `core/memory/` 包，仅保留 `long_term` / `tables`。短期记忆由 LangGraph PostgresSaver checkpointer 承担（以 `session_id` 作为 `thread_id`），通过 `core/observability/checkpointer.py` 注入 trace 监控，无需独立 `short_term.py`。
-- **编排粒度**：当前采用粗粒度——Orchestrator 路由到 P2P Agent，Agent 内部串行处理。预留接口支持细粒度 DAG 调度。
+- **编排粒度（DAG + ReAct 共存）**：Orchestrator 同时支持两条执行路径——
+  - L1/L2 命中（关键词或 Chroma 语义命中）→ 加载 `core/orchestrator/dag/templates.py` 静态 DAG → `DAGExecutor` 并行执行 → `ReportAgent` 汇总报告；
+  - L3（LLM 兜底）/ 低置信度 / RECALL / DATA_LOOKUP / COMPREHENSIVE 无实体 → P2PAgent ReAct（LangGraph create_agent）自主串行调用工具；
+  - 早退路由（META / CHITCHAT / CLARIFICATION / OUT_OF_SCOPE）→ 不进入 DAG / ReAct，直接由 Orchestrator 渲染模板响应。
+- **异步分析（SSE）**：除 `POST /analyze` 同步入口外，提供 `POST /analyze/async` + `GET /analyze/tasks/{trace_id}/events` SSE 流式接口。`core/tasks/registry.py` 维护后台 runner，事件经 `EventBus`（memory 单进程 / Redis 多 worker，由 `async_analysis.event_backend` 配置）下发。多 worker 部署时 memory 后端会被启动期 `_check_event_backend_matches_workers` 直接 fail-fast。
+- **会话历史**：`core/chat/` 独立持久化用户消息/助手回复（与 LangGraph checkpointer 短期记忆解耦），通过 `/sessions/*` API 暴露。
 - **本体上下文注入**：混合模式——关键规则用结构化 JSON，业务背景用自然语言。
 - **SWRL 规则 vs Python 代码**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体；KPI 计算用 Python 实现。
 - **纯分析只读**：当前版本不执行 ERP 写操作，写操作接口预留。
@@ -171,7 +210,7 @@ alembic current
 # 生成新迁移（修改模型后）
 alembic revision --autogenerate -m "描述"
 ```
-迁移文件位于 `migrations/versions/`，已应用 5 个版本（0001–0005）。
+迁移文件位于 `migrations/versions/`，已应用 9 个版本（0001 baseline → 0009 reports_trace_id）。
 
 ## __init__.py 约定
 - 仅在 setuptools 需要识别的 Python 包目录中保留 `__init__.py`
@@ -186,7 +225,9 @@ alembic revision --autogenerate -m "描述"
   - DAG 并行执行器 + 静态模板（4 种分析类型）+ ReAct 兜底（共存模式）
   - 自学习案例存储（PostgreSQL 权威 + Chroma 缓存，服务启动时从 PG 加载）
   - 全链路监控：intent / dag / dag.task / tool / model / report / checkpoint / case_store span
-- Alembic 迁移体系建立，已落地 5 个版本（baseline → content_hash → rename_attrs → reports_idx → dag_cases）
-- 单元测试 + 集成测试 + 端到端测试覆盖率 ≥ 90%（505 个测试用例）
+- **异步分析 + SSE**：`POST /analyze/async` + `TaskRegistry` + `EventBus`（memory / Redis 双后端）+ `GET .../events` 流式事件已落地，跨 worker 部署支持。
+- **会话历史 API**：`/sessions/*` CRUD + 消息搜索已落地，使用独立 `core/chat/` 模块持久化。
+- Alembic 迁移体系建立，已落地 9 个版本（baseline → content_hash → rename_attrs → reports_idx → dag_cases → chat_sessions → trace_indexes → timezone → reports_trace_id）
+- 单元测试 35 个文件 + 集成测试 6 个文件，覆盖率 ≥ 90%（pytest 收集 1000+ 用例）
 - 端到端测试（真实 LLM）通过
-- 近期优化重点：长期记忆检索质量（RRF 融合、去重、内容长度过滤）
+- 近期优化重点：长期记忆检索质量（RRF 融合、去重、内容长度过滤）；架构层技术债见 [docs/agent_issue.md](docs/agent_issue.md)

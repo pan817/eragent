@@ -1,0 +1,12 @@
+{"type":"status","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.100+08:00","seq":1,"state":"running"}
+{"type":"stage","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.150+08:00","seq":2,"name":"intent_parsed","attrs":{"route_level":3,"intent_kind":"data_lookup"}}
+{"type":"tool","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.200+08:00","seq":3,"action":"start","name":"query_invoices"}
+{"type":"tool","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.420+08:00","seq":4,"action":"end","name":"query_invoices","duration_ms":220,"status":"ok"}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.500+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"## 发票核销情况\n\n第一段","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:00.560+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"内容…（首次尝试推到一半中断）","index":1,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.700+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"## 发票核销情况\n\n","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.730+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"重试后完整生成的内容：","index":1,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.760+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"\n\n- INV-001 已核销\n","index":2,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.790+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"- INV-002 待核销","index":3,"eos":false}
+{"type":"chunk","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.820+08:00","seq":0,"node":"agent_final","message_id":"FIX-RETRY","delta":"","index":4,"eos":true}
+{"type":"done","trace_id":"FIX-RETRY","ts":"2026-04-16T10:00:01.850+08:00","seq":5,"status":"ok","duration_ms":1750}

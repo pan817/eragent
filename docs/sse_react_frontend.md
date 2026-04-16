@@ -16,7 +16,7 @@
 
 | 能力 | Phase 1 已实现 |
 |---|---|
-| SSE 连接建立（`fetch + ReadableStream`，带 `Last-Event-ID`）| ✅ |
+| SSE 连接建立（浏览器 `EventSource`；断线重连时 `Last-Event-ID` 由浏览器自动携带）| ✅ |
 | 事件分发器（按 `type` 路由到 handler）| ✅ |
 | chunk 累加 buffer + index 单调性校验 | ✅ |
 | 重试重置（`index <= lastChunkIndex` → 清 buffer）| ✅ |
@@ -98,10 +98,10 @@ status(running) → stage × N → tool × M → chunk × K → chunk(eos=true) 
 ### 2.3 index 单调性 & 重置协议
 
 - **正常场景**：`index` 从 0 开始严格 +1 递增
-- **重试重置**：tenacity 重试触发 → 新一轮推送的首 chunk `index` **重新从 0 开始**
-- **混输 rollback**：首 chunk 被误判为 text 后续发现是 tool turn → 后端主动发 `{index: 0, delta: "", eos: false}` 重置帧
+- **重试重置**：tenacity 重试触发 → 新一轮推送的首 chunk `index` **重新从 0 开始**（`delta` 是新一轮第一帧的真实增量，**可能非空**）
+- **混输 rollback**：首 chunk 被误判为 text 后续发现是 tool turn → 后端主动发 `{index: 0, delta: "", eos: false}` 重置帧（`delta` 固定空串）
 
-**前端契约**：观察到 `chunk.index <= lastChunkIndex` → **清空 buffer、从 0 开始重新累加**。
+**前端契约**：观察到 `chunk.index <= lastChunkIndex` → **清空 buffer，再 append 当前 `delta`**（两种重置场景的处理逻辑统一，无需区分）。
 
 ### 2.4 node 枚举语义
 
@@ -117,8 +117,10 @@ status(running) → stage × N → tool × M → chunk × K → chunk(eos=true) 
 | 场景 | 后端行为 | 前端契约 |
 |---|---|---|
 | `llm.streaming_enabled=false` | **不发 chunk 事件**，正常走 `done` | 收到 `done` 后拉 `GET /analyze/tasks/{trace_id}` 的 `result.report_markdown` 整体渲染 |
-| streaming 开启但失败（EMPTY_RESPONSE 等） | 发 `error` 事件 + `done(status=failed)` | 展示错误态，不累加不完整内容 |
+| streaming 开启但失败（EMPTY_RESPONSE / AGENT_INVOKE_FAILED 等） | 发 `done(status=error, error=ErrorInfo)` —— **项目无独立 `error` 事件类型** | 展示错误态，不累加不完整内容 |
 | EventBus 不可用 | 降级为 non-streaming，同上 | 透明，前端无感知 |
+| `error` / `aborted` 场景的 `eos` | **不保证发** `eos=true`；任务直接进入 `done(status=error\|aborted)` | 必须把 `done` 作为停止打字的最终权威信号 |
+| `eos=true` 帧的 `delta` | **可能非空**（micro-batch 末轮残留） | 必须先 `accumulated += delta` 再停止累加 |
 
 ### 2.6 禁止项（明确排除）
 
@@ -165,6 +167,12 @@ function handleChunk(event: ChunkEvent, ctx: StreamContext) {
 
 ### 3.3 index 回退检测（已有，需 Phase 2 验证）
 
+> **两种 index=0 来源（前端处理逻辑统一无需区分）**：
+> - **tenacity 重试**：新一轮推送的正常第一帧，`delta` 可能非空
+> - **混输 rollback**：后端主动发的重置帧，`delta` 固定为空串
+> 前端按"`index <= lastChunkIndex` 则清 buffer 后 append 当前 delta"统一处理即可。
+
+
 Phase 1 已实现，Phase 2 必须确认该逻辑对 `agent_final` 同样生效：
 
 ```typescript
@@ -185,13 +193,19 @@ ctx.lastChunkIndex[event.message_id] = event.index;
 ### 3.4 eos 处理
 
 ```typescript
+if (event.delta) {
+  ctx.buffer[event.message_id] += event.delta;  // eos=true 帧的 delta 也可能非空
+}
 if (event.eos) {
   ctx.streamComplete[event.message_id] = true;
   // 触发"typing 结束"动画（停止光标闪烁 / 渐出骨架）
 }
 ```
 
-后端保证 eos 后不再发同 `message_id` 的 chunk，但前端**必须幂等**：若错误收到后续 chunk，应忽略并告警。
+**关键约束**：
+- ⚠️ `eos=true` 帧的 `delta` **可能非空**（后端 micro-batch 末轮残留），必须先 append 再停止累加，不能简单忽略 eos 帧的 `delta`
+- 后端保证 eos 后不再发同 `message_id` 的 chunk，但前端**必须幂等**：若错误收到后续 chunk，应忽略并告警
+- ⚠️ `error` / `aborted` 场景**不保证发** `eos=true`：前端必须把 `done` 事件作为停止打字的**最终权威信号**，不能只依赖 `eos`
 
 ### 3.5 `done` 事件与快照兜底
 
@@ -228,7 +242,7 @@ function handleDone(event: DoneEvent) {
 | 场景 | UI 表现 |
 |---|---|
 | 长时间无 chunk（> 30s 且无 `tool` / `stage` 事件）| 占位骨架保留，文案切换为"模型响应较慢，请稍候…" |
-| 收到 `error` 事件 | 清空 typing 光标，渲染错误卡片（复用 Phase 1 错误组件）|
+| 收到 `done(status=error)` | 清空 typing 光标，渲染错误卡片（复用 Phase 1 错误组件）。**项目无独立 `error` 事件类型**，错误统一通过 `DoneEvent.status + DoneEvent.error` 传递 |
 | 收到 `done(status=failed)` | 同上；若 buffer 非空，保留 buffer 文本 + 错误标记 |
 | SSE 连接断开（浏览器事件）| 尝试重连，重连时带 `Last-Event-ID`（chunk 本身不重放，仅恢复 status/stage 流）|
 

@@ -93,58 +93,15 @@ class ReportAgent:
 
     @staticmethod
     def _extract_chunk_text(chunk: Any) -> str:
-        """从 ``AIMessageChunk`` 中提取增量文本，兼容多种模型返回结构。
-
-        优先级：
-
-        1. ``chunk.content`` 是非空 ``str`` → 直接使用（OpenAI / Qwen 主模型）
-        2. ``chunk.content`` 是 ``list[dict]`` → 拼接所有 text block 的 ``text``
-           （LangChain 对多模态 / reasoning 模型用 content-blocks 结构）
-        3. ``chunk.additional_kwargs["reasoning_content"]`` 非空 → 作为兜底
-
-        #3 专门处理 Qwen3 系列的**已知 Bug**：当 ``enable_thinking=False`` 与
-        ``stream=True`` 同时生效（Dashscope OpenAI 兼容接口、vLLM、SGLang 后端
-        均中招），模型把最终答案错误地落在 ``reasoning_content`` 字段而非
-        ``content``；此时 ``content`` 是空串，若只读 content 会得到 0 长度输出。
-        参考：sgl-project/sglang#5874、vllm-project/vllm#38894。
-        """
-        raw = getattr(chunk, "content", None)
-        if isinstance(raw, str) and raw:
-            return raw
-        if isinstance(raw, list):
-            parts: list[str] = []
-            for block in raw:
-                if isinstance(block, dict):
-                    text = block.get("text") or block.get("content") or ""
-                    if isinstance(text, str) and text:
-                        parts.append(text)
-            if parts:
-                return "".join(parts)
-        extra = getattr(chunk, "additional_kwargs", None) or {}
-        reasoning = extra.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning:
-            return reasoning
-        return ""
+        """兼容薄壳，委托给 ``core.tasks.stream_utils.extract_chunk_text``。"""
+        from core.tasks.stream_utils import extract_chunk_text
+        return extract_chunk_text(chunk)
 
     @staticmethod
     def _strip_think_tags(text: str) -> str:
-        """从最终报告文本中剥离 ``<think>...</think>`` 推理标签及其内容。
-
-        部分 Qwen3 / Qwen3.5 模型在 ``enable_thinking=False`` + streaming
-        时仍会在 content 字段里输出 ``<think>`` 标签（后端 bug）。
-        该方法作为**最终一致性兜底**，在全文拼接完成后一次性清除。
-
-        - 支持多个 ``<think>`` 块
-        - 支持嵌套空白、换行
-        - 标签未闭合（截断）时剥掉从 ``<think>`` 到末尾的全部内容
-        """
-        import re
-
-        # 已闭合的 <think>...</think>
-        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text)
-        # 未闭合的 <think>...（流式截断 / 模型生成中断）
-        cleaned = re.sub(r"<think>[\s\S]*$", "", cleaned)
-        return cleaned.strip()
+        """兼容薄壳，委托给 ``core.tasks.stream_utils.strip_think_tags``。"""
+        from core.tasks.stream_utils import strip_think_tags
+        return strip_think_tags(text)
 
     async def _astream_with_publish(
         self,

@@ -1,0 +1,11 @@
+{"type":"status","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.100+08:00","seq":1,"state":"running"}
+{"type":"stage","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.150+08:00","seq":2,"name":"intent_parsed","attrs":{"route_level":3,"intent_kind":"data_lookup"}}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.300+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"让我先查询一下相关数据……","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.330+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"先看看付款记录","index":1,"eos":false}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.380+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"","index":0,"eos":false}
+{"type":"tool","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.400+08:00","seq":3,"action":"start","name":"query_payments"}
+{"type":"tool","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.620+08:00","seq":4,"action":"end","name":"query_payments","duration_ms":220,"status":"ok"}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.700+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"## 付款记录摘要\n\n","index":0,"eos":false}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.730+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"最近 3 笔付款均已完成核销，无异常。","index":1,"eos":false}
+{"type":"chunk","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.760+08:00","seq":0,"node":"agent_final","message_id":"FIX-ROLLBACK","delta":"","index":2,"eos":true}
+{"type":"done","trace_id":"FIX-ROLLBACK","ts":"2026-04-16T10:00:00.790+08:00","seq":5,"status":"ok","duration_ms":690}

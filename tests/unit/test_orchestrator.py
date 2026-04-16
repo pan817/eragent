@@ -1413,3 +1413,58 @@ class TestEnrichEntities:
             await orch._enrich_entities(params)
 
         assert params["po_number"] == "PO-001"  # 原样保留
+
+
+class TestOrchestratorOutputModeChat:
+    """P1: chat output_mode + intent_kind 自适应覆盖 + DAG 降级保护。"""
+
+    def test_chat_mode_in_build_output_mode_prompts(self, settings: Settings) -> None:
+        """chat 模式必须出现在可选模式列表中，文本与 detailed/brief/table 不同。"""
+        from core.orchestrator.orchestrator import _build_output_mode_prompts
+
+        modes = _build_output_mode_prompts(settings)
+        assert set(modes.keys()) == {"detailed", "brief", "table", "chat"}
+        # chat 模式不应包含"4 段结构"/"3-5 要点"/"表格"等结构化指令
+        chat = modes["chat"]
+        assert "4 段" not in chat and "要点" not in chat and "表格" not in chat
+        # 必须明确禁止顶级标题与建议段落
+        assert "标题" in chat and "建议" in chat
+        # 必须有字数兜底
+        assert str(settings.report.chat_max_chars) in chat
+
+    def test_chat_mode_max_chars_tighter_than_brief(self, settings: Settings) -> None:
+        """chat 字数上限应严于 brief（事实查询通常一两句话即可）。"""
+        assert settings.report.chat_max_chars < settings.report.brief_max_chars
+
+    def test_output_mode_pattern_accepts_chat(self) -> None:
+        """AnalysisRequest.output_mode 必须接受 chat。"""
+        from api.schemas.analysis import AnalysisRequest
+
+        req = AnalysisRequest(query="test", output_mode="chat")
+        assert req.output_mode == "chat"
+
+    def test_output_mode_pattern_rejects_unknown(self) -> None:
+        """AnalysisRequest.output_mode 仍拒绝非白名单值。"""
+        from api.schemas.analysis import AnalysisRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AnalysisRequest(query="test", output_mode="freeform")
+
+    def test_output_mode_default_is_auto(self) -> None:
+        """默认值已从 detailed 切换为 auto，让后端按 intent_kind 决策。
+
+        历史 bug：旧默认值 detailed 让"未传"和"显式 detailed"在后端无法区分，
+        P1.b 隐式覆盖会违背显式选 detailed 的用户意图。改 auto 后两者解耦。
+        """
+        from api.schemas.analysis import AnalysisRequest
+
+        req = AnalysisRequest(query="test")
+        assert req.output_mode == "auto"
+
+    def test_output_mode_pattern_accepts_auto(self) -> None:
+        """显式传 auto 也合法（与默认行为等价）。"""
+        from api.schemas.analysis import AnalysisRequest
+
+        req = AnalysisRequest(query="test", output_mode="auto")
+        assert req.output_mode == "auto"

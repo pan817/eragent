@@ -22,7 +22,7 @@ Content-Type: application/json
   "query": "过去30天有哪些三路匹配异常",
   "user_id": "demo_user",
   "auto_persist": true,
-  "output_mode": "detailed"
+  "output_mode": "auto"
 }
 
 

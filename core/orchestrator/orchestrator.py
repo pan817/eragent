@@ -18,6 +18,7 @@ import time
 import uuid
 from typing import Any
 
+# TECH-DEBT(#2): core/modules 反向 import api.schemas，待下沉到 core/schemas
 from api.schemas.analysis import (
     AnalysisRequest,
     AnalysisResult,
@@ -25,27 +26,11 @@ from api.schemas.analysis import (
     AnalysisType,
     ErrorInfo,
 )
-import re as _re
-
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
-
-
-def _strip_think_tags(text: str) -> str:
-    """剥离 ``<think>...</think>`` 推理标签及其内容。
-
-    部分 Qwen3 / Qwen3.5 模型在 ``enable_thinking=False`` + streaming 时
-    仍可能在 content 字段里输出 ``<think>`` 标签（已知后端 bug）。
-    本函数在 AnalysisResult 构造前统一清洗，保证 task 快照 / chat 消息
-    / 报告持久化三处均无推理标签污染。
-    """
-    if "<think>" not in text:
-        return text
-    cleaned = _re.sub(r"<think>[\s\S]*?</think>", "", text)
-    cleaned = _re.sub(r"<think>[\s\S]*$", "", cleaned)
-    return cleaned.strip()
 from core.observability.middleware import publish_stage as _publish_stage
+from core.tasks.stream_utils import strip_think_tags as _strip_think_tags
 from core.orchestrator.router import IntentRouter
 
 _logger = get_logger(__name__)
@@ -76,22 +61,41 @@ def _build_output_mode_prompts(settings: Settings) -> dict[str, str]:
     # 每个模式都重申"中文输出"：本节优先级高于 _REPORT_PROMPT 的"报告要求"，
     # 小模型可能把上文整块视为低优先级，需要在此处再次锚定语言，避免漂移为英文。
     lang_anchor = "全文使用简体中文输出。"
+    # detailed/brief/table 三档都加"格式强制覆盖"声明：用户**显式选择**这些模式时，
+    # 必须强行覆盖系统提示词里"按查询性质分档"的判断（即便查询本身是事实查询，
+    # 也按所选模式格式输出）。chat 模式与系统提示词的"事实查询简洁直答"语义一致，
+    # 不需要覆盖声明。
+    override_anchor = (
+        "**【格式强制覆盖】** 本节优先级高于系统提示词中"
+        "\"根据查询性质选择回复格式\"的判断——"
+        "无论查询性质如何，本次输出都必须严格按以下格式："
+    )
     return {
         "detailed": (
-            f"{lang_anchor}"
-            f"请将报告总字数控制在 {cfg.detailed_max_chars} 字以内，"
-            f"保持 4 段结构，优先保留关键数据、异常清单和建议；"
+            f"{lang_anchor}{override_anchor}"
+            f"Markdown 报告格式（标题 + 摘要 + 关键发现 + 建议措施，4 段结构）；"
+            f"报告总字数控制在 {cfg.detailed_max_chars} 字以内，"
+            f"优先保留关键数据、异常清单和建议；"
             f"数据充分时可精简例证，避免长段落复述。"
         ),
         "brief": (
-            f"{lang_anchor}"
-            f"请以简报摘要形式输出，控制在 3-5 个要点，"
+            f"{lang_anchor}{override_anchor}"
+            f"简报摘要形式（3-5 个要点列表），"
             f"突出关键数据和结论，总字数不超过 {cfg.brief_max_chars} 字。"
         ),
         "table": (
-            f"{lang_anchor}"
-            f"请优先使用 Markdown 表格呈现核心数据，"
+            f"{lang_anchor}{override_anchor}"
+            f"Markdown 表格呈现核心数据，"
             f"辅以不超过 2 句话的结论，总字数不超过 {cfg.table_max_chars} 字。"
+        ),
+        # chat 模式：用于事实查询（DATA_LOOKUP）。不强加报告结构，
+        # 也不附加 4 段模板/要点列表/表格强制项；只保留语言锚定与字数兜底。
+        # 与系统提示词的"事实查询简洁直答"语义一致，不需要"格式强制覆盖"声明。
+        # 通常由 Orchestrator 按 intent_kind 自动选用，前端无需主动传。
+        "chat": (
+            f"{lang_anchor}"
+            f"请用自然简洁的语句直接回答；不要加顶级标题（如\"## 查询结果\"）、"
+            f"不要写\"摘要/建议\"段落；总字数不超过 {cfg.chat_max_chars} 字。"
         ),
     }
 
@@ -1095,8 +1099,32 @@ class Orchestrator:
                     or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
                 )
 
+            # ── output_mode 自适应解析 ──────────────────────────────────────────
+            # 解析顺序：
+            #   1) 显式 detailed/brief/table/chat → 严格尊重，不做任何覆盖
+            #   2) auto（默认）→ 按 intent_kind 解析：
+            #         data_lookup → chat（事实查询，自然简洁直答）
+            #         其他       → detailed（保持原有报告体验）
+            #   3) DAG 路径降级保护：解析后若是 chat，强制升 brief
+            #         （ReportAgent prompt 主体是"报告生成器"，与 chat 冲突；
+            #          这一保护对显式 chat 也生效，避免 DAG 路径行为漂移）
+            effective_output_mode = request.output_mode
+            if effective_output_mode == "auto":
+                if is_data_lookup:
+                    effective_output_mode = "chat"
+                    _logger.info("output_mode auto → 'chat' (intent=data_lookup)")
+                else:
+                    effective_output_mode = "detailed"
+                    _logger.info("output_mode auto → 'detailed' (default for non-lookup)")
+            if use_dag and effective_output_mode == "chat":
+                _logger.info(
+                    "output_mode 'chat' downgraded to 'brief' on DAG path "
+                    "(ReportAgent requires structured output)"
+                )
+                effective_output_mode = "brief"
+
             output_mode_prompt = _build_output_mode_prompts(self._settings).get(
-                request.output_mode, ""
+                effective_output_mode, ""
             )
 
             _logger.info(

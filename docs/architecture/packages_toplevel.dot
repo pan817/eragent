@@ -1,0 +1,25 @@
+digraph "packages_toplevel" {
+rankdir=TB
+charset="utf-8"
+nodesep=0.4
+ranksep=0.7
+graph [fontname="Helvetica", fontsize=14, labelloc="t", label="eragent — pyreverse 聚合 (depth=1 顶层,4 包,88 import)"]
+node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled"]
+edge [fontname="Helvetica", fontsize=9, color="#555555"]
+
+  "api" [fillcolor="#7FA7D4"];
+  "config" [fillcolor="#D4B886"];
+  "core" [fillcolor="#AAAAAA"];
+  "modules" [fillcolor="#8EB56E"];
+
+  "api" -> "config" [label="4", penwidth=2.0];
+  "api" -> "core" [label="20", penwidth=5.0];
+  "api" -> "modules" [label="1", penwidth=1.2];
+  "config" -> "core" [label="1", penwidth=1.2];
+  "core" -> "api" [label="6", penwidth=2.5];
+  "core" -> "config" [label="6", penwidth=2.5];
+  "core" -> "modules" [label="8", penwidth=3.0];
+  "modules" -> "api" [label="5", penwidth=2.2];
+  "modules" -> "config" [label="9", penwidth=3.2];
+  "modules" -> "core" [label="28", penwidth=5.0];
+}

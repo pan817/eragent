@@ -1,0 +1,173 @@
+// ERP Agent - System Overview (clean TB layout)
+// 布局策略：最干净做法 — 所有 constraint=true,由 dot 自然推导层级。
+// 核心链(Client→API→Orchestrator→DAG/ReAct→基础设施→外部)天然从上到下。
+// Render: dot -Tpng -Gdpi=150 arch_overview.dot -o arch_overview.png
+digraph eragent_overview {
+    rankdir=TB;
+    nodesep=0.3;
+    ranksep=0.55;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent P2P 分析智能体 — 系统总览"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── ① Client ────────────────────────────────────────────────
+    subgraph cluster_client {
+        label="① 客户端"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFEF7"; color="#D4B886";
+        cli_browser [label="Web / API 客户端", shape=box, fontsize=11];
+    }
+
+    // ── ② API 层 ────────────────────────────────────────────────
+    subgraph cluster_api {
+        label="② API 层 (FastAPI /api/v1/ptp-agent)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E3F0FF"; color="#7FA7D4";
+        api_app        [label="api.main\ncreate_app + lifespan", shape=box, fontsize=11];
+        api_analyze    [label="POST /analyze", shape=cds, fontsize=11];
+        api_async      [label="POST /analyze/async\n+ SSE", shape=cds, fontsize=11];
+        api_sessions   [label="/sessions/*", shape=cds];
+        api_traces     [label="/traces/*", shape=cds];
+        api_health     [label="/health\n/init-data", shape=cds];
+    }
+
+    // ── ③ 异步基础设施 ─────────────────────────────────────────
+    subgraph cluster_async {
+        label="③ 异步基础设施"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF3D6"; color="#C9A96E";
+        async_registry [label="TaskRegistry\n后台 runner", shape=box, fontsize=11];
+        async_bus      [label="EventBus\nmemory / Redis", shape=box, fontsize=11];
+    }
+
+    // ── ④ Orchestrator 层 ──────────────────────────────────────
+    subgraph cluster_orch {
+        label="④ Orchestrator 编排层"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+        orch_core    [label="Orchestrator.analyze", shape=box, fontsize=12, fillcolor="#FFF4B8"];
+        orch_router  [label="IntentRouter\nL1 → L2 → L3", shape=box, fontsize=11];
+        orch_refres  [label="指代消解 +\n实体校验/补充", shape=box];
+    }
+
+    // ── ⑤ DAG 执行路径 ──────────────────────────────────────────
+    subgraph cluster_dag {
+        label="⑤ DAG 执行路径 (L1/L2)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E8F5E9"; color="#6FA87C";
+        dag_executor   [label="DAGExecutor\n并行调度", shape=box, fontsize=12, fillcolor="#C8E6C9"];
+        dag_templates  [label="templates.py", shape=box];
+        dag_validator  [label="DAGValidator", shape=box];
+        dag_report     [label="ReportAgent", shape=box, fontsize=11];
+        dag_casestore  [label="case_store", shape=box];
+    }
+
+    // ── ⑥ ReAct 执行路径 ────────────────────────────────────────
+    subgraph cluster_react {
+        label="⑥ ReAct 执行路径 (L3/兜底)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#F1F8E9"; color="#8EB56E";
+        react_agent   [label="P2PAgent\ncreate_agent", shape=box, fontsize=12, fillcolor="#DCEDC8"];
+        react_tools   [label="tools.py\n19 个 @tool", shape=box, fontsize=11];
+        react_rules   [label="rules/\n4 条业务规则", shape=box];
+    }
+
+    // ── ⑦ Core 基础设施 ─────────────────────────────────────────
+    subgraph cluster_core {
+        label="⑦ Core 基础设施"; fontsize=10;
+        style="rounded,filled"; fillcolor="#F5F5F5"; color="#AAAAAA";
+        core_db        [label="database", shape=box, fontsize=9];
+        core_memory    [label="memory\n(LongTermMemory)", shape=box, fontsize=9];
+        core_obs       [label="observability\n(TimingMW + store)", shape=box, fontsize=9];
+        core_knowledge [label="knowledge\n(embeddings / vector)", shape=box, fontsize=9];
+        core_ontology  [label="ontology\n(reasoner)", shape=box, fontsize=9];
+        core_chat      [label="chat", shape=box, fontsize=9];
+    }
+
+    // ── ⑧ 外部系统 ─────────────────────────────────────────────
+    subgraph cluster_ext {
+        label="⑧ 外部系统"; fontsize=10;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+        ext_pg        [label="PostgreSQL", shape=cylinder, fontsize=9];
+        ext_redis     [label="Redis\n(可选)", shape=cylinder, fontsize=9];
+        ext_chroma    [label="Chroma", shape=cylinder, fontsize=9];
+        ext_neo4j     [label="Neo4j\n(可选)", shape=cylinder, fontsize=9];
+        ext_owl       [label="p2p.owl", shape=note, fontsize=9];
+        ext_llm_main  [label="LLM 主模型", shape=component, fillcolor="#F3E5F5", fontsize=9];
+        ext_llm_fast  [label="LLM 小模型", shape=component, fillcolor="#F3E5F5", fontsize=9];
+    }
+
+    // ── 图例 ────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        lg_a [label="", shape=plain]; lg_b [label="", shape=plain];
+        lg_c [label="", shape=plain]; lg_d [label="", shape=plain];
+        lg_e [label="", shape=plain]; lg_f [label="", shape=plain];
+        lg_g [label="", shape=plain]; lg_h [label="", shape=plain];
+        lg_a -> lg_b [label="主请求", color="#D32F2F", penwidth=2.2];
+        lg_c -> lg_d [label="同步", color="#444444"];
+        lg_e -> lg_f [label="异步/SSE", color="#1976D2", style="dashed"];
+        lg_g -> lg_h [label="观测", color="#888888", style="dotted"];
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //                       边 (constraint=true 默认)
+    // ─────────────────────────────────────────────────────────────
+
+    // 主请求路径 (红粗线)
+    cli_browser -> api_app        [color="#D32F2F", penwidth=2.2, weight=10];
+    api_app     -> api_analyze    [color="#D32F2F", penwidth=2.2, weight=10];
+    api_app     -> api_async      [color="#D32F2F", penwidth=2.2, weight=5];
+    api_app     -> api_sessions   [color="#444444"];
+    api_app     -> api_traces     [color="#444444"];
+    api_app     -> api_health     [color="#444444"];
+    api_analyze -> orch_core      [color="#D32F2F", penwidth=2.2, weight=10];
+    api_async   -> async_registry [color="#D32F2F", penwidth=2.2, weight=5, label="提交"];
+    async_registry -> orch_core   [color="#D32F2F", penwidth=2.2, weight=5, label="后台执行"];
+    orch_core   -> dag_executor   [color="#D32F2F", penwidth=2.2, weight=8, label="L1/L2"];
+    orch_core   -> react_agent    [color="#D32F2F", penwidth=2.2, weight=8, label="L3/兜底"];
+
+    // Orchestrator 内部
+    orch_core -> orch_router [color="#444444"];
+    orch_core -> orch_refres [color="#444444"];
+
+    // DAG 内部
+    dag_executor -> dag_templates [color="#444444"];
+    dag_executor -> dag_validator [color="#444444"];
+    dag_executor -> dag_report    [color="#444444"];
+    dag_executor -> dag_casestore [color="#444444"];
+
+    // ReAct 内部
+    react_agent -> react_tools [color="#444444"];
+    react_tools -> react_rules [color="#444444"];
+
+    // 执行层 → Core (让 dot 自然把 core 拉到下方)
+    react_tools  -> core_db        [color="#444444"];
+    react_agent  -> core_memory    [color="#444444", label="短期/长期"];
+    orch_core    -> core_memory    [color="#444444", label="save_report"];
+    orch_core    -> core_obs       [color="#888888", style="dotted"];
+    dag_executor -> core_obs       [color="#888888", style="dotted"];
+    react_agent  -> core_obs       [color="#888888", style="dotted"];
+    orch_router  -> core_knowledge [color="#444444", label="L2"];
+    dag_casestore -> core_knowledge [color="#444444"];
+    react_rules  -> core_ontology  [color="#444444", style="dashed"];
+    api_sessions -> core_chat      [color="#444444"];
+
+    // Async Bus SSE (蓝虚线)
+    async_registry -> async_bus [color="#1976D2", style="dashed"];
+    orch_core      -> async_bus [color="#1976D2", style="dashed", label="publish_stage"];
+    async_bus      -> api_async [color="#1976D2", style="dashed", label="SSE"];
+
+    // Core → 外部 (让 dot 把 ext 进一步推到最底)
+    core_db        -> ext_pg     [color="#444444"];
+    core_memory    -> ext_pg     [color="#444444"];
+    core_memory    -> ext_chroma [color="#444444"];
+    core_obs       -> ext_pg     [color="#888888", style="dotted"];
+    core_knowledge -> ext_chroma [color="#444444"];
+    core_knowledge -> ext_neo4j  [color="#444444", style="dashed"];
+    core_ontology  -> ext_owl    [color="#444444"];
+    core_chat      -> ext_pg     [color="#444444"];
+    async_bus      -> ext_redis  [color="#1976D2", style="dashed"];
+
+    // LLM (直接到外部 LLM 组件)
+    react_agent -> ext_llm_main [color="#444444", label="tool calling"];
+    dag_report  -> ext_llm_fast [color="#444444", label="报告"];
+    orch_router -> ext_llm_fast [color="#444444", label="L3"];
+}

@@ -18,6 +18,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 
+# TECH-DEBT(#2): core/modules 反向 import api.schemas，待下沉到 core/schemas
 from api.schemas.analysis import (
     AnalysisResult,
     AnalysisStatus,
@@ -384,6 +385,232 @@ class P2PAgent:
             return self._agent
 
     # ------------------------------------------------------------------
+    # 流式工具：ReAct 兜底路径的 token-level 推送
+    # ------------------------------------------------------------------
+
+    # micro-batch 参数：每累计 _STREAM_FLUSH_CHARS 字符或每 _STREAM_FLUSH_INTERVAL
+    # 秒（先到者为准）往 EventBus flush 一次。与 Phase 1 ReportAgent 一致，
+    # 把 token 级事件聚合成 ~20 Hz 的 chunk，兼顾体验与带宽。
+    _STREAM_FLUSH_CHARS: int = 16
+    _STREAM_FLUSH_INTERVAL: float = 0.05
+
+    async def _astream_react_with_publish(
+        self,
+        agent: Any,
+        invoke_input: dict[str, Any],
+        invoke_config: dict[str, Any],
+        *,
+        trace_id: str,
+        message_id: str,
+        node: str = "agent_final",
+        span_attrs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """用 ``agent.astream_events(version="v2")`` 替代 ``ainvoke``，
+        仅对最终 text turn 做 token-level 流式推送（first-chunk 模式检测）。
+
+        每个 LLM turn 只会输出 ``content`` 或 ``tool_call_chunks`` 之一。
+        我们用首个非空 chunk 判定 turn 模式：
+
+        - ``tool_call_chunks`` 非空 → tool turn，丢弃整轮（不推送）
+        - ``content`` 非空 → text turn，按 micro-batch 实时推送
+        - 都为空 → 继续等下一个 chunk（计入 ``ambiguous_chunks`` 指标）
+
+        混输 rollback：text turn 推送途中又冒出 ``tool_call_chunks``，
+        说明模型在文本中途切换到工具调用。此时已推 chunk 是污染数据，
+        发一帧 ``index=0, delta=""`` 重置帧让前端清 buffer，并把当前 turn
+        重新当 tool turn 处理。
+
+        Returns:
+            与 ``agent.ainvoke`` 等价的 ``dict``：包含 ``messages`` 列表，
+            供调用方提取最终回复 content 与 JSON 兜底解析。
+        """
+        from core.observability.middleware import _current_trace
+        from core.tasks.events import get_event_bus
+        from core.tasks.stream_utils import (
+            ThinkTagFilter,
+            extract_chunk_text,
+            publish_chunk_event,
+            strip_think_tags,
+        )
+
+        bus = get_event_bus()
+        attrs: dict[str, Any] = span_attrs if span_attrs is not None else {}
+
+        # 流式状态
+        accumulated_raw: list[str] = []  # 累加原始文本（含 <think>）
+        pending: list[str] = []          # 待 flush 的可见文本
+        chunk_index = 0
+        last_flush_ts = time.monotonic()
+        first_chunk_ms: float | None = None
+        stream_start_monotonic = time.monotonic()
+
+        # turn 级状态
+        current_turn_mode: str | None = None  # None | "text" | "tool"
+        text_turns = 0
+        tool_turns = 0
+        ambiguous_chunks = 0
+        rollback_triggered = False
+
+        think_filter = ThinkTagFilter()
+
+        # 最终消息（从 LangGraph 顶层 on_chain_end 拿）
+        final_messages: list[Any] = []
+        final_meta: Any = None
+
+        def _flush(eos: bool = False) -> None:
+            nonlocal chunk_index, last_flush_ts
+            if not pending and not eos:
+                return
+            delta = "".join(pending)
+            pending.clear()
+            publish_chunk_event(
+                bus,
+                trace_id=trace_id,
+                node=node,
+                message_id=message_id,
+                delta=delta,
+                index=chunk_index,
+                eos=eos,
+            )
+            chunk_index += 1
+            last_flush_ts = time.monotonic()
+
+        def _publish_rollback() -> None:
+            """混输场景：发 index=0、delta="" 的重置帧让前端清 buffer。
+
+            绕过 ``publish_chunk_event`` 的"空 delta + 非 eos 跳过"优化——
+            rollback 帧就是要空 delta 表达"清 buffer"语义。
+            """
+            from core.time_utils import now_cn
+
+            nonlocal chunk_index, rollback_triggered
+            if bus is not None:
+                bus.publish(
+                    trace_id,
+                    {
+                        "type": "chunk",
+                        "trace_id": trace_id,
+                        "ts": now_cn().isoformat(),
+                        "seq": 0,
+                        "node": node,
+                        "message_id": message_id,
+                        "delta": "",
+                        "index": 0,
+                        "eos": False,
+                    },
+                    ephemeral=True,
+                )
+            pending.clear()
+            accumulated_raw.clear()
+            think_filter.__init__()  # 重置过滤器状态，下一轮 text turn 干净开始
+            chunk_index = 0
+            rollback_triggered = True
+
+        async for event in agent.astream_events(
+            invoke_input, config=invoke_config, version="v2"
+        ):
+            ev_type = event.get("event", "")
+            data = event.get("data") or {}
+
+            if ev_type == "on_chat_model_start":
+                # 新一轮 LLM turn，重置 turn 模式
+                current_turn_mode = None
+
+            elif ev_type == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                if chunk is None:
+                    continue
+
+                content_text = extract_chunk_text(chunk)
+                tool_chunks = getattr(chunk, "tool_call_chunks", None)
+                meta = getattr(chunk, "usage_metadata", None)
+                if meta:
+                    final_meta = meta
+
+                # 模式判定
+                if current_turn_mode is None:
+                    if tool_chunks:
+                        current_turn_mode = "tool"
+                    elif content_text:
+                        current_turn_mode = "text"
+                        text_turns += 1  # 进入新的 text turn
+                    else:
+                        # 既无 content 也无 tool_call_chunks，继续等
+                        ambiguous_chunks += 1
+                        continue
+
+                # text turn 中途冒出 tool_call_chunks → 混输 rollback
+                if current_turn_mode == "text" and tool_chunks:
+                    _publish_rollback()
+                    current_turn_mode = "tool"
+                    # text_turns 已经加过 1，回滚此次计数
+                    text_turns = max(0, text_turns - 1)
+                    continue
+
+                if current_turn_mode == "text" and content_text:
+                    # 经 think-tag filter 处理
+                    visible, raw = think_filter.feed(content_text)
+                    if raw:
+                        accumulated_raw.append(raw)
+                    if visible:
+                        pending.append(visible)
+                        if first_chunk_ms is None:
+                            first_chunk_ms = (
+                                time.monotonic() - stream_start_monotonic
+                            ) * 1000.0
+                    if (
+                        sum(len(s) for s in pending) >= self._STREAM_FLUSH_CHARS
+                        or (time.monotonic() - last_flush_ts)
+                        >= self._STREAM_FLUSH_INTERVAL
+                    ):
+                        _flush()
+
+            elif ev_type == "on_chat_model_end":
+                if current_turn_mode == "text":
+                    # text turn 正常结束：flush 边界缓冲 + eos
+                    tail_visible, tail_raw = think_filter.flush()
+                    if tail_raw:
+                        accumulated_raw.append(tail_raw)
+                    if tail_visible:
+                        pending.append(tail_visible)
+                    _flush(eos=True)
+                elif current_turn_mode == "tool":
+                    tool_turns += 1
+                # 模式归零，等待下一轮 turn
+
+            elif ev_type == "on_chain_end":
+                # 顶层 LangGraph 图执行结束，拿 final state
+                if event.get("name") in ("LangGraph", "agent", "p2p_agent"):
+                    output = data.get("output") or {}
+                    if isinstance(output, dict):
+                        msgs = output.get("messages") or []
+                        if msgs:
+                            final_messages = list(msgs)
+
+        # 监控指标回填
+        attrs["text_turns"] = text_turns
+        attrs["tool_turns"] = tool_turns
+        attrs["ambiguous_chunks"] = ambiguous_chunks
+        attrs["rollback_triggered"] = rollback_triggered
+        if first_chunk_ms is not None:
+            attrs["first_chunk_ms"] = round(first_chunk_ms, 2)
+
+        # 兜底：final_messages 为空时用 accumulated 重构 AIMessage
+        if not final_messages and accumulated_raw:
+            try:
+                from langchain_core.messages import AIMessage
+
+                final_text = strip_think_tags("".join(accumulated_raw))
+                final_messages = [AIMessage(content=final_text)]
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "failed to reconstruct AIMessage from accumulated chunks: %s", exc
+                )
+                final_messages = []
+
+        return {"messages": final_messages, "usage_metadata": final_meta}
+
+    # ------------------------------------------------------------------
     # 公开方法
     # ------------------------------------------------------------------
 
@@ -506,7 +733,6 @@ class P2PAgent:
                 )
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("long-term memory retrieval skipped: %s", exc)
-                from core.observability.middleware import record_span
 
                 with record_span(
                     "memory", "memory.read_failed",
@@ -555,14 +781,47 @@ class P2PAgent:
             checkpointer_message_count=cp_count,
         )
 
+        # ── 流式开关守卫：llm.streaming_enabled + trace_id + event_bus 三项全到位才启用 ──
+        # 任一缺失都回到 ainvoke 原路径，保证兼容性。
+        from core.observability.middleware import _current_trace
+        from core.tasks.context import get_current_message_id
+        from core.tasks.events import get_event_bus
+
+        _trace_ctx = _current_trace.get()
+        _trace_id = _trace_ctx.trace_id if _trace_ctx is not None else None
+        _message_id = get_current_message_id() or _trace_id
+        _bus_ready = get_event_bus() is not None
+        streaming_on = bool(
+            self._settings.llm.streaming_enabled
+            and _trace_id
+            and _bus_ready
+        )
+
         # ── 重试循环 ──
         for attempt in range(max_retries):
             try:
                 agent = self._get_or_build_agent()
-                result: dict[str, Any] = await agent.ainvoke(
-                    {"messages": invoke_messages},
-                    config=invoke_config,
-                )
+                with record_span(
+                    "model", "p2p_agent.react"
+                ) as _model_attrs:
+                    _model_attrs["react_streaming"] = streaming_on
+                    if attempt > 0:
+                        _model_attrs["retry_attempt"] = attempt + 1
+                    if streaming_on:
+                        result = await self._astream_react_with_publish(
+                            agent,
+                            {"messages": invoke_messages},
+                            invoke_config,
+                            trace_id=_trace_id,  # type: ignore[arg-type]
+                            message_id=_message_id,  # type: ignore[arg-type]
+                            node="agent_final",
+                            span_attrs=_model_attrs,
+                        )
+                    else:
+                        result = await agent.ainvoke(
+                            {"messages": invoke_messages},
+                            config=invoke_config,
+                        )
 
                 # 提取最终回复
                 messages: list[Any] = result.get("messages", [])
@@ -619,7 +878,6 @@ class P2PAgent:
                         )
                     except Exception as exc:  # noqa: BLE001
                         _logger.warning("long-term memory save skipped: %s", exc)
-                        from core.observability.middleware import record_span
 
                         with record_span(
                             "memory", "memory.write_failed",
