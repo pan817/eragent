@@ -25,9 +25,26 @@ from api.schemas.analysis import (
     AnalysisType,
     ErrorInfo,
 )
+import re as _re
+
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
+
+
+def _strip_think_tags(text: str) -> str:
+    """剥离 ``<think>...</think>`` 推理标签及其内容。
+
+    部分 Qwen3 / Qwen3.5 模型在 ``enable_thinking=False`` + streaming 时
+    仍可能在 content 字段里输出 ``<think>`` 标签（已知后端 bug）。
+    本函数在 AnalysisResult 构造前统一清洗，保证 task 快照 / chat 消息
+    / 报告持久化三处均无推理标签污染。
+    """
+    if "<think>" not in text:
+        return text
+    cleaned = _re.sub(r"<think>[\s\S]*?</think>", "", text)
+    cleaned = _re.sub(r"<think>[\s\S]*$", "", cleaned)
+    return cleaned.strip()
 from core.observability.middleware import publish_stage as _publish_stage
 from core.orchestrator.router import IntentRouter
 
@@ -1158,7 +1175,7 @@ class Orchestrator:
             user_id=user_id,
             session_id=session_id,
             time_range=f"最近 {time_range_days} 天",
-            report_markdown=dag_result.get("report", ""),
+            report_markdown=_strip_think_tags(dag_result.get("report", "")),
             completed_tasks=dag_result.get("completed_tasks", []),
             failed_tasks=failed_list,
             error=error_info,
@@ -1380,7 +1397,9 @@ class Orchestrator:
             anomalies=agent_result.get("anomalies", []),
             supplier_kpis=agent_result.get("supplier_kpis", []),
             summary=summary,
-            report_markdown=agent_result.get("report_markdown", ""),
+            report_markdown=_strip_think_tags(
+                agent_result.get("report_markdown", "")
+            ),
             completed_tasks=agent_result.get("completed_tasks", []),
             failed_tasks=agent_result.get("failed_tasks", []),
             duration_ms=duration_ms,

@@ -564,6 +564,11 @@ class ReportAgent:
                 )
                 raise ReportGenerationError(code, str(exc)) from exc
 
+            # 统一剥离 <think> 标签（覆盖流式 + ainvoke 两条路径）。
+            # 流式分支在 _astream_with_publish 内已 strip 过一次，
+            # 此处再 strip 是幂等的（两次结果相同），保证 ainvoke 路径也干净。
+            content = self._strip_think_tags(content)
+
             span_attrs["output_length"] = len(content)
             span_attrs["status"] = "ok"
             _logger.info(
