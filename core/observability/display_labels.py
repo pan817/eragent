@@ -50,6 +50,9 @@ _TOOL_LABELS: dict[str, str] = {
     "analyze_discount_utilization": "折扣利用率分析",
     "analyze_vendor_concentration": "供应商集中度分析",
     "run_vendor_risk_scoring": "供应商风险评分",
+    # 报告 / 图表
+    "generate_summary_report": "生成分析报告",
+    "generate_chart": "生成图表",
 }
 
 

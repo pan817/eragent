@@ -7,6 +7,7 @@ app:
   debug: false
   language: "zh"  # 报告语言：zh=中文
   timezone: "Asia/Shanghai"  # 业务时区：全链路(代码/DB/checkpointer)统一使用；改动需重启进程
+  tiktoken_warmup_enabled: true  # 启动时预热 tiktoken 编码，避免首次请求因下载 BPE 文件卡顿
 
 llm:
   provider: "qwen"          # 模型提供商：zhipu / openai / deepseek / qwen

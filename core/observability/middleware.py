@@ -351,13 +351,14 @@ def _publish_span_start(span_type: str, name: str) -> None:
             },
         )
     elif span_type == "dag.task":
+        tool_key = name.split(":", 1)[1] if ":" in name else name
         _publish_to_event_bus(
             ctx.trace_id,
             {
                 "type": "dag_task",
                 "action": "start",
                 "task_name": name,
-                "label": resolve_tool_label(name),
+                "label": resolve_tool_label(tool_key),
             },
         )
 
@@ -388,13 +389,14 @@ def _publish_span_end(
             },
         )
     elif span_type == "dag.task":
+        tool_key = name.split(":", 1)[1] if ":" in name else name
         _publish_to_event_bus(
             ctx.trace_id,
             {
                 "type": "dag_task",
                 "action": "end",
                 "task_name": name,
-                "label": resolve_tool_label(name),
+                "label": resolve_tool_label(tool_key),
                 "duration_ms": duration_ms,
                 "status": status,
             },

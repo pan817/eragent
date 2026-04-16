@@ -61,6 +61,7 @@ _REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以�
 - 如工具输出为空或数据不足以支撑某项结论，必须明确写"数据不足"或"无异常发现"，不得编造
 - 本系统为分析只读系统，不会执行任何 ERP 写操作（付款、审批、工单创建、单据修改、邮件发送等）；改进动作一律以"建议人工处理"措辞表达，不要承诺或模拟执行
 - 直接输出 Markdown 正文，不要添加前言或"好的，以下是..."之类的导语
+- 禁止输出 <think>、</think> 或任何 XML 推理标签；不要输出推理过程，只输出最终报告
 
 请输出 Markdown 报告："""
 
@@ -125,6 +126,26 @@ class ReportAgent:
             return reasoning
         return ""
 
+    @staticmethod
+    def _strip_think_tags(text: str) -> str:
+        """从最终报告文本中剥离 ``<think>...</think>`` 推理标签及其内容。
+
+        部分 Qwen3 / Qwen3.5 模型在 ``enable_thinking=False`` + streaming
+        时仍会在 content 字段里输出 ``<think>`` 标签（后端 bug）。
+        该方法作为**最终一致性兜底**，在全文拼接完成后一次性清除。
+
+        - 支持多个 ``<think>`` 块
+        - 支持嵌套空白、换行
+        - 标签未闭合（截断）时剥掉从 ``<think>`` 到末尾的全部内容
+        """
+        import re
+
+        # 已闭合的 <think>...</think>
+        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text)
+        # 未闭合的 <think>...（流式截断 / 模型生成中断）
+        cleaned = re.sub(r"<think>[\s\S]*$", "", cleaned)
+        return cleaned.strip()
+
     async def _astream_with_publish(
         self,
         llm: Any,
@@ -135,6 +156,15 @@ class ReportAgent:
         node: str = "report",
     ) -> tuple[str, Any]:
         """调用 ``llm.astream(prompt)``，按 micro-batch 推送 chunk 事件。
+
+        **Phase 2 流式状态机**：检测到 ``<think>`` 开始标签后进入 suppress
+        状态，后续 chunk 文本仅累加到内部 buffer（用于检测 ``</think>``
+        闭合），不 flush 到 EventBus——前端看不到推理过程。检测到
+        ``</think>`` 后恢复正常 flush。
+
+        **Phase 1 兜底**：即使状态机遗漏（例如标签跨 chunk 边界被拆散），
+        末尾 ``_strip_think_tags`` 仍会清除残留。两层联动保证：
+        流式过程中不显示 thinking + 最终报告文本干净。
 
         Args:
             llm: 已构造的 ChatOpenAI 实例（``streaming=True``）。
@@ -156,6 +186,17 @@ class ReportAgent:
         last_flush_ts = _time.monotonic()
         chunk_index = 0
         final_meta: Any = None
+
+        # ── Phase 2 流式状态机：suppress <think> 内容不推给前端 ──
+        # suppressing=True 期间 text 只进 accumulated（用于末尾 strip），
+        # 不进 pending（不 flush 到 EventBus）。
+        suppressing = False
+        # 边界缓冲：标签可能被拆散在连续 chunk 的边界上，如 "<thi" + "nk>"。
+        # 用一个短 buffer 记住最近未匹配的尾部片段，下一个 chunk 拼接后重新检测。
+        _TAG_OPEN = "<think>"
+        _TAG_CLOSE = "</think>"
+        _MAX_TAG_LEN = max(len(_TAG_OPEN), len(_TAG_CLOSE))
+        boundary_buf = ""
 
         def _pending_chars() -> int:
             return sum(len(s) for s in pending)
@@ -185,23 +226,85 @@ class ReportAgent:
                 chunk_index += 1
             last_flush_ts = _time.monotonic()
 
+        def _process_text(text: str) -> None:
+            """处理提取到的文本：检测 <think> 标签、按状态分流到 pending/accumulated。"""
+            nonlocal suppressing, boundary_buf
+
+            # 拼接上一轮的边界残留
+            if boundary_buf:
+                text = boundary_buf + text
+                boundary_buf = ""
+
+            cursor = 0
+            while cursor < len(text):
+                if suppressing:
+                    # 找 </think> 闭合
+                    close_pos = text.find(_TAG_CLOSE, cursor)
+                    if close_pos >= 0:
+                        # 闭合：跳过 </think> 本身，accumulated 里留着（末尾 strip 会清）
+                        skip_end = close_pos + len(_TAG_CLOSE)
+                        accumulated.append(text[cursor:skip_end])
+                        cursor = skip_end
+                        suppressing = False
+                    else:
+                        # 未闭合：整段 suppress，留边界尾部
+                        accumulated.append(text[cursor:])
+                        # 保留尾部可能是 "</thin" 这种半截标签
+                        tail_len = min(_MAX_TAG_LEN - 1, len(text) - cursor)
+                        boundary_buf = text[-tail_len:] if tail_len > 0 else ""
+                        cursor = len(text)
+                else:
+                    # 找 <think> 开始
+                    open_pos = text.find(_TAG_OPEN, cursor)
+                    if open_pos >= 0:
+                        # <think> 之前的内容是正常文本
+                        normal = text[cursor:open_pos]
+                        if normal:
+                            pending.append(normal)
+                            accumulated.append(normal)
+                        # <think> 本身进 accumulated（末尾 strip 会清）
+                        accumulated.append(_TAG_OPEN)
+                        cursor = open_pos + len(_TAG_OPEN)
+                        suppressing = True
+                    else:
+                        # 无标签：全部是正常文本，但保留尾部作为边界缓冲
+                        # （可能是 "<thi" 这种半截开始标签）
+                        safe_end = len(text) - (_MAX_TAG_LEN - 1)
+                        if safe_end > cursor:
+                            normal = text[cursor:safe_end]
+                            pending.append(normal)
+                            accumulated.append(normal)
+                            boundary_buf = text[safe_end:]
+                        else:
+                            # 文本太短，全部留到边界缓冲
+                            boundary_buf = text[cursor:]
+                        cursor = len(text)
+
         async for chunk in llm.astream(prompt):
             text = self._extract_chunk_text(chunk)
             if text:
-                pending.append(text)
-                accumulated.append(text)
+                _process_text(text)
             meta = getattr(chunk, "usage_metadata", None)
             if meta:
                 final_meta = meta
-            # 达到字符阈值或时间阈值即 flush
+            # 达到字符阈值或时间阈值即 flush（仅 pending 非空 + 非 suppress 时有效）
             if (
-                _pending_chars() >= self._STREAM_FLUSH_CHARS
-                or (_time.monotonic() - last_flush_ts) >= self._STREAM_FLUSH_INTERVAL
+                not suppressing
+                and (
+                    _pending_chars() >= self._STREAM_FLUSH_CHARS
+                    or (_time.monotonic() - last_flush_ts) >= self._STREAM_FLUSH_INTERVAL
+                )
             ):
                 _flush()
+
+        # 流结束后如果 boundary_buf 还有残留正常文本（非 suppress 状态），flush 出去
+        if boundary_buf and not suppressing:
+            pending.append(boundary_buf)
+            accumulated.append(boundary_buf)
+            boundary_buf = ""
         # 末尾兜底 flush（空 delta 也要带 eos=True 让前端结束累加状态）
         _flush(eos=True)
-        full_text = "".join(accumulated)
+        full_text = self._strip_think_tags("".join(accumulated))
         if not full_text:
             # 流式跑完但没拿到任何文本：常见于 Qwen3 / 部分 provider 的兼容性异常。
             # 抛 EMPTY_RESPONSE 让上层 tenacity 按 transient 规则决定是否重试；

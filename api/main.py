@@ -102,6 +102,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "settings loaded: llm=%s llm_fast=%s timezone=%s",
         settings.llm.model, settings.llm_fast.model, settings.timezone,
     )
+
+    # tiktoken warmup: pre-download BPE encoding during startup to avoid
+    # 30-45s stall on the first user request (blocked by network to
+    # openaipublic.blob.core.windows.net in restricted environments).
+    if settings.tiktoken_warmup_enabled:
+        import os
+        from pathlib import Path
+
+        cache_dir = str(Path(__file__).resolve().parent.parent / ".tiktoken_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+        try:
+            import tiktoken
+
+            tiktoken.get_encoding("cl100k_base")
+            _logger.info("tiktoken warmup ok (cache_dir=%s)", cache_dir)
+        except Exception:  # noqa: BLE001
+            _logger.warning("tiktoken warmup failed; first LLM init may be slow")
+
     engine = get_engine(settings.postgresql)
     _logger.info("postgresql engine ready: dsn=%s", settings.postgresql.dsn.split("@")[-1])
     create_tables(engine)

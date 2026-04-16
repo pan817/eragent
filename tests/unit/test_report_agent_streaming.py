@@ -171,6 +171,142 @@ async def test_astream_uses_reasoning_content_when_content_empty(
     assert content == "# 报告\n正文内容。"
 
 
+class TestStripThinkTags:
+    """_strip_think_tags 单元测试。"""
+
+    def test_no_tags(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        assert ReportAgent._strip_think_tags("hello world") == "hello world"
+
+    def test_single_think_block(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        text = "<think>这是推理过程</think>## 报告\n内容"
+        assert ReportAgent._strip_think_tags(text) == "## 报告\n内容"
+
+    def test_multiple_think_blocks(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        text = "<think>思考1</think>正文1<think>思考2</think>正文2"
+        assert ReportAgent._strip_think_tags(text) == "正文1正文2"
+
+    def test_unclosed_think_tag(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        text = "正文开头<think>未闭合的推理..."
+        assert ReportAgent._strip_think_tags(text) == "正文开头"
+
+    def test_multiline_think_content(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        text = "<think>\n分析步骤1\n分析步骤2\n</think>\n## 结论\nOK"
+        assert ReportAgent._strip_think_tags(text) == "## 结论\nOK"
+
+    def test_empty_string(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        assert ReportAgent._strip_think_tags("") == ""
+
+    def test_only_think_block(self) -> None:
+        from modules.p2p.report_agent import ReportAgent
+
+        assert ReportAgent._strip_think_tags("<think>全是推理</think>") == ""
+
+
+@pytest.mark.asyncio
+async def test_astream_suppresses_think_tags_in_stream(
+    settings: Settings, event_bus: MemoryEventBus
+) -> None:
+    """Phase 2: <think> 标签在流式过程中被 suppress，前端不会看到推理内容。"""
+    from modules.p2p.report_agent import ReportAgent
+
+    agent = ReportAgent(settings=settings)
+    # 模拟模型输出：<think>推理过程</think>正文内容
+    chunks = [
+        _FakeChunk("<think>"),
+        _FakeChunk("这是推理过程，用户不应看到"),
+        _FakeChunk("</think>"),
+        _FakeChunk("## 分析报告\n\n"),
+        _FakeChunk("这是正文内容。"),
+    ]
+    llm = _FakeStreamingLLM(chunks)
+
+    received: list[dict] = []
+
+    async def consume() -> None:
+        async for ev in event_bus.subscribe("t-think"):
+            if ev.get("type") == "chunk":
+                received.append(ev)
+                if ev.get("eos"):
+                    break
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.01)
+
+    content, _ = await agent._astream_with_publish(
+        llm, prompt="p", trace_id="t-think", message_id="m-think",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    # 最终文本不含 <think>
+    assert "<think>" not in content
+    assert "推理过程" not in content
+    assert "分析报告" in content
+
+    # 流式 chunk 里也不应包含推理内容
+    all_deltas = "".join(ev["delta"] for ev in received)
+    assert "推理过程" not in all_deltas
+    assert "分析报告" in all_deltas
+
+
+@pytest.mark.asyncio
+async def test_astream_think_tag_split_across_chunks(
+    settings: Settings, event_bus: MemoryEventBus
+) -> None:
+    """<think> 标签被拆散在多个 chunk 边界上仍能正确 suppress。"""
+    from modules.p2p.report_agent import ReportAgent
+
+    agent = ReportAgent(settings=settings)
+    # 模拟标签被拆散: "<thi" + "nk>" + "内容" + "</thi" + "nk>" + "正文"
+    chunks = [
+        _FakeChunk("<thi"),
+        _FakeChunk("nk>"),
+        _FakeChunk("suppress this"),
+        _FakeChunk("</thi"),
+        _FakeChunk("nk>"),
+        _FakeChunk("visible text here"),
+    ]
+    llm = _FakeStreamingLLM(chunks)
+
+    content, _ = await agent._astream_with_publish(
+        llm, prompt="p", trace_id="t-split", message_id="m-split",
+    )
+    assert "suppress this" not in content
+    assert "visible text" in content
+
+
+@pytest.mark.asyncio
+async def test_astream_no_think_tags_passes_through(
+    settings: Settings, event_bus: MemoryEventBus
+) -> None:
+    """无 <think> 标签时所有内容正常透传，不受状态机影响。"""
+    from modules.p2p.report_agent import ReportAgent
+
+    agent = ReportAgent(settings=settings)
+    chunks = [
+        _FakeChunk("## 标题\n"),
+        _FakeChunk("正文第一段。\n"),
+        _FakeChunk("正文第二段。"),
+    ]
+    llm = _FakeStreamingLLM(chunks)
+
+    content, _ = await agent._astream_with_publish(
+        llm, prompt="p", trace_id="t-clean", message_id="m-clean",
+    )
+    assert content == "## 标题\n正文第一段。\n正文第二段。"
+
+
 @pytest.mark.asyncio
 async def test_astream_with_publish_accumulates_and_publishes(
     settings: Settings, event_bus: MemoryEventBus

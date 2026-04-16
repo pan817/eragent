@@ -573,6 +573,7 @@ class Settings(BaseSettings):
     debug: bool = False
     language: str = "zh"
     timezone: str = "Asia/Shanghai"
+    tiktoken_warmup_enabled: bool = True
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
     # 小模型配置（报告生成 / L3 意图分类）。未配置时由 from_yaml 按字段镜像 llm 的值，
@@ -620,6 +621,7 @@ class Settings(BaseSettings):
             "debug": app_data.get("debug", False),
             "language": app_data.get("language", "zh"),
             "timezone": app_data.get("timezone", "Asia/Shanghai"),
+            "tiktoken_warmup_enabled": app_data.get("tiktoken_warmup_enabled", True),
             **raw,
         }
 

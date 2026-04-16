@@ -20,5 +20,8 @@ htmlcov/
 # 数据目录（运行时生成）
 data/
 
+# tiktoken cache (auto-generated on startup)
+.tiktoken_cache/
+
 # Claude Code
 .claude/
