@@ -8,8 +8,15 @@ import pytest
 
 from api.schemas.analysis import AnalysisType
 from config.settings import Settings
-from core.orchestrator.router import IntentRouter, _extract_params, _is_non_analysis_query, _RULE_LIBRARY
-from core.orchestrator.signal import QuerySignal
+from core.orchestrator.router import (
+    IntentRouter,
+    _classify_bypass,
+    _extract_params,
+    _is_non_analysis_query,
+    _looks_like_data_lookup,
+    _RULE_LIBRARY,
+)
+from core.orchestrator.signal import IntentKind, QuerySignal
 
 
 # ============================================================
@@ -272,25 +279,42 @@ class TestLevel3:
         signal = self.router._try_level3("查询", {})
         assert signal.keywords == [AnalysisType.COMPREHENSIVE.value]
 
-    def test_llm_unknown_type_returns_sentinel_signal(self) -> None:
-        """LLM 返回 type=unknown 时应返回 keywords=['unknown'] 的信号，不转为 COMPREHENSIVE。"""
+    def test_llm_legacy_unknown_type_falls_back_to_clarification(self) -> None:
+        """老版本 prompt 仅返回 type=unknown 时，应兼容映射为 CLARIFICATION 信号。"""
         mock_llm = MagicMock()
         mock_response = MagicMock()
-        mock_response.content = '{"type": "unknown", "confidence": 0.7, "supplier_id": null, "po_number": null, "days": null}'
+        mock_response.content = (
+            '{"type": "unknown", "confidence": 0.7, '
+            '"supplier_id": null, "po_number": null, "days": null}'
+        )
         mock_llm.invoke.return_value = mock_response
         self.router._llm = mock_llm
 
         signal = self.router._try_level3("今天天气怎么样", {})
         assert signal.route_level == 3
-        assert signal.keywords == ["unknown"]
+        assert signal.intent_kind == IntentKind.CLARIFICATION
         assert signal.confidence == 0.7
-        assert "unknown" in signal.reasoning or "非" in signal.reasoning
 
-    def test_llm_classify_prompt_contains_unknown_enum(self) -> None:
-        """L3 prompt 应列出 unknown 枚举与非采购查询判定规则。"""
+    def test_llm_classify_prompt_contains_intent_kind_enum(self) -> None:
+        """L3 prompt 应列出新版 intent_kind 枚举与各类下游处理说明。"""
         prompt = self.router._LLM_CLASSIFY_PROMPT
-        assert "unknown" in prompt
-        assert "非 ERP 采购" in prompt or "非采购" in prompt
+        # 6 类 intent_kind 全部出现
+        for kind in [
+            "analysis",
+            "data_lookup",
+            "clarification",
+            "meta",
+            "chitchat",
+            "out_of_scope",
+        ]:
+            assert kind in prompt, f"intent_kind '{kind}' 未在 prompt 中出现"
+
+    def test_llm_classify_prompt_contains_few_shot_examples(self) -> None:
+        """L3 prompt 应包含边界 case 的 few-shot 示例。"""
+        prompt = self.router._LLM_CLASSIFY_PROMPT
+        assert "查询最新的一个 PO" in prompt  # data_lookup 示例
+        assert "做一下三路匹配" in prompt  # clarification 示例
+        assert "今天天气" in prompt  # chitchat 示例
 
     def test_llm_classify_prompt_contains_confidence_anchors(self) -> None:
         """L3 prompt 应包含 confidence 分档锚点（P1）。"""
@@ -641,14 +665,319 @@ class TestNonAnalysisQueryDetection:
     def test_normal_queries_not_blocked(self, query: str) -> None:
         assert _is_non_analysis_query(query) is False
 
-    def test_bypass_skips_l1_l2(self) -> None:
-        """回溯查询应跳过 L1/L2 直达 L3。"""
+    def test_bypass_skips_l1_l2_and_l3(self) -> None:
+        """前置 bypass 命中后直接生成 sentinel 信号，不再走 L1/L2/L3。"""
         router = IntentRouter(settings=Settings())
         mock_llm = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = '{"type": "comprehensive", "confidence": 0.9}'
-        mock_llm.invoke.return_value = mock_response
+        # 即便 mock 了 LLM，bypass 命中后也不该被调用
         router._llm = mock_llm
 
         signal = router.route("上次分析的结果呢")
-        assert signal.route_level == 3  # 跳过 L1/L2，直达 L3
+        assert signal.route_level == 0
+        assert signal.intent_kind == IntentKind.RECALL
+        mock_llm.invoke.assert_not_called()
+
+
+# ============================================================
+# 新版 intent_kind 二段分类
+# ============================================================
+
+
+class TestClassifyBypass:
+    """``_classify_bypass`` 按 IntentKind 分类的前置 bypass 测试。"""
+
+    @pytest.mark.parametrize("query", [
+        "你好", "您好", "hello", "hi", "hey",
+        "谢谢", "感谢", "thanks", "thank you",
+        "再见", "拜拜", "bye",
+        "不需要了", "算了", "取消", "好的", "知道了",
+        "继续", "然后呢", "嗯",
+    ])
+    def test_chitchat_kind(self, query: str) -> None:
+        assert _classify_bypass(query) == IntentKind.CHITCHAT
+
+    @pytest.mark.parametrize("query", [
+        "你能做什么",
+        "你会什么",
+        "有什么功能",
+        "支持哪些采购分析",
+        "可以做什么",
+        "有哪些分析",
+        "如何使用",
+        "怎么使用这个系统",
+        "help",
+    ])
+    def test_meta_kind(self, query: str) -> None:
+        assert _classify_bypass(query) == IntentKind.META
+
+    @pytest.mark.parametrize("query", [
+        "上次分析的结果呢",
+        "刚才的报告呢",
+        "结果呢",
+        "再说一遍",
+        "总结一下",
+        "之前说的是什么",  # 歧义回溯 + 无分析关键词
+    ])
+    def test_recall_kind(self, query: str) -> None:
+        assert _classify_bypass(query) == IntentKind.RECALL
+
+    @pytest.mark.parametrize("query", [
+        "分析三路匹配异常",
+        "检查价格差异",
+        "查询最新的一个 PO",
+        "分析之前 30 天的价格差异",  # 歧义回溯 + 含分析关键词
+    ])
+    def test_no_bypass(self, query: str) -> None:
+        assert _classify_bypass(query) is None
+
+    def test_chitchat_overrides_meta(self) -> None:
+        """CHITCHAT 优先级高于 META（短问候比能力询问更具排他性）。"""
+        # "好的" 是闲聊类否定确认，不是 META
+        assert _classify_bypass("好的") == IntentKind.CHITCHAT
+
+
+class TestLooksLikeDataLookup:
+    """``_looks_like_data_lookup`` 启发式判定测试。"""
+
+    @pytest.mark.parametrize("query", [
+        "查询最新的一个 PO",
+        "查最新的采购订单",
+        "看看 SUP-001 的发票",
+        "列出所有付款单",
+        "show me the latest invoice",
+        "list all suppliers",
+        "最新的 PO 是哪一个",
+        "最近的发票",
+    ])
+    def test_lookup_positive(self, query: str) -> None:
+        assert _looks_like_data_lookup(query) is True
+
+    @pytest.mark.parametrize("query", [
+        "分析三路匹配异常",
+        "今天天气怎么样",
+        "你好",
+        "查询",  # 仅动词，无实体
+        "PO",  # 仅实体，无动词/修饰
+    ])
+    def test_lookup_negative(self, query: str) -> None:
+        assert _looks_like_data_lookup(query) is False
+
+
+class TestL1DataLookupFallback:
+    """L1 在 analysis 规则全 miss 时尝试 DATA_LOOKUP 兜底。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def test_lookup_query_returns_data_lookup_signal(self) -> None:
+        """'查询最新的一个 po' 应在 L1 直接判为 DATA_LOOKUP。"""
+        signal = self.router._try_level1("查询最新的一个 po", {})
+        assert signal is not None
+        assert signal.intent_kind == IntentKind.DATA_LOOKUP
+        assert signal.keywords == ["data_lookup"]
+        assert signal.route_level == 1
+
+    def test_analysis_keyword_takes_priority(self) -> None:
+        """同时含 analysis 关键词与 lookup 动词时，仍优先判为 ANALYSIS。"""
+        # "查询发票重复情况" 含 "查询"+"发票" lookup signal，但更优是 INVOICE_DUPLICATE
+        signal = self.router._try_level1("发票重复检查", {})
+        assert signal is not None
+        assert signal.intent_kind == IntentKind.ANALYSIS
+
+    def test_pure_chitchat_returns_none(self) -> None:
+        """既不命中 analysis 规则也不像 lookup → None（让 L2/L3 处理）。"""
+        signal = self.router._try_level1("今天天气怎么样", {})
+        assert signal is None
+
+
+class TestL3IntentKindBranches:
+    """L3 LLM 输出不同 intent_kind 时的分支构造测试。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def _mock_llm(self, content: str) -> None:
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = content
+        mock_llm.invoke.return_value = mock_response
+        self.router._llm = mock_llm
+
+    def test_intent_kind_analysis(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"analysis","type":"price_variance","confidence":0.9,'
+            '"missing_params":[],"supplier_id":"SUP-001","po_number":null,"days":30}'
+        )
+        signal = self.router._try_level3("分析 SUP-001 的价格差异", {})
+        assert signal.intent_kind == IntentKind.ANALYSIS
+        assert signal.keywords == ["price_variance"]
+        assert signal.entities.get("supplier_id") == "SUP-001"
+        assert signal.entities.get("days") == 30
+
+    def test_intent_kind_data_lookup(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"data_lookup","type":"","confidence":0.85,'
+            '"missing_params":[],"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("查询最新的一个 PO", {})
+        assert signal.intent_kind == IntentKind.DATA_LOOKUP
+        assert signal.keywords == ["data_lookup"]
+
+    def test_intent_kind_clarification_with_missing_params(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"clarification","type":"three_way_match","confidence":0.7,'
+            '"missing_params":["time_range","supplier_id"],'
+            '"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("做一下三路匹配", {})
+        assert signal.intent_kind == IntentKind.CLARIFICATION
+        assert signal.missing_params == ["time_range", "supplier_id"]
+        # type hint 保留在 keywords 中供下游展示
+        assert signal.keywords == ["three_way_match"]
+
+    def test_intent_kind_meta(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"meta","type":"","confidence":0.95,'
+            '"missing_params":[],"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("你支持哪些分析", {})
+        assert signal.intent_kind == IntentKind.META
+        assert signal.keywords == ["meta"]
+
+    def test_intent_kind_chitchat(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"chitchat","type":"","confidence":0.95,'
+            '"missing_params":[],"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("今天天气怎么样", {})
+        assert signal.intent_kind == IntentKind.CHITCHAT
+        assert signal.keywords == ["chitchat"]
+
+    def test_intent_kind_out_of_scope(self) -> None:
+        self._mock_llm(
+            '{"intent_kind":"out_of_scope","type":"","confidence":0.9,'
+            '"missing_params":[],"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("帮我看销售订单的回款", {})
+        assert signal.intent_kind == IntentKind.OUT_OF_SCOPE
+        assert signal.keywords == ["out_of_scope"]
+
+    def test_invalid_intent_kind_falls_back_to_analysis(self) -> None:
+        """LLM 返回未知 intent_kind 时降级为 ANALYSIS+COMPREHENSIVE。"""
+        self._mock_llm(
+            '{"intent_kind":"foo_bar","type":"","confidence":0.5,'
+            '"missing_params":[],"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("查询", {})
+        assert signal.intent_kind == IntentKind.ANALYSIS
+
+    def test_missing_params_non_string_filtered(self) -> None:
+        """missing_params 中的非字符串元素应被过滤。"""
+        self._mock_llm(
+            '{"intent_kind":"clarification","type":"","confidence":0.6,'
+            '"missing_params":["time_range",null,{"foo":1}],'
+            '"supplier_id":null,"po_number":null,"days":null}'
+        )
+        signal = self.router._try_level3("分析", {})
+        assert signal.intent_kind == IntentKind.CLARIFICATION
+        assert "time_range" in signal.missing_params
+        # null 与 dict 应被丢弃
+        assert all(isinstance(p, str) for p in signal.missing_params)
+
+
+class TestRouteEndToEndIntentKinds:
+    """``route()`` 在不同 intent_kind 下的完整行为。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def test_chitchat_bypass_no_l1_l2_l3(self) -> None:
+        """CHITCHAT bypass 不调 LLM 也不查 L2 store。"""
+        mock_llm = MagicMock()
+        mock_store = MagicMock()
+        self.router._llm = mock_llm
+        self.router._seeds_store = mock_store
+        self.router._seeds_loaded = True
+
+        signal = self.router.route("你好")
+        assert signal.intent_kind == IntentKind.CHITCHAT
+        assert signal.route_level == 0
+        mock_llm.invoke.assert_not_called()
+        mock_store.search.assert_not_called()
+
+    def test_meta_bypass_no_l1_l2_l3(self) -> None:
+        mock_llm = MagicMock()
+        self.router._llm = mock_llm
+
+        signal = self.router.route("你能做什么")
+        assert signal.intent_kind == IntentKind.META
+        assert signal.route_level == 0
+        mock_llm.invoke.assert_not_called()
+
+    def test_recall_bypass_no_l1_l2_l3(self) -> None:
+        mock_llm = MagicMock()
+        self.router._llm = mock_llm
+
+        signal = self.router.route("上次的结果呢")
+        assert signal.intent_kind == IntentKind.RECALL
+        assert signal.route_level == 0
+        mock_llm.invoke.assert_not_called()
+
+    def test_lookup_query_l1_hits_data_lookup(self) -> None:
+        """'查询最新的一个 po' 应在 L1 直接判为 DATA_LOOKUP，不进 L2/L3。"""
+        mock_llm = MagicMock()
+        self.router._llm = mock_llm
+        # 模拟 L2 store 永远空，避免误命中
+        mock_store = MagicMock()
+        mock_store.search.return_value = []
+        self.router._seeds_store = mock_store
+        self.router._seeds_loaded = True
+
+        signal = self.router.route("查询最新的一个 po")
+        assert signal.intent_kind == IntentKind.DATA_LOOKUP
+        assert signal.route_level == 1
+        mock_llm.invoke.assert_not_called()
+
+
+class TestL2SentinelCategoryMatching:
+    """L2 种子库匹配 data_lookup / meta 类目时构造对应 IntentKind。"""
+
+    def setup_method(self) -> None:
+        self.router = IntentRouter(settings=Settings())
+
+    def test_l2_data_lookup_seed(self) -> None:
+        mock_store = MagicMock()
+        mock_store.search.return_value = [
+            {
+                "id": "seed_data_lookup_0",
+                "text": "查询最新的一个 PO",
+                "metadata": {"analysis_type": "data_lookup"},
+                "distance": 0.1,
+            }
+        ]
+        self.router._seeds_store = mock_store
+        self.router._seeds_loaded = True
+
+        signal = self.router._try_level2("查最新 PO", {})
+        assert signal is not None
+        assert signal.intent_kind == IntentKind.DATA_LOOKUP
+        assert signal.keywords == ["data_lookup"]
+        assert signal.route_level == 2
+
+    def test_l2_meta_seed(self) -> None:
+        mock_store = MagicMock()
+        mock_store.search.return_value = [
+            {
+                "id": "seed_meta_0",
+                "text": "你能做什么",
+                "metadata": {"analysis_type": "meta"},
+                "distance": 0.05,
+            }
+        ]
+        self.router._seeds_store = mock_store
+        self.router._seeds_loaded = True
+
+        signal = self.router._try_level2("能做啥", {})
+        assert signal is not None
+        assert signal.intent_kind == IntentKind.META
+        assert signal.keywords == ["meta"]

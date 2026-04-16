@@ -131,6 +131,86 @@ def _resolve_time_range(time_range: str | None) -> int | None:
     return None
 
 
+# ── intent_kind 早退模板 ────────────────────────────────────────────────
+#
+# 各 intent_kind 对应不同的友好提示模板，避免对所有"非分析"查询输出
+# 同一段拒答语（旧版本就是这个问题，把"查最新 PO"也吐成了"不属于采购分析"）。
+
+_SUPPORTED_SCENARIO_TEXT = (
+    "三路匹配、价格差异、付款合规、供应商绩效、支出分析、收货异常、"
+    "重复发票、早付折扣、采购周期、供应商集中度，以及综合跨域分析"
+)
+
+# clarification 时按缺失参数生成具体追问句
+_MISSING_PARAM_HINTS: dict[str, str] = {
+    "time_range": "时间范围（如\"最近 30 天\"/\"本月\"）",
+    "supplier_id": "供应商 ID（如 SUP-001）",
+    "po_number": "采购订单号（如 PO-2024-0001）",
+    "invoice_number": "发票号（如 INV-2024-0001）",
+    "analysis_scope": "分析范围（具体单据/品类/部门）",
+}
+
+
+def _render_intent_kind_template(signal: Any) -> str:
+    """根据 ``signal.intent_kind`` 渲染早退响应文本（Markdown）。
+
+    设计目标：
+    - CLARIFICATION：按 ``missing_params`` 给出具体追问，而非泛泛"信息不足"。
+    - META：列出系统支持范围，附使用提示。
+    - CHITCHAT：简短礼貌回应 + 引导回到业务话题。
+    - OUT_OF_SCOPE：明确告知本系统仅覆盖采购，建议另寻渠道。
+    """
+    from core.orchestrator.signal import IntentKind
+
+    kind = signal.intent_kind
+
+    if kind == IntentKind.CLARIFICATION:
+        missing = signal.missing_params or []
+        if missing:
+            hints = "\n".join(
+                f"- {_MISSING_PARAM_HINTS.get(p, p)}" for p in missing
+            )
+            return (
+                "需要您补充以下信息以便启动分析：\n\n"
+                f"{hints}\n\n"
+                "示例：`分析 SUP-001 最近 30 天的价格差异`。"
+            )
+        return (
+            "您的分析意图已识别，但缺少关键参数。请补充时间范围、供应商或单据号后重试。\n\n"
+            "示例：`分析 SUP-001 最近 30 天的价格差异`。"
+        )
+
+    if kind == IntentKind.META:
+        return (
+            "本系统是 ERP 采购分析智能体，支持以下分析场景：\n\n"
+            f"{_SUPPORTED_SCENARIO_TEXT}。\n\n"
+            "可直接用自然语言提问，例如：\n"
+            "- `分析最近 30 天的三路匹配异常`\n"
+            "- `查询 SUP-001 最近的发票`\n"
+            "- `评估供应商 SUP-001 的绩效`\n"
+        )
+
+    if kind == IntentKind.CHITCHAT:
+        return (
+            "您好，我是 ERP 采购分析助手。如需采购数据分析，请描述具体场景。\n\n"
+            f"当前支持：{_SUPPORTED_SCENARIO_TEXT}。"
+        )
+
+    if kind == IntentKind.OUT_OF_SCOPE:
+        return (
+            "您的查询超出本系统覆盖范围——本系统仅处理 ERP 采购（P2P）相关分析，"
+            "不支持销售订单、库存周转、HR 数据等其他模块。\n\n"
+            f"采购侧支持：{_SUPPORTED_SCENARIO_TEXT}。"
+        )
+
+    # 兜底：未识别的 intent_kind（理论上不会进到这里）
+    return (
+        "您的查询暂时无法识别为某个具体分析场景。\n\n"
+        f"本系统支持：{_SUPPORTED_SCENARIO_TEXT}。\n\n"
+        "请提供更具体的采购场景或单据信息后重试。"
+    )
+
+
 class Orchestrator:
     """P2P 分析编排器。
 
@@ -880,20 +960,29 @@ class Orchestrator:
                 enhanced_query, analyst_role=request.analyst_role
             )
 
-            # 2.5 L3 判定为非 ERP 采购分析意图（unknown）时直接返回友好提示，
-            # 不触发 DAG / ReAct，避免浪费 LLM 资源和产生误导性报告。
-            # 仅当用户未显式指定 analysis_type 时生效；显式指定时以用户意图为准。
-            if request.analysis_type is None and signal.keywords == ["unknown"]:
+            # 2.5 按 intent_kind 早退路由：CLARIFICATION / META / CHITCHAT /
+            # OUT_OF_SCOPE 都不触发 DAG / ReAct，由模板生成响应即可。
+            # ANALYSIS / DATA_LOOKUP / RECALL 继续走完整执行路径。
+            # 用户显式指定 analysis_type 时跳过早退（视为强制走分析路径）。
+            from core.orchestrator.signal import IntentKind as _IntentKind
+
+            if request.analysis_type is None and signal.intent_kind in (
+                _IntentKind.CLARIFICATION,
+                _IntentKind.META,
+                _IntentKind.CHITCHAT,
+                _IntentKind.OUT_OF_SCOPE,
+            ):
                 duration_ms = (time.monotonic() - start_time) * 1000.0
                 _logger.info(
-                    "L3 unknown intent detected, early return: query='%s' confidence=%.3f",
+                    "intent_kind=%s early return: query='%s' confidence=%.3f",
+                    signal.intent_kind.value,
                     request.query,
                     signal.confidence,
                 )
                 _publish_stage_safe(
                     "intent_resolved",
                     {
-                        "analysis_type": "unknown",
+                        "analysis_type": signal.intent_kind.value,
                         "route_level": signal.route_level,
                         "confidence": signal.confidence,
                     },
@@ -908,25 +997,34 @@ class Orchestrator:
                     session_id=session_id,
                     time_range="",
                     summary={
-                        "route_type": "non_analysis",
+                        "route_type": signal.intent_kind.value,
                         "route_level": signal.route_level,
                         "route_confidence": signal.confidence,
                         "route_reasoning": signal.reasoning,
+                        "missing_params": signal.missing_params,
                     },
-                    report_markdown=(
-                        "您的查询似乎不属于 ERP 采购分析范围，或信息不足以归入任何分析场景。\n\n"
-                        "本系统支持以下采购分析场景：三路匹配、价格差异、付款合规、供应商绩效、"
-                        "支出分析、收货异常、重复发票、早付折扣、采购周期、供应商集中度，"
-                        "以及综合跨域分析。\n\n"
-                        "请提供更具体的采购场景或单据信息（如供应商 ID、PO 号、时间范围）后重试。"
-                    ),
+                    report_markdown=_render_intent_kind_template(signal),
                     duration_ms=duration_ms,
                 )
 
             analysis_type: AnalysisType = request.analysis_type or self._intent_router.resolve_type(signal)
+
+            # 用户显式指定 analysis_type → 强制视为 ANALYSIS 路径，覆盖 LLM 判断
+            # 否则会出现 "用户指定 THREE_WAY_MATCH 但 intent_kind=DATA_LOOKUP
+            # 导致走 ReAct 而非 DAG" 的不一致组合。
+            if request.analysis_type is not None and signal.intent_kind != _IntentKind.ANALYSIS:
+                _logger.info(
+                    "explicit analysis_type=%s overrides intent_kind=%s → ANALYSIS",
+                    analysis_type.value,
+                    signal.intent_kind.value,
+                )
+                signal.intent_kind = _IntentKind.ANALYSIS
+                signal.keywords = [analysis_type.value]
+
             _logger.info(
-                "intent resolved: type=%s level=L%d confidence=%.3f keywords=%s",
+                "intent resolved: type=%s kind=%s level=L%d confidence=%.3f keywords=%s",
                 analysis_type.value,
+                signal.intent_kind.value,
                 signal.route_level,
                 signal.confidence,
                 signal.keywords,
@@ -967,11 +1065,22 @@ class Orchestrator:
                 await self._enrich_entities(parsed_params)
 
             # 5. 路由决策
-            # - 非分析意图 → 强制 ReAct（用户在回溯/闲聊，不是发起新分析）
+            # - RECALL / DATA_LOOKUP / 低置信度 ANALYSIS → 强制 ReAct
+            #   （回溯需要看短期记忆；事实查询直接调 query_* 工具；低置信度不
+            #    宜走 DAG 模板分析以免输出离题报告）
             # - L1/L2 命中且非 COMPREHENSIVE → DAG 执行
             # - COMPREHENSIVE + 有具体实体 → 实体维度 DAG
             # - 其余 → ReAct 兜底
-            if is_recall:
+            from core.orchestrator.signal import IntentKind as _IntentKindRoute
+
+            is_data_lookup = signal.intent_kind == _IntentKindRoute.DATA_LOOKUP
+            low_confidence = (
+                signal.intent_kind == _IntentKindRoute.ANALYSIS
+                and signal.route_level == 3
+                and signal.confidence < 0.5
+            )
+
+            if is_recall or is_data_lookup or low_confidence:
                 use_dag = False
             else:
                 has_entity = bool(

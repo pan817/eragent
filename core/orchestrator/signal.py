@@ -8,7 +8,37 @@ Level 1/2 由正则 + 规则填充，Level 3 由 LLM 填充。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class IntentKind(str, Enum):
+    """意图大类（intent_kind）。
+
+    与 AnalysisType（分析子类型）解耦：路由器先判 intent_kind，
+    再决定是否给出 AnalysisType。各 kind 的下游处理：
+
+    - ANALYSIS：落入 10 类采购分析场景之一，走 DAG / ReAct 分析流程。
+    - DATA_LOOKUP：纯事实查询/单据检索（如"查最新的 PO"），走 ReAct
+      让 Agent 自由调用 query_* 工具，不强制做异常分析。
+    - CLARIFICATION：采购意图明确但关键参数缺失，由 orchestrator 返回
+      结构化追问而不是触发分析。``missing_params`` 列出缺失字段。
+    - META：系统能力/数据元信息询问（"你能做什么"/"支持哪些场景"），
+      由模板答复，零 LLM 调用。
+    - RECALL：明确回溯历史会话内容（"上次的结果呢"），走 ReAct 但跳过
+      实体继承与长期记忆写入，避免循环引用。
+    - CHITCHAT：闲聊/问候/非业务/否定确认等真·非分析查询，友好拒答。
+    - OUT_OF_SCOPE：业务相关但本系统不覆盖（如"库存周转"/"销售订单"），
+      友好提示当前支持范围。
+    """
+
+    ANALYSIS = "analysis"
+    DATA_LOOKUP = "data_lookup"
+    CLARIFICATION = "clarification"
+    META = "meta"
+    RECALL = "recall"
+    CHITCHAT = "chitchat"
+    OUT_OF_SCOPE = "out_of_scope"
 
 
 @dataclass
@@ -17,8 +47,14 @@ class QuerySignal:
 
     Attributes:
         raw_query: 用户原始查询文本。
-        keywords: 提取的业务关键词列表。
+        intent_kind: 意图大类（见 :class:`IntentKind`）。默认为 ANALYSIS
+            以保持向后兼容——旧路径只关心 analysis_type。
+        keywords: 提取的业务关键词列表（intent_kind=ANALYSIS 时为
+            AnalysisType 的字符串值；其他 kind 时为对应 sentinel）。
         entities: 识别的业务实体（supplier_id / po_number 等）。
+        missing_params: intent_kind=CLARIFICATION 时填，列出缺失的关键
+            参数名（``supplier_id`` / ``time_range`` / ``analysis_scope`` 等），
+            供 orchestrator 渲染追问语句。
         time_range_days: 提取的时间范围（天），None 表示未识别。
         route_level: 命中的路由层级（1 / 2 / 3）。
         confidence: 路由置信度（0.0~1.0）。
@@ -26,8 +62,10 @@ class QuerySignal:
     """
 
     raw_query: str
+    intent_kind: IntentKind = IntentKind.ANALYSIS
     keywords: list[str] = field(default_factory=list)
     entities: dict[str, Any] = field(default_factory=dict)
+    missing_params: list[str] = field(default_factory=list)
     time_range_days: int | None = None
     route_level: int = 0
     confidence: float = 0.0

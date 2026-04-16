@@ -21,7 +21,20 @@ import yaml
 from api.schemas.analysis import AnalysisType
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
-from core.orchestrator.signal import QuerySignal
+from core.orchestrator.signal import IntentKind, QuerySignal
+
+# L2/L3 输出的 sentinel 字符串（写入 ``signal.keywords[0]``，与 AnalysisType
+# 枚举共用同一字段，便于 trace 展示与 orchestrator 分支判断）。
+_KW_DATA_LOOKUP = "data_lookup"
+_KW_META = "meta"
+_KW_CHITCHAT = "chitchat"
+_KW_OUT_OF_SCOPE = "out_of_scope"
+_KW_CLARIFICATION = "clarification"
+_KW_RECALL = "recall"
+
+# L1 / L2 / L3 默认置信度（用于 bypass 命中或 sentinel 信号）
+_BYPASS_CONFIDENCE = 0.95
+_LOOKUP_L1_CONFIDENCE = 0.7  # L1 命中 lookup 动词的固定置信度
 
 _logger = get_logger(__name__)
 
@@ -58,9 +71,15 @@ _ROLE_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# ── 非分析意图检测（方案 C：跳过 L1/L2，直达 L3）──────────────────────
+# ── 前置 bypass 检测（按 intent_kind 分类，跳过 L1/L2 直达对应分支） ──
+#
+# 设计原则：bypass 必须能区分 *为什么* 跳过——闲聊（CHITCHAT）和系统能力
+# 询问（META）下游处理完全不同：前者只是友好拒答，后者要返回系统能力清单。
+# 老版本把两者混在 ``_DIRECT_BYPASS_PATTERNS`` 一个布尔判断里，导致
+# orchestrator 拿到 "你能做什么" 也只能输出"不属于 ERP 采购分析范围"，
+# 这是用户体验的回归。
 
-# 回溯/对话引用模式——命中后还需检查是否含分析关键词
+# RECALL：明确回溯历史会话内容
 _RECALL_PATTERNS: list[re.Pattern[str]] = [
     # 时间指代回溯（"之前/刚才/前面"等既可能是回溯也可能是时间范围）
     re.compile(
@@ -84,22 +103,33 @@ _AMBIGUOUS_RECALL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"之前|前面|previous", re.IGNORECASE),
 ]
 
-# 非回溯类 bypass：闲聊/能力询问/否定/确认（直接 bypass，无需二次校验）
-_DIRECT_BYPASS_PATTERNS: list[re.Pattern[str]] = [
-    # 闲聊/问候/感谢
-    re.compile(r"^(你好|您好|hello|hi|hey|谢谢|感谢|thanks|thank you|再见|拜拜|bye)\s*[!！。.]*$", re.IGNORECASE),
-    # 能力/帮助询问
+# CHITCHAT：闲聊/问候/否定/纯确认（语义上明确"非业务"）
+_CHITCHAT_PATTERNS: list[re.Pattern[str]] = [
+    # 问候/感谢/告别
     re.compile(
-        r"你能做什么|你会什么|有什么功能|怎么用|帮助|help|"
-        r"支持哪些|可以做什么|有哪些分析",
+        r"^(你好|您好|hello|hi|hey|谢谢|感谢|thanks|thank you|再见|拜拜|bye)\s*[!！。.]*$",
+        re.IGNORECASE,
     ),
     # 否定/取消
-    re.compile(r"^(不需要了|算了|取消|不用了|没事了|好的|知道了|明白了|ok|okay)\s*[。.!！]*$", re.IGNORECASE),
+    re.compile(
+        r"^(不需要了|算了|取消|不用了|没事了|好的|知道了|明白了|ok|okay)\s*[。.!！]*$",
+        re.IGNORECASE,
+    ),
     # 纯确认/追问（无实质分析内容）
     re.compile(r"^(是的|对|嗯|好|可以|继续|然后呢|接下来呢|还有呢|详细说说)\s*[？?。.!！]*$"),
 ]
 
-# 分析关键词——查询中含这些词说明用户有具体分析意图，不应被 bypass
+# META：系统能力 / 数据元信息询问（应由模板答系统支持范围，不是拒答）
+_META_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"你能做什么|你会什么|有什么功能|怎么用|帮助|^help\b|"
+        r"支持哪些|可以做什么|有哪些分析|有哪些功能|如何使用|怎么使用",
+        re.IGNORECASE,
+    ),
+]
+
+# 分析关键词——查询中含这些词说明用户有具体业务意图，
+# 用于"歧义回溯词"二次校验，避免把 "分析之前30天的价格差异" 误判为回溯。
 _ANALYSIS_KEYWORDS: set[str] = {
     # 分析动词
     "分析", "检查", "查看", "查询", "评估", "计算", "统计", "对比", "比较", "审查",
@@ -115,6 +145,34 @@ _ANALYSIS_KEYWORDS: set[str] = {
     "重复", "周期", "集中度", "风险",
 }
 
+# ── L1 lookup 规则（事实查询动词 + 业务实体） ─────────────────────────
+#
+# 当 query 同时命中下面两个集合（动词 + 实体），但又不属于任何分析规则时，
+# 判为 DATA_LOOKUP（事实查询）。例如 "查询最新的一个 po"——这是
+# 优化前能 work 但优化后被拒答的核心 case。
+
+_LOOKUP_VERBS: set[str] = {
+    "查", "查询", "查看", "查一下", "看下", "看看", "列出", "列一下", "拉一下",
+    "显示", "show", "list", "get", "find", "fetch", "lookup", "search",
+}
+
+_LOOKUP_ENTITIES: set[str] = {
+    # 业务单据/对象（中英）
+    "po", "po号", "采购单", "采购订单", "订单",
+    "发票", "invoice", "inv",
+    "付款", "付款单", "payment",
+    "收货", "收货单", "receipt", "rcv", "gr",
+    "供应商", "supplier", "sup",
+    "合同", "contract",
+    "物料", "material", "item",
+}
+
+# 事实查询动作的修饰词（"最新/最近/最后/全部"等，提升判定精度）
+_LOOKUP_MODIFIERS: set[str] = {
+    "最新", "最近的", "最后", "最后一", "全部", "所有", "前", "后",
+    "latest", "recent", "newest", "all", "first", "last",
+}
+
 # L2 置信度长度比打折阈值（方案 D）
 _L2_LENGTH_RATIO_THRESHOLD = 0.4
 _L2_LENGTH_RATIO_DISCOUNT = 0.7
@@ -126,37 +184,72 @@ def _has_analysis_keywords(query: str) -> bool:
     return any(kw in q_lower for kw in _ANALYSIS_KEYWORDS)
 
 
-def _is_non_analysis_query(query: str) -> bool:
-    """检测 query 是否为非分析意图（会话回溯/闲聊/操作指令等）。
+def _classify_bypass(query: str) -> IntentKind | None:
+    """前置 bypass 分类——若命中则返回对应 ``IntentKind``，否则返回 None。
 
-    判断逻辑：
-    1. 直接 bypass 类（闲聊/能力询问/否定/确认）→ 直接返回 True
-    2. 明确回溯类（上次/刚才/结果呢/再说一遍）→ 直接返回 True
-       （"上次分析的结果呢"中的"分析"是回溯上下文，不是分析指令）
-    3. 歧义回溯类（之前/前面/previous）→ 不含分析关键词时返回 True
-       （"分析之前30天的价格差异"中"之前"是时间修饰，不是回溯）
-    4. 其余 → 返回 False
+    与老版本 ``_is_non_analysis_query`` 的差异：返回**为什么 bypass**，
+    而不是简单的"是否 bypass"。orchestrator 据此选择不同下游处理：
+
+    - META → 模板答系统能力
+    - CHITCHAT → 友好拒答
+    - RECALL → 走 ReAct 让 Agent 看短期记忆
+
+    优先级：CHITCHAT > META > RECALL（短问候比能力询问更具排他性）。
+
+    判定规则：
+    1. CHITCHAT 严格匹配（``^...$``）：避免把 "你好，分析一下三路匹配" 这种
+       开头问候 + 真实意图的查询误判为闲聊。
+    2. META 子串匹配（"你能做什么 / 支持哪些"）。
+    3. 明确回溯（"上次 / 刚才 / 结果呢"）→ RECALL，不做分析关键词校验。
+    4. 歧义回溯（"之前 / previous"）→ 仅当不含分析关键词时判 RECALL，
+       避免误吃 "分析之前 30 天的价格差异" 中的时间修饰用法。
     """
     q = query.strip()
 
-    # 直接 bypass 类
-    for pattern in _DIRECT_BYPASS_PATTERNS:
+    for pattern in _CHITCHAT_PATTERNS:
         if pattern.search(q):
-            return True
+            return IntentKind.CHITCHAT
 
-    # 明确回溯类：语义明确是回溯，直接 bypass（不做分析关键词校验）
+    for pattern in _META_PATTERNS:
+        if pattern.search(q):
+            return IntentKind.META
+
     for pattern in _RECALL_PATTERNS:
         if pattern.search(q):
-            return True
+            return IntentKind.RECALL
 
-    # 歧义回溯类：需要排除"时间范围修饰"用法
     for pattern in _AMBIGUOUS_RECALL_PATTERNS:
         if pattern.search(q):
             if not _has_analysis_keywords(q):
-                return True
-            return False  # 含分析关键词（如"分析之前30天的价格差异"），不 bypass
+                return IntentKind.RECALL
+            return None
 
-    return False
+    return None
+
+
+def _is_non_analysis_query(query: str) -> bool:
+    """旧接口兼容：是否非分析意图（会话回溯/闲聊/META 等）。
+
+    保留为薄壳，内部委托给 :func:`_classify_bypass`。orchestrator 中仍有
+    历史调用点（指代消解、长期记忆写入跳过等）依赖它做布尔判断。
+    """
+    return _classify_bypass(query) is not None
+
+
+def _looks_like_data_lookup(query: str) -> bool:
+    """启发式判断：query 是否为 DATA_LOOKUP（纯事实查询）。
+
+    判定标准：同时包含 lookup 动词与业务实体；或者包含修饰词（最新/最近）
+    与业务实体（"最新的 PO 是哪一个"）。
+
+    注意：本函数仅在 query **未命中任何 analysis 规则**时被调用，所以
+    不需要担心和分析意图冲突——L1 优先做 analysis 判定。
+    """
+    q_lower = query.lower()
+    has_verb = any(v in q_lower for v in _LOOKUP_VERBS)
+    has_entity = any(e in q_lower for e in _LOOKUP_ENTITIES)
+    has_modifier = any(m in q_lower for m in _LOOKUP_MODIFIERS)
+    return (has_verb and has_entity) or (has_modifier and has_entity)
 
 
 # ── Level 1 规则库 ────────────────────────────────────────────────────
@@ -352,56 +445,71 @@ class IntentRouter:
         }
 
         with record_span("intent", "route_decision") as attrs:
-            # 前置过滤：非分析意图的查询（回溯/闲聊/操作指令）跳过 L1/L2
-            bypass = _is_non_analysis_query(query)
-            trace_data["bypass_l1_l2"] = bypass
+            # 前置 bypass 分类：CHITCHAT / META / RECALL 跳过 L1/L2
+            bypass_kind = _classify_bypass(query)
+            trace_data["bypass_l1_l2"] = bypass_kind is not None
+            trace_data["bypass_kind"] = bypass_kind.value if bypass_kind else None
 
-            if not bypass:
-                # Level 1：关键词命中率
-                with record_span("intent.l1", "keyword_match") as l1_attrs:
-                    l1_scores = self._evaluate_all_rules(query)
-                    trace_data["l1_scores"] = l1_scores
-                    signal = self._try_level1(query, params)
-                    l1_attrs["rule_count"] = len(l1_scores)
-                    l1_attrs["matched_rules"] = [
-                        s["rule"] for s in l1_scores if s.get("matched")
-                    ]
-                    l1_attrs["hit"] = signal is not None
-                    if signal is not None:
-                        l1_attrs["result_type"] = (
-                            signal.keywords[0] if signal.keywords else ""
-                        )
-                        l1_attrs["confidence"] = signal.confidence
+            # CHITCHAT / META / RECALL 直接生成 sentinel signal，不跑 L1/L2/L3
+            # （这三类下游处理完全确定：模板答 / 拒答 / 回 ReAct 看短期记忆）
+            if bypass_kind is not None:
+                signal = self._build_bypass_signal(
+                    query=query,
+                    intent_kind=bypass_kind,
+                    params=params,
+                )
+                trace_data["hit_level"] = 0
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
+
+            # Level 1：关键词命中率
+            with record_span("intent.l1", "keyword_match") as l1_attrs:
+                l1_scores = self._evaluate_all_rules(query)
+                trace_data["l1_scores"] = l1_scores
+                signal = self._try_level1(query, params)
+                l1_attrs["rule_count"] = len(l1_scores)
+                l1_attrs["matched_rules"] = [
+                    s["rule"] for s in l1_scores if s.get("matched")
+                ]
+                l1_attrs["hit"] = signal is not None
                 if signal is not None:
-                    trace_data["hit_level"] = 1
-                    trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                    trace_data["confidence"] = signal.confidence
-                    trace_data["reasoning"] = signal.reasoning
-                    attrs.update(trace_data)
-                    return signal
-
-                # Level 2：Chroma 语义匹配
-                with record_span("intent.l2", "semantic_search") as l2_attrs:
-                    l2_results = self._search_seeds_for_trace(query)
-                    trace_data["l2_results"] = l2_results
-                    signal = self._try_level2(query, params)
-                    l2_attrs["top_k"] = len(l2_results)
-                    l2_attrs["top_similarity"] = (
-                        l2_results[0]["similarity"] if l2_results else None
+                    l1_attrs["result_type"] = (
+                        signal.keywords[0] if signal.keywords else ""
                     )
-                    l2_attrs["hit"] = signal is not None
-                    if signal is not None:
-                        l2_attrs["result_type"] = (
-                            signal.keywords[0] if signal.keywords else ""
-                        )
-                        l2_attrs["confidence"] = signal.confidence
+                    l1_attrs["confidence"] = signal.confidence
+            if signal is not None:
+                trace_data["hit_level"] = 1
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
+
+            # Level 2：Chroma 语义匹配
+            with record_span("intent.l2", "semantic_search") as l2_attrs:
+                l2_results = self._search_seeds_for_trace(query)
+                trace_data["l2_results"] = l2_results
+                signal = self._try_level2(query, params)
+                l2_attrs["top_k"] = len(l2_results)
+                l2_attrs["top_similarity"] = (
+                    l2_results[0]["similarity"] if l2_results else None
+                )
+                l2_attrs["hit"] = signal is not None
                 if signal is not None:
-                    trace_data["hit_level"] = 2
-                    trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                    trace_data["confidence"] = signal.confidence
-                    trace_data["reasoning"] = signal.reasoning
-                    attrs.update(trace_data)
-                    return signal
+                    l2_attrs["result_type"] = (
+                        signal.keywords[0] if signal.keywords else ""
+                    )
+                    l2_attrs["confidence"] = signal.confidence
+            if signal is not None:
+                trace_data["hit_level"] = 2
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
 
             # Level 3：LLM 分类（注入角色偏好）
             with record_span("intent.l3", "llm_classify") as l3_attrs:
@@ -462,6 +570,9 @@ class IntentRouter:
 
         对每条规则计算命中率 = 命中关键词数 / 规则关键词总数。
         使用子串匹配（kw in query_lower），适配中文无空格分词场景。
+
+        若 analysis 规则全部 miss，则尝试判定 DATA_LOOKUP（lookup 动词 +
+        业务实体）——这是 "查询最新的一个 po" 这类纯事实查询的兜底入口。
         """
         query_lower = query.lower()
 
@@ -477,18 +588,69 @@ class IntentRouter:
                 best_score = hit_rate
                 best_rule = rule
 
-        if best_rule is None:
-            return None
+        if best_rule is not None:
+            analysis_type: AnalysisType = best_rule["analysis_type"]
+            return QuerySignal(
+                raw_query=query,
+                intent_kind=IntentKind.ANALYSIS,
+                keywords=[analysis_type.value],
+                entities=params,
+                time_range_days=params.get("days"),
+                route_level=1,
+                confidence=round(best_score, 3),
+                reasoning=f"L1 关键词命中率 {best_score:.1%}，匹配 {analysis_type.value}",
+            )
 
-        analysis_type: AnalysisType = best_rule["analysis_type"]
+        # analysis 规则未命中——尝试 DATA_LOOKUP 兜底
+        if _looks_like_data_lookup(query):
+            return QuerySignal(
+                raw_query=query,
+                intent_kind=IntentKind.DATA_LOOKUP,
+                keywords=[_KW_DATA_LOOKUP],
+                entities=params,
+                time_range_days=params.get("days"),
+                route_level=1,
+                confidence=_LOOKUP_L1_CONFIDENCE,
+                reasoning="L1 lookup 动词+实体命中，判定为事实查询",
+            )
+
+        return None
+
+    # ── Bypass sentinel signal 构造 ──────────────────────────────────
+
+    def _build_bypass_signal(
+        self,
+        *,
+        query: str,
+        intent_kind: IntentKind,
+        params: dict[str, Any],
+    ) -> QuerySignal:
+        """为 CHITCHAT / META / RECALL 构造 sentinel 信号。
+
+        三类下游处理由 orchestrator 完成：
+        - CHITCHAT → 友好拒答模板
+        - META → 系统能力清单模板
+        - RECALL → ReAct 路径，让 Agent 看短期记忆
+        """
+        keyword_map = {
+            IntentKind.CHITCHAT: _KW_CHITCHAT,
+            IntentKind.META: _KW_META,
+            IntentKind.RECALL: _KW_RECALL,
+        }
+        reasoning_map = {
+            IntentKind.CHITCHAT: "前置 bypass：闲聊/问候/否定确认",
+            IntentKind.META: "前置 bypass：系统能力/帮助询问",
+            IntentKind.RECALL: "前置 bypass：明确回溯历史会话",
+        }
         return QuerySignal(
             raw_query=query,
-            keywords=[analysis_type.value],
+            intent_kind=intent_kind,
+            keywords=[keyword_map[intent_kind]],
             entities=params,
             time_range_days=params.get("days"),
-            route_level=1,
-            confidence=round(best_score, 3),
-            reasoning=f"L1 关键词命中率 {best_score:.1%}，匹配 {analysis_type.value}",
+            route_level=0,
+            confidence=_BYPASS_CONFIDENCE,
+            reasoning=reasoning_map[intent_kind],
         )
 
     # ── Level 2：Chroma 种子库语义匹配 ──────────────────────────────
@@ -572,6 +734,45 @@ class IntentRouter:
             return None
 
         matched_type_str: str = best.get("metadata", {}).get("analysis_type", "")
+
+        # 种子库支持 sentinel 类目：data_lookup / meta（非 AnalysisType 枚举值）
+        if matched_type_str == _KW_DATA_LOOKUP:
+            _logger.info(
+                "L2 matched data_lookup: similarity=%.3f seed='%s'",
+                similarity, (best.get("text", "") or "")[:30],
+            )
+            return QuerySignal(
+                raw_query=query,
+                intent_kind=IntentKind.DATA_LOOKUP,
+                keywords=[_KW_DATA_LOOKUP],
+                entities=params,
+                time_range_days=params.get("days"),
+                route_level=2,
+                confidence=round(similarity, 3),
+                reasoning=(
+                    f"L2 语义匹配（事实查询）'{best.get('text', '')[:30]}…'，"
+                    f"相似度 {similarity:.1%}"
+                ),
+            )
+
+        if matched_type_str == _KW_META:
+            _logger.info(
+                "L2 matched meta: similarity=%.3f seed='%s'",
+                similarity, (best.get("text", "") or "")[:30],
+            )
+            return QuerySignal(
+                raw_query=query,
+                intent_kind=IntentKind.META,
+                keywords=[_KW_META],
+                entities=params,
+                route_level=2,
+                confidence=round(similarity, 3),
+                reasoning=(
+                    f"L2 语义匹配（系统能力）'{best.get('text', '')[:30]}…'，"
+                    f"相似度 {similarity:.1%}"
+                ),
+            )
+
         try:
             analysis_type = AnalysisType(matched_type_str)
         except ValueError:
@@ -583,6 +784,7 @@ class IntentRouter:
         )
         return QuerySignal(
             raw_query=query,
+            intent_kind=IntentKind.ANALYSIS,
             keywords=[analysis_type.value],
             entities=params,
             time_range_days=params.get("days"),
@@ -596,11 +798,19 @@ class IntentRouter:
 
     # ── Level 3：LLM 分类 ───────────────────────────────────────────
 
-    _LLM_CLASSIFY_PROMPT = """你是 ERP 采购分析系统的意图分类器。根据用户查询，判断最匹配的分析类型。
+    _LLM_CLASSIFY_PROMPT = """你是 ERP 采购分析系统的意图分类器。根据用户查询，先判定 intent_kind（意图大类），再在需要时给出具体 analysis_type（分析子类型）。
 
 当前日期：{current_date}（{timezone}）。"最近 N 天"/"本月"/"上周"等相对时间以此为基准计算 days 参数。
 {role_section}
-可选分析类型：
+## intent_kind 枚举（先选这个，再决定其他字段）
+- analysis: 用户要做某种异常检测/合规检查/绩效评估等"分析"工作（必须能落入下面 11 类 analysis_type 之一）
+- data_lookup: 纯事实查询/单据检索（"查最新 PO"/"列出 SUP-001 的发票"/"看看这单的金额"），不涉及异常或评估
+- clarification: 采购分析意图明确但关键参数严重缺失（如只说"做个三路匹配"没给任何范围/对象，需要追问后才能执行）
+- meta: 系统能力或数据元信息询问（"你支持哪些分析"/"数据更新到什么时候"）
+- chitchat: 闲聊/问候/与采购无关的常识/情感问答（"今天天气"/"hi"）
+- out_of_scope: 业务相关但本系统不覆盖的场景（如"销售订单分析"/"库存周转"/"HR 数据"）
+
+## analysis_type 枚举（仅当 intent_kind=analysis 时填，否则置空字符串）
 - three_way_match: 采购订单、收货单、发票的三单匹配异常检查
 - price_variance: 实际采购价格与合同价/标准价的偏差分析
 - payment_compliance: 付款逾期、提前付款、折扣滥用等合规检查
@@ -611,24 +821,34 @@ class IntentRouter:
 - discount_utilization: 早付折扣利用率分析
 - po_cycle_time: 采购订单全流程周期分析
 - vendor_concentration: 供应商集中度与采购依赖风险分析
-- comprehensive: 明确需要跨上述多个维度组合分析的查询（如"综合评估供应商风险"）
-- unknown: 非 ERP 采购分析意图（闲聊、问候、无关话题、常识/情感问答、信息严重不足无法归入任何采购分析场景）
+- comprehensive: 明确需要跨多个维度组合分析（如"综合评估供应商风险"）
 
-判定规则：
-- 优先匹配具体分析类型（1-10）
-- 只有明确需要跨多个维度时才选 comprehensive；"模糊但相关"不要强行归为 comprehensive
-- 非采购分析查询一律返回 unknown；不要强行归入其他类型
+## 判定规则
+1. 先判 intent_kind，再决定其他字段。**不要把"信息不足"塞进 chitchat/out_of_scope，应判 clarification 或 data_lookup**。
+2. 用户在"查/查询/查看/列出/最新/最近"等动词配合业务实体（PO/发票/供应商/订单等）时，优先判 data_lookup，而不是强行归入某个 analysis 类型。
+3. 只有"明确无业务关联"的才判 chitchat（如问候/天气/闲聊）；"业务相关但缺细节"判 clarification；"业务相关但本系统不支持"判 out_of_scope。
+4. analysis 类型选最具体的；只有明确需要跨多个维度时才选 comprehensive，"模糊但相关"不要强行归为 comprehensive。
+5. clarification 时在 missing_params 中列出缺失字段（取值：``time_range`` / ``supplier_id`` / ``po_number`` / ``analysis_scope`` 中的一个或多个）。
 
-confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9）：
-- >0.9: 查询直接命中某类型核心名词（如"三路匹配"/"发票重复"），语义无歧义
-- 0.7-0.9: 语义强相关需要推断（如"发票和采购订单对不上"→ three_way_match）
+## confidence 判定锚点（严格按区间给分，不要一律给 0.8/0.9）
+- >0.9: 查询直接命中某 intent_kind+type 的核心名词（如"三路匹配"/"重复发票"），语义无歧义
+- 0.7-0.9: 语义强相关需要推断（如"发票和收货对不上"→analysis/three_way_match）
 - 0.5-0.7: 多类共存或表述模糊
-- <0.5: 几乎无关或信息严重不足，考虑 unknown
+- <0.5: 信息严重不足；这种情况下倾向选 clarification 而不是降低 analysis 的 confidence
 
-输出纯 JSON（不要 markdown 代码块、不要前后说明，第一个字符必须是 `{{`）：
-{{"type": "<枚举值>", "confidence": 0.0到1.0, "supplier_id": null或字符串, "po_number": null或字符串, "days": null或整数}}
+## 参数抽取规则
+- 只抽取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null。
 
-参数抽取：只抽取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null。
+## 输出格式（输出**纯 JSON**，不要 markdown 代码块、不要前后说明，第一个字符必须是 `{{`）
+{{"intent_kind": "<枚举值>", "type": "<analysis_type 枚举值或空串>", "confidence": 0.0到1.0, "missing_params": [...], "supplier_id": null或字符串, "po_number": null或字符串, "days": null或整数}}
+
+## 边界 case 示例
+- "查询最新的一个 PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
+- "做一下三路匹配" → {{"intent_kind":"clarification","type":"three_way_match","confidence":0.85,"missing_params":["time_range"],"supplier_id":null,"po_number":null,"days":null}}
+- "你支持哪些采购分析" → {{"intent_kind":"meta","type":"","confidence":0.95,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
+- "今天天气怎么样" → {{"intent_kind":"chitchat","type":"","confidence":0.95,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
+- "帮我看看销售订单的回款情况" → {{"intent_kind":"out_of_scope","type":"","confidence":0.9,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
+- "分析最近 30 天供应商 SUP-001 的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"missing_params":[],"supplier_id":"SUP-001","po_number":null,"days":30}}
 
 用户查询：{query}"""
 
@@ -706,26 +926,6 @@ confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9�
             raw = raw.strip().rstrip("```").strip()
 
             data = json.loads(raw)
-            analysis_type_str: str = data.get("type", "comprehensive")
-
-            # "unknown" 表示非 ERP 采购分析意图，用 sentinel keyword 透传给 orchestrator，
-            # 由上层决定是否早退出；不进入 AnalysisType 枚举转换。
-            if analysis_type_str == "unknown":
-                confidence: float = data.get("confidence", 0.5)
-                return QuerySignal(
-                    raw_query=query,
-                    keywords=["unknown"],
-                    entities=params,
-                    time_range_days=params.get("days"),
-                    route_level=3,
-                    confidence=round(confidence, 3),
-                    reasoning="L3 判定为非 ERP 采购分析意图（unknown）",
-                )
-
-            try:
-                analysis_type = AnalysisType(analysis_type_str)
-            except ValueError:
-                analysis_type = AnalysisType.COMPREHENSIVE
 
             # LLM 提取的参数合并到正则提取的参数上（正则优先）
             llm_params: dict[str, Any] = {}
@@ -734,30 +934,49 @@ confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9�
             if data.get("po_number"):
                 llm_params["po_number"] = data["po_number"]
             if data.get("days") is not None:
-                llm_params["days"] = int(data["days"])
+                try:
+                    llm_params["days"] = int(data["days"])
+                except (TypeError, ValueError):
+                    pass
 
-            merged_params = {**llm_params, **params}  # 正则提取的覆盖 LLM 的
-            confidence: float = data.get("confidence", 0.5)
+            merged_params = {**llm_params, **params}
+            confidence: float = float(data.get("confidence", 0.5))
 
-            _logger.info(
-                "L3 classified: type=%s confidence=%.3f entities=%s",
-                analysis_type.value, confidence,
-                {k: v for k, v in merged_params.items() if v},
-            )
-            return QuerySignal(
-                raw_query=query,
-                keywords=[analysis_type.value],
-                entities=merged_params,
-                time_range_days=merged_params.get("days"),
-                route_level=3,
-                confidence=round(confidence, 3),
-                reasoning=f"L3 LLM 分类为 {analysis_type.value}，置信度 {confidence:.1%}",
+            # intent_kind 字段（新版 prompt）；旧版无此字段时根据 type 兼容推断
+            intent_kind_str: str = (data.get("intent_kind") or "").strip()
+            analysis_type_str: str = (data.get("type") or "").strip()
+
+            # 兼容老 prompt 输出（仅有 type，没有 intent_kind）
+            if not intent_kind_str:
+                if analysis_type_str == "unknown" or not analysis_type_str:
+                    intent_kind_str = IntentKind.CLARIFICATION.value
+                else:
+                    intent_kind_str = IntentKind.ANALYSIS.value
+
+            try:
+                intent_kind = IntentKind(intent_kind_str)
+            except ValueError:
+                _logger.warning(
+                    "L3 returned unknown intent_kind=%r, fallback to ANALYSIS",
+                    intent_kind_str,
+                )
+                intent_kind = IntentKind.ANALYSIS
+
+            # 各 intent_kind 的 keywords 与 reasoning 构造
+            return self._build_l3_signal(
+                query=query,
+                intent_kind=intent_kind,
+                analysis_type_str=analysis_type_str,
+                confidence=confidence,
+                missing_params=data.get("missing_params") or [],
+                merged_params=merged_params,
             )
 
         except Exception as exc:
             _logger.warning("L3 LLM classify failed: %s, fallback to COMPREHENSIVE", exc)
             return QuerySignal(
                 raw_query=query,
+                intent_kind=IntentKind.ANALYSIS,
                 keywords=[AnalysisType.COMPREHENSIVE.value],
                 entities=params,
                 time_range_days=params.get("days"),
@@ -765,6 +984,120 @@ confidence 判定锚点（严格按以下区间给分，不要一律给 0.8/0.9�
                 confidence=0.0,
                 reasoning=f"L3 LLM 分类失败（{exc}），降级为 COMPREHENSIVE",
             )
+
+    def _build_l3_signal(
+        self,
+        *,
+        query: str,
+        intent_kind: IntentKind,
+        analysis_type_str: str,
+        confidence: float,
+        missing_params: list[str],
+        merged_params: dict[str, Any],
+    ) -> QuerySignal:
+        """根据 L3 输出的 intent_kind 构造对应 QuerySignal。
+
+        各 intent_kind 的 keywords 字段与 sentinel 常量对齐，方便 orchestrator
+        与 trace 系统统一识别。
+        """
+        common = dict(
+            raw_query=query,
+            entities=merged_params,
+            time_range_days=merged_params.get("days"),
+            route_level=3,
+            confidence=round(max(0.0, min(1.0, confidence)), 3),
+        )
+        # 清洗 missing_params 列表（防御 LLM 输出非字符串）
+        cleaned_missing = [
+            str(p).strip() for p in missing_params if isinstance(p, (str, int))
+        ]
+
+        if intent_kind == IntentKind.ANALYSIS:
+            try:
+                analysis_type = AnalysisType(analysis_type_str)
+            except ValueError:
+                analysis_type = AnalysisType.COMPREHENSIVE
+            _logger.info(
+                "L3 classified: kind=analysis type=%s confidence=%.3f entities=%s",
+                analysis_type.value, confidence,
+                {k: v for k, v in merged_params.items() if v},
+            )
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.ANALYSIS,
+                keywords=[analysis_type.value],
+                reasoning=f"L3 LLM 分类为 {analysis_type.value}，置信度 {confidence:.1%}",
+            )
+
+        if intent_kind == IntentKind.DATA_LOOKUP:
+            _logger.info(
+                "L3 classified: kind=data_lookup confidence=%.3f entities=%s",
+                confidence, {k: v for k, v in merged_params.items() if v},
+            )
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.DATA_LOOKUP,
+                keywords=[_KW_DATA_LOOKUP],
+                reasoning=f"L3 判定为事实查询，置信度 {confidence:.1%}",
+            )
+
+        if intent_kind == IntentKind.CLARIFICATION:
+            # 若 LLM 同时给了 analysis_type 提示，保留下来供追问语句使用
+            kw = _KW_CLARIFICATION
+            try:
+                AnalysisType(analysis_type_str)  # 仅校验
+                kw = analysis_type_str  # 借用 analysis_type 字符串作为 hint
+            except ValueError:
+                pass
+            _logger.info(
+                "L3 classified: kind=clarification missing=%s confidence=%.3f",
+                cleaned_missing, confidence,
+            )
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.CLARIFICATION,
+                keywords=[kw],
+                missing_params=cleaned_missing,
+                reasoning=(
+                    f"L3 判定为信息不足，缺失参数 {cleaned_missing}，"
+                    f"置信度 {confidence:.1%}"
+                ),
+            )
+
+        if intent_kind == IntentKind.META:
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.META,
+                keywords=[_KW_META],
+                reasoning="L3 判定为系统能力/帮助询问",
+            )
+
+        if intent_kind == IntentKind.CHITCHAT:
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.CHITCHAT,
+                keywords=[_KW_CHITCHAT],
+                reasoning="L3 判定为闲聊/非业务查询",
+            )
+
+        if intent_kind == IntentKind.OUT_OF_SCOPE:
+            return QuerySignal(
+                **common,
+                intent_kind=IntentKind.OUT_OF_SCOPE,
+                keywords=[_KW_OUT_OF_SCOPE],
+                reasoning="L3 判定为业务相关但本系统不覆盖",
+            )
+
+        # RECALL 不应由 L3 输出（前置 bypass 已处理），保险起见按 ANALYSIS 兜底
+        _logger.warning(
+            "L3 returned RECALL via LLM (unexpected), treating as COMPREHENSIVE"
+        )
+        return QuerySignal(
+            **common,
+            intent_kind=IntentKind.ANALYSIS,
+            keywords=[AnalysisType.COMPREHENSIVE.value],
+            reasoning="L3 RECALL 兜底为 COMPREHENSIVE",
+        )
 
     # ── 辅助方法 ─────────────────────────────────────────────────────
 

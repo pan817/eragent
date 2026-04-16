@@ -158,64 +158,249 @@ class TestOrchestratorReActPath:
         assert result.session_id == "my-session"
 
 
-class TestOrchestratorUnknownIntent:
-    """L3 判定为 unknown（非采购分析）时的早退出分支。"""
+class TestOrchestratorIntentKindBranches:
+    """``intent_kind`` 各分支的早退/路由行为测试。"""
+
+    @staticmethod
+    def _make_signal(
+        intent_kind: "IntentKind",
+        *,
+        keywords: list[str] | None = None,
+        missing_params: list[str] | None = None,
+        confidence: float = 0.9,
+        route_level: int = 0,
+        analysis_type_kw: str = "",
+    ) -> QuerySignal:
+        from core.orchestrator.signal import IntentKind as _IK
+        kw_default = {
+            _IK.CHITCHAT: ["chitchat"],
+            _IK.META: ["meta"],
+            _IK.OUT_OF_SCOPE: ["out_of_scope"],
+            _IK.CLARIFICATION: [analysis_type_kw or "clarification"],
+            _IK.DATA_LOOKUP: ["data_lookup"],
+            _IK.RECALL: ["recall"],
+            _IK.ANALYSIS: [analysis_type_kw or AnalysisType.COMPREHENSIVE.value],
+        }
+        return QuerySignal(
+            raw_query="x",
+            intent_kind=intent_kind,
+            keywords=keywords if keywords is not None else kw_default[intent_kind],
+            entities={},
+            missing_params=missing_params or [],
+            route_level=route_level,
+            confidence=confidence,
+            reasoning=f"test {intent_kind.value}",
+        )
 
     @pytest.mark.asyncio
-    async def test_unknown_intent_early_return(self, settings: Settings) -> None:
-        """signal.keywords==['unknown'] 且未指定 analysis_type 时应早返回，不触发 agent。"""
+    async def test_chitchat_early_return(self, settings: Settings) -> None:
+        from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
         mock_agent = _make_mock_agent(return_value={})
         orch._agent = mock_agent
 
-        unknown_signal = QuerySignal(
-            raw_query="天气怎么样",
-            keywords=["unknown"],
-            entities={},
-            route_level=3,
-            confidence=0.7,
-            reasoning="L3 判定为非 ERP 采购分析意图（unknown）",
-        )
+        signal = self._make_signal(IntentKind.CHITCHAT)
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(query="你好"))
 
-        with patch.object(orch._intent_router, "route", return_value=unknown_signal):
-            request = AnalysisRequest(query="今天天气怎么样")
-            result = await orch.analyze(request)
-
-        # 成功返回但不触发 agent
         assert result.status == AnalysisStatus.SUCCESS
         mock_agent.run.assert_not_called()
-        # 报告说明不属于分析范围
+        assert result.summary.get("route_type") == "chitchat"
         assert "采购分析" in result.report_markdown
-        # summary 打标非分析
-        assert result.summary.get("route_type") == "non_analysis"
+        # CHITCHAT 模板应有"您好"礼貌问候，区别于"非分析"通用拒答
+        assert "您好" in result.report_markdown
 
     @pytest.mark.asyncio
-    async def test_unknown_intent_overridden_by_explicit_type(
+    async def test_meta_returns_capability_template(self, settings: Settings) -> None:
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={})
+        orch._agent = mock_agent
+
+        signal = self._make_signal(IntentKind.META)
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(query="你能做什么"))
+
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_agent.run.assert_not_called()
+        assert result.summary.get("route_type") == "meta"
+        # META 模板应列出系统能力清单
+        assert "三路匹配" in result.report_markdown
+        assert "价格差异" in result.report_markdown
+
+    @pytest.mark.asyncio
+    async def test_out_of_scope_returns_boundary_message(
         self, settings: Settings
     ) -> None:
-        """用户显式指定 analysis_type 时，即使 L3 判 unknown 也应以用户意图为准。"""
+        from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
-        orch._agent = _make_mock_agent(return_value={
-            "anomalies": [], "supplier_kpis": [], "summary": {},
-            "report_markdown": "# Forced", "completed_tasks": [], "failed_tasks": [],
-        })
+        mock_agent = _make_mock_agent(return_value={})
+        orch._agent = mock_agent
 
-        unknown_signal = QuerySignal(
-            raw_query="x",
-            keywords=["unknown"],
-            entities={},
-            route_level=3,
-            confidence=0.6,
-            reasoning="L3 unknown",
-        )
-
-        with patch.object(orch._intent_router, "route", return_value=unknown_signal):
-            request = AnalysisRequest(
-                query="x", analysis_type=AnalysisType.THREE_WAY_MATCH
+        signal = self._make_signal(IntentKind.OUT_OF_SCOPE)
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(
+                AnalysisRequest(query="帮我看销售订单的回款")
             )
-            result = await orch.analyze(request)
 
-        # 未早退出，走完整流程
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_agent.run.assert_not_called()
+        assert result.summary.get("route_type") == "out_of_scope"
+        assert "超出本系统覆盖范围" in result.report_markdown
+
+    @pytest.mark.asyncio
+    async def test_clarification_with_missing_params_renders_questions(
+        self, settings: Settings
+    ) -> None:
+        """CLARIFICATION 早退时按 missing_params 渲染具体追问，而非泛泛"信息不足"。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={})
+        orch._agent = mock_agent
+
+        signal = self._make_signal(
+            IntentKind.CLARIFICATION,
+            missing_params=["time_range", "supplier_id"],
+            analysis_type_kw=AnalysisType.PRICE_VARIANCE.value,
+            confidence=0.7,
+        )
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(query="价格差异"))
+
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_agent.run.assert_not_called()
+        assert result.summary.get("route_type") == "clarification"
+        assert result.summary.get("missing_params") == ["time_range", "supplier_id"]
+        # 报告应展示具体追问项（时间范围 / 供应商）
+        assert "时间范围" in result.report_markdown
+        assert "供应商" in result.report_markdown
+
+    @pytest.mark.asyncio
+    async def test_clarification_without_missing_params_falls_back(
+        self, settings: Settings
+    ) -> None:
+        """CLARIFICATION 但 missing_params 为空时，给出通用追问。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        orch._agent = _make_mock_agent(return_value={})
+
+        signal = self._make_signal(IntentKind.CLARIFICATION, missing_params=[])
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(query="分析"))
+
+        assert "缺少关键参数" in result.report_markdown
+
+    @pytest.mark.asyncio
+    async def test_data_lookup_runs_react_not_dag(
+        self, settings: Settings
+    ) -> None:
+        """DATA_LOOKUP 应走 ReAct 路径（让 Agent 自由调 query_* 工具），不走 DAG。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [],
+            "supplier_kpis": [],
+            "summary": {"po_count": 1},
+            "report_markdown": "# 最新 PO\n- PO-2024-0001",
+            "completed_tasks": ["query_purchase_orders"],
+            "failed_tasks": [],
+        })
+        orch._agent = mock_agent
+
+        signal = self._make_signal(
+            IntentKind.DATA_LOOKUP,
+            confidence=0.85,
+            route_level=1,
+        )
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(
+                AnalysisRequest(query="查询最新的一个 PO")
+            )
+
+        assert result.status == AnalysisStatus.SUCCESS
+        mock_agent.run.assert_called_once()  # ReAct 路径触发 agent
+        assert "PO-2024-0001" in result.report_markdown
+        assert result.summary.get("route_type") == "ReAct"
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_analysis_falls_back_to_react(
+        self, settings: Settings
+    ) -> None:
+        """L3 ANALYSIS 但 confidence<0.5 时强制走 ReAct，不进 DAG 模板。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [],
+            "summary": {},
+            "report_markdown": "# Result",
+            "completed_tasks": [],
+            "failed_tasks": [],
+        })
+        orch._agent = mock_agent
+
+        signal = self._make_signal(
+            IntentKind.ANALYSIS,
+            keywords=[AnalysisType.THREE_WAY_MATCH.value],
+            analysis_type_kw=AnalysisType.THREE_WAY_MATCH.value,
+            confidence=0.3,
+            route_level=3,
+        )
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(query="模糊的查询"))
+
+        assert result.summary.get("route_type") == "ReAct"
+        mock_agent.run.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_explicit_analysis_type_overrides_data_lookup(
+        self, settings: Settings
+    ) -> None:
+        """用户显式 analysis_type 时，即使 LLM 判 DATA_LOOKUP 也走分析路径。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [], "supplier_kpis": [], "summary": {},
+            "report_markdown": "# Forced",
+            "completed_tasks": [], "failed_tasks": [],
+        })
+        orch._agent = mock_agent
+
+        signal = self._make_signal(IntentKind.DATA_LOOKUP, confidence=0.9)
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(
+                query="查询",
+                analysis_type=AnalysisType.THREE_WAY_MATCH,
+            ))
+
+        # 未走早退，agent 被调用
+        mock_agent.run.assert_called_once()
+        assert result.report_markdown == "# Forced"
+
+    @pytest.mark.asyncio
+    async def test_explicit_type_overrides_clarification_early_return(
+        self, settings: Settings
+    ) -> None:
+        """显式指定 analysis_type 时，CLARIFICATION 也不早退。"""
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [], "supplier_kpis": [], "summary": {},
+            "report_markdown": "# Forced",
+            "completed_tasks": [], "failed_tasks": [],
+        })
+        orch._agent = mock_agent
+
+        signal = self._make_signal(
+            IntentKind.CLARIFICATION,
+            missing_params=["time_range"],
+            analysis_type_kw=AnalysisType.PRICE_VARIANCE.value,
+        )
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(AnalysisRequest(
+                query="x", analysis_type=AnalysisType.PRICE_VARIANCE,
+            ))
+
+        mock_agent.run.assert_called_once()
         assert result.report_markdown == "# Forced"
 
 
