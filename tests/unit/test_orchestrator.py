@@ -1261,7 +1261,8 @@ class TestValidateEntities:
         mock_repo.query_purchase_orders.return_value = []
         params = {"po_number": "PO-9999", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert "po_number" not in params
 
     @pytest.mark.asyncio
@@ -1271,7 +1272,8 @@ class TestValidateEntities:
         mock_repo.query_purchase_orders.return_value = [{"po_number": "PO-001"}]
         params = {"po_number": "PO-001", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert params["po_number"] == "PO-001"
 
     @pytest.mark.asyncio
@@ -1281,7 +1283,8 @@ class TestValidateEntities:
         mock_repo.query_purchase_orders.return_value = []
         params = {"supplier_id": "SUP-999", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert "supplier_id" not in params
 
     @pytest.mark.asyncio
@@ -1291,7 +1294,8 @@ class TestValidateEntities:
         mock_repo.query_invoices.return_value = [{"invoice_number": "INV-OTHER"}]
         params = {"invoice_number": "INV-999", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert "invoice_number" not in params
 
     @pytest.mark.asyncio
@@ -1301,7 +1305,8 @@ class TestValidateEntities:
         mock_repo.query_payments.return_value = []
         params = {"payment_number": "PAY-999", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert "payment_number" not in params
 
     @pytest.mark.asyncio
@@ -1311,7 +1316,8 @@ class TestValidateEntities:
         mock_repo.query_receipts.return_value = [{"receipt_id": "RCV-OTHER"}]
         params = {"receipt_number": "RCV-999", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert "receipt_number" not in params
 
     @pytest.mark.asyncio
@@ -1321,7 +1327,8 @@ class TestValidateEntities:
         mock_repo.query_purchase_orders.side_effect = RuntimeError("db error")
         params = {"po_number": "PO-001", "days": 30}
 
-        await orch._validate_entities(mock_repo, params)
+        from core.orchestrator.entity import validate_entities
+        await validate_entities(mock_repo, params)
         assert params["po_number"] == "PO-001"  # 验证失败保留实体
 
 
