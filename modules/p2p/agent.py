@@ -29,7 +29,7 @@ from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
 from core.observability.middleware import estimate_tokens, record_span
 from core.time_utils import now_cn
-from modules.p2p.model_factory import build_chat_model
+from core.llm.model_factory import build_chat_model
 from modules.p2p.prompts import build_system_prompt, format_long_term_memory
 
 _logger = get_logger(__name__)

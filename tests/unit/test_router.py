@@ -351,7 +351,7 @@ class TestLevel3:
         """
         settings = Settings()
         router = IntentRouter(settings=settings)
-        with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
+        with patch("core.llm.model_factory.build_chat_model") as mock_build:
             router._ensure_llm()
             mock_build.assert_called_once_with(settings.llm_fast, disable_thinking=True)
 

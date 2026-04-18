@@ -26,7 +26,7 @@ class TestReportAgentInit:
 
         agent = ReportAgent(settings=settings)
         mock_llm = MagicMock()
-        with patch("modules.p2p.model_factory.build_chat_model", return_value=mock_llm):
+        with patch("core.llm.model_factory.build_chat_model", return_value=mock_llm):
             result = agent._ensure_llm()
         assert result is mock_llm
         assert agent._ensure_llm() is mock_llm  # 第二次直接返回缓存
@@ -36,7 +36,7 @@ class TestReportAgentInit:
         from modules.p2p.report_agent import ReportAgent
 
         agent = ReportAgent(settings=settings)
-        with patch("modules.p2p.model_factory.build_chat_model") as mock_build:
+        with patch("core.llm.model_factory.build_chat_model") as mock_build:
             agent._ensure_llm()
             # 报告生成走小模型 llm_fast（未配置时在 from_yaml 里自动镜像 llm）；
             # max_tokens_override 取自 settings.report.max_output_tokens，

@@ -82,7 +82,7 @@ class ReportAgent:
     def _ensure_llm(self) -> Any:
         if self._llm is not None:
             return self._llm
-        from modules.p2p.model_factory import build_chat_model
+        from core.llm.model_factory import build_chat_model
         max_tok = self._settings.report.max_output_tokens
         self._llm = build_chat_model(
             self._settings.llm_fast,

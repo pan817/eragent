@@ -17,9 +17,9 @@ class TestModelFactory:
     def test_build_model(self) -> None:
         """build_chat_model 应调用 ChatOpenAI 构造器。"""
         settings = Settings()
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
             mock_chat.return_value = MagicMock()
-            from modules.p2p.model_factory import build_chat_model
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm)
             mock_chat.assert_called_once()
@@ -28,8 +28,8 @@ class TestModelFactory:
         """默认 use_system_proxy=False：应注入 trust_env=False 的 httpx 客户端。"""
         settings = Settings()
         assert settings.llm.use_system_proxy is False
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm)
             kwargs = mock_chat.call_args.kwargs
@@ -42,8 +42,8 @@ class TestModelFactory:
         """use_system_proxy=True：不应注入自定义 httpx 客户端，沿用默认行为。"""
         settings = Settings()
         settings.llm.use_system_proxy = True
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm)
             kwargs = mock_chat.call_args.kwargs
@@ -55,8 +55,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "qwen"
         settings.llm.model = "qwen3-max"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -70,8 +70,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "qwen"
         settings.llm.model = "qwen-plus"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -82,8 +82,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "zhipu"
         settings.llm.model = "glm-4.7"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -94,8 +94,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "minimax"
         settings.llm.model = "MiniMax-M2.7"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -106,8 +106,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "deepseek"
         settings.llm.model = "deepseek-chat"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -118,8 +118,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "QWEN"
         settings.llm.model = "Qwen3-Max"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -133,8 +133,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "ZhiPu"
         settings.llm.model = "GLM-4.6"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -145,8 +145,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "zhipuai"
         settings.llm.model = "glm-4.6"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -157,8 +157,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "qwen-intl"
         settings.llm.model = "qwen3-max"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -172,8 +172,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "qwen-intl"
         settings.llm.model = "qwen-plus"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=True)
             kwargs = mock_chat.call_args.kwargs
@@ -184,8 +184,8 @@ class TestModelFactory:
         settings = Settings()
         settings.llm.provider = "qwen"
         settings.llm.model = "qwen3-max"
-        with patch("modules.p2p.model_factory.ChatOpenAI") as mock_chat:
-            from modules.p2p.model_factory import build_chat_model
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
 
             build_chat_model(settings.llm, disable_thinking=False)
             kwargs = mock_chat.call_args.kwargs
@@ -290,7 +290,7 @@ class TestP2PAgentBuild:
 
         mock_langchain_agent = MagicMock()
         with (
-            patch("modules.p2p.agent.build_chat_model"),
+            patch("core.llm.model_factory.build_chat_model"),
             patch("modules.p2p.agent.create_agent", return_value=mock_langchain_agent),
         ):
             result = agent._get_or_build_agent()
@@ -417,7 +417,7 @@ class TestP2PAgentAnalyze:
 
         # 需要让 _get_or_build_agent 返回同一个 mock
         with (
-            patch("modules.p2p.agent.build_chat_model"),
+            patch("core.llm.model_factory.build_chat_model"),
             patch("modules.p2p.agent.create_agent", return_value=mock_agent),
         ):
             result = await agent.analyze("测试")
