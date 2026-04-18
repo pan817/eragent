@@ -220,7 +220,10 @@ async def validate_entities(
 # ---------------------------------------------------------------------------
 
 
-async def enrich_entities(params: dict[str, Any]) -> None:
+async def enrich_entities(
+    params: dict[str, Any],
+    provider: Any | None = None,
+) -> None:
     """验证并补充实体关联。
 
     两阶段处理：
@@ -236,8 +239,11 @@ async def enrich_entities(params: dict[str, Any]) -> None:
     from core.observability.tracing import record_span
 
     try:
-        from modules.p2p.tools import _get_repository
-        repo = _get_repository()
+        if provider is not None:
+            repo = provider.get_repository()
+        else:
+            from modules.p2p.tools import _get_repository
+            repo = _get_repository()
     except Exception:
         return
 

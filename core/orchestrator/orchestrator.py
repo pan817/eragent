@@ -91,17 +91,21 @@ def _resolve_time_range(time_range: str | None) -> int | None:
 
 
 class Orchestrator:
-    """P2P 分析编排器。
+    """分析编排器。
 
     协调意图解析、DAG/Agent 调度和结果封装的核心组件。
-    Checkpointer（短期记忆）在 Orchestrator 级别管理，
-    作为基础设施注入给 P2PAgent 和 DAG 路径共享使用。
+    通过 ModuleProvider 获取业务模块能力，不直接 import 具体模块代码。
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        provider: Any | None = None,
+    ) -> None:
         if settings is None:
             settings = get_settings()
         self._settings: Settings = settings
+        self._provider: Any = provider
         self._agent: Any = None
         self._dag_executor: Any = None
         self._report_agent: Any = None
@@ -164,15 +168,23 @@ class Orchestrator:
 
     @property
     def _lazy_agent(self) -> Any:
-        """延迟初始化 P2PAgent 实例（Level 3 ReAct 兜底）。"""
+        """延迟初始化 Agent 实例（Level 3 ReAct 兜底）。"""
         if self._agent is None:
-            from modules.p2p.agent import P2PAgent
+            if self._provider is not None:
+                self._agent = self._provider.get_agent(
+                    settings=self._settings,
+                    timing_middleware=self._timing_middleware,
+                    checkpointer=self._ensure_checkpointer(),
+                )
+            else:
+                # 兼容无 Provider 的测试场景
+                from modules.p2p.agent import P2PAgent
 
-            self._agent = P2PAgent(
-                settings=self._settings,
-                timing_middleware=self._timing_middleware,
-                checkpointer=self._ensure_checkpointer(),
-            )
+                self._agent = P2PAgent(
+                    settings=self._settings,
+                    timing_middleware=self._timing_middleware,
+                    checkpointer=self._ensure_checkpointer(),
+                )
         return self._agent
 
     @property
@@ -181,11 +193,17 @@ class Orchestrator:
         if self._dag_executor is None:
             from core.orchestrator.dag.executor import DAGExecutor
             from core.orchestrator.dag.registry import build_default_registry
-            from modules.p2p.report_agent import ReportAgent
 
             registry = build_default_registry()
             if self._report_agent is None:
-                self._report_agent = ReportAgent(settings=self._settings)
+                if self._provider is not None:
+                    self._report_agent = self._provider.get_report_agent(
+                        settings=self._settings,
+                    )
+                else:
+                    from modules.p2p.report_agent import ReportAgent
+
+                    self._report_agent = ReportAgent(settings=self._settings)
             self._dag_executor = DAGExecutor(
                 registry=registry,
                 report_agent=self._report_agent,
@@ -197,7 +215,7 @@ class Orchestrator:
     async def _enrich_entities(self, params: dict[str, Any]) -> None:
         """验证并补充实体关联（委托到 entity 模块）。"""
         from core.orchestrator.entity import enrich_entities
-        await enrich_entities(params)
+        await enrich_entities(params, provider=self._provider)
 
     @staticmethod
     def _resolve_references(
@@ -803,19 +821,32 @@ class Orchestrator:
 
         try:
             from core.memory import get_long_term_memory
-            from modules.p2p.agent import _build_memory_content, _build_memory_metadata
 
             ltm = get_long_term_memory()
-            content = _build_memory_content(
-                query=query, response=response, summary={},
-            )
-            metadata = _build_memory_metadata(
-                query=query,
-                analysis_type=analysis_type.value,
-                anomalies=[],
-                summary={},
-                time_range_days=time_range_days,
-            )
+            if self._provider is not None:
+                content = self._provider.build_memory_content(
+                    query=query, response=response, summary={},
+                )
+                metadata = self._provider.build_memory_metadata(
+                    query=query,
+                    analysis_type=analysis_type.value,
+                    anomalies=[],
+                    summary={},
+                    time_range_days=time_range_days,
+                )
+            else:
+                from modules.p2p.agent import _build_memory_content, _build_memory_metadata
+
+                content = _build_memory_content(
+                    query=query, response=response, summary={},
+                )
+                metadata = _build_memory_metadata(
+                    query=query,
+                    analysis_type=analysis_type.value,
+                    anomalies=[],
+                    summary={},
+                    time_range_days=time_range_days,
+                )
             await asyncio.to_thread(
                 ltm.save_memory,
                 user_id=user_id,
