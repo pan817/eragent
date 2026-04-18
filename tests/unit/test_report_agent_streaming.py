@@ -386,7 +386,7 @@ async def test_generate_streaming_branch_when_context_injected(
     settings: Settings, event_bus: MemoryEventBus
 ) -> None:
     """contextvars 注入 trace_id + message_id 时，generate 走流式分支。"""
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from core.tasks.context import current_assistant_message_id
     from modules.p2p.report_agent import ReportAgent
 
@@ -449,7 +449,7 @@ async def test_generate_streams_with_trace_id_only_uses_trace_as_message_id(
     settings: Settings, event_bus: MemoryEventBus
 ) -> None:
     """没有 assistant_message_id 时，流式仍启用，用 trace_id 作为 message_id。"""
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from modules.p2p.report_agent import ReportAgent
 
     agent = ReportAgent(settings=settings)
@@ -476,7 +476,7 @@ async def test_generate_streaming_disabled_by_config(
     settings: Settings, event_bus: MemoryEventBus
 ) -> None:
     """llm_fast.streaming_enabled=False 时强制走 ainvoke。"""
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from core.tasks.context import current_assistant_message_id
     from modules.p2p.report_agent import ReportAgent
 

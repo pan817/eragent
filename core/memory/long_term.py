@@ -14,7 +14,7 @@ from typing import Any, Iterable
 import sqlalchemy as sa
 
 from core.memory.tables import memories_table, metadata_obj, reports_table
-from core.observability.middleware import record_memory_span
+from core.observability.tracing import record_memory_span
 from core.time_utils import now_cn
 
 _logger = logging.getLogger(__name__)

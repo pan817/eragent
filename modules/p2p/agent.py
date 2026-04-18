@@ -27,7 +27,7 @@ from api.schemas.domain import (
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
-from core.observability.middleware import estimate_tokens, record_span
+from core.observability.tracing import estimate_tokens, record_span
 from core.time_utils import now_cn
 from core.llm.model_factory import build_chat_model
 from modules.p2p.prompts import build_system_prompt, format_long_term_memory
@@ -423,7 +423,7 @@ class P2PAgent:
             与 ``agent.ainvoke`` 等价的 ``dict``：包含 ``messages`` 列表，
             供调用方提取最终回复 content 与 JSON 兜底解析。
         """
-        from core.observability.middleware import _current_trace
+        from core.observability.tracing import _current_trace
         from core.tasks.events import get_event_bus
         from core.tasks.stream_utils import (
             ThinkTagFilter,
@@ -782,7 +782,7 @@ class P2PAgent:
 
         # ── 流式开关守卫：llm.streaming_enabled + trace_id + event_bus 三项全到位才启用 ──
         # 任一缺失都回到 ainvoke 原路径，保证兼容性。
-        from core.observability.middleware import _current_trace
+        from core.observability.tracing import _current_trace
         from core.tasks.context import get_current_message_id
         from core.tasks.events import get_event_bus
 

@@ -290,7 +290,7 @@ class TestReportAgentGenerate:
             def __exit__(self, *_: object) -> None:
                 pass
 
-        import core.observability.middleware as obs_mod
+        import core.observability.tracing as obs_mod
         monkeypatch.setattr(obs_mod, "record_span", _SpanCtx)
 
         agent = ReportAgent(settings=settings)
@@ -332,7 +332,7 @@ class TestReportAgentGenerate:
             def __exit__(self, *_: object) -> None:
                 pass
 
-        import core.observability.middleware as obs_mod
+        import core.observability.tracing as obs_mod
         monkeypatch.setattr(obs_mod, "record_span", _SpanCtx)
 
         agent = ReportAgent(settings=settings)

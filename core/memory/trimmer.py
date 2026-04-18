@@ -136,7 +136,7 @@ class MemoryMiddleware(AgentMiddleware):  # type: ignore[type-arg]
         if truncated_count == 0:
             return request, self._no_trim_info()
 
-        from core.observability.middleware import estimate_tokens
+        from core.observability.tracing import estimate_tokens
 
         trim_info: dict[str, Any] = {
             "trimmed": True,
@@ -194,7 +194,7 @@ class MemoryMiddleware(AgentMiddleware):  # type: ignore[type-arg]
             return
 
         try:
-            from core.observability.middleware import record_span
+            from core.observability.tracing import record_span
 
             with record_span(
                 "memory_trim",

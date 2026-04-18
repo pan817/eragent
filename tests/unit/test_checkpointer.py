@@ -20,7 +20,7 @@ from core.observability.checkpointer import (
     _thread_id,
     attach_tracing,
 )
-from core.observability.middleware import TimingMiddleware
+from core.observability.tracing import TimingMiddleware
 from core.observability.store import SpanEvent
 
 

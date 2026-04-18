@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 from core.logging_utils import get_logger
-from core.observability.middleware import record_span, _truncate_text
+from core.observability.tracing import record_span, _truncate_text
 from core.orchestrator.dag.registry import ToolRegistry
 from modules.p2p.errors import ReportGenerationError
 

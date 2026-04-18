@@ -942,7 +942,7 @@ class TestDAGContextBudget:
 
     def test_record_dag_context_budget_emits_span(self, settings: Settings) -> None:
         """_record_dag_context_budget 应在活跃 trace 中记录 context_budget span。"""
-        from core.observability.middleware import TimingMiddleware, _current_trace
+        from core.observability.tracing import TimingMiddleware, _current_trace
 
         orch = Orchestrator(settings=settings)
         mw = orch._timing_middleware
@@ -1021,7 +1021,7 @@ class TestFormatLongTermMemoryTrim:
     def test_very_long_records_trimmed(self) -> None:
         """超长记录拼接后应被裁剪到预算内。"""
         from modules.p2p.prompts import format_long_term_memory
-        from core.observability.middleware import estimate_tokens
+        from core.observability.tracing import estimate_tokens
         from config.settings import get_settings
 
         settings = get_settings()
@@ -1088,7 +1088,7 @@ class TestSessionContextTrim:
     def test_very_long_context_trimmed(self, settings: Settings) -> None:
         """超长 AI 回复应被裁剪到 token 预算内。"""
         from langchain_core.messages import AIMessage, HumanMessage
-        from core.observability.middleware import estimate_tokens
+        from core.observability.tracing import estimate_tokens
 
         orch = Orchestrator(settings=settings)
         mock_cp = MagicMock()

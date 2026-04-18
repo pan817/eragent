@@ -7,7 +7,7 @@ import time
 import pytest
 
 import core.observability  # noqa: F401  触发 tables 注册到 Base.metadata
-from core.observability.middleware import (
+from core.observability.tracing import (
     TimingMiddleware,
     estimate_tokens,
     record_memory_span,
@@ -233,7 +233,7 @@ def test_record_memory_span_captures_error(store):
 
 def test_record_span_no_active_trace():
     """record_span 在无活跃 trace 时应静默 no-op。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     with record_span("intent", "test_route") as attrs:
         attrs["level"] = 1
@@ -242,7 +242,7 @@ def test_record_span_no_active_trace():
 
 def test_record_span_emits_span(store):
     """record_span 在活跃 trace 中应写出指定类型的 span。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="span_agent", store=store, print_console=False)
     mw.start_run(session_id="s1", user_id="u1")
@@ -271,7 +271,7 @@ def test_record_span_emits_span(store):
 
 def test_record_span_captures_error(store):
     """record_span 应正确捕获异常并记录 error 状态。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="err_agent", store=store, print_console=False)
     mw.start_run()
@@ -291,7 +291,7 @@ def test_record_span_captures_error(store):
 
 def test_record_span_multiple_types(store):
     """同一个 trace 中可以有多种 span 类型。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="multi_agent", store=store, print_console=False)
     mw.start_run()
@@ -324,7 +324,7 @@ def test_record_span_multiple_types(store):
 
 def test_record_span_with_non_serializable_attrs(store):
     """record_span 应通过 _safe_jsonable 处理不可序列化的 attributes。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="jsonable_agent", store=store, print_console=False)
     mw.start_run()
@@ -532,7 +532,7 @@ def test_get_token_summary_extracts_from_agent_span(store):
 def test_token_summary_with_toplevel_usage(store):
     """ReportAgent 风格的 model span（usage 在 attrs 顶层而非 output 内）
     也应被 finish_run 正确汇总到 token_summary。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="fallback_agent", store=store, print_console=False)
     mw.start_run()
@@ -558,7 +558,7 @@ def test_token_summary_with_toplevel_usage(store):
 def test_token_summary_mixed_span_styles(store):
     """同一 trace 中混合 TimingMiddleware 和 ReportAgent 风格的 model span，
     token 应全部被累加。"""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="mixed_agent", store=store, print_console=False)
     mw.start_run()
@@ -594,7 +594,7 @@ def test_token_summary_mixed_span_styles(store):
 def test_record_span_increments_model_and_tool_counts(store):
     """record_span("model"/"tool") should increment ctx counters
     so that finish_run emits correct model_call_count / tool_call_count."""
-    from core.observability.middleware import record_span
+    from core.observability.tracing import record_span
 
     mw = TimingMiddleware(agent_name="count_agent", store=store, print_console=False)
     mw.start_run()
@@ -636,40 +636,40 @@ def test_record_span_increments_model_and_tool_counts(store):
 
 
 def test_classify_llm_error_timeout():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(TimeoutError("timed out")) == "timeout"
     assert _classify_llm_error(OSError("connect timeout")) == "timeout"
 
 
 def test_classify_llm_error_timeout_in_message():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(RuntimeError("request timed out")) == "timeout"
 
 
 def test_classify_llm_error_connection():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(RuntimeError("Connection refused")) == "connection_error"
 
 
 def test_classify_llm_error_rate_limit():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(RuntimeError("Rate limit exceeded")) == "rate_limit"
     assert _classify_llm_error(RuntimeError("Error 429: too many requests")) == "rate_limit"
 
 
 def test_classify_llm_error_auth():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(RuntimeError("Authentication failed")) == "auth_error"
     assert _classify_llm_error(RuntimeError("Error 401")) == "auth_error"
 
 
 def test_classify_llm_error_server():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(RuntimeError("HTTP 500 Internal Server Error")) == "server_error"
     assert _classify_llm_error(RuntimeError("502 Bad Gateway")) == "server_error"
@@ -677,7 +677,7 @@ def test_classify_llm_error_server():
 
 
 def test_classify_llm_error_generic():
-    from core.observability.middleware import _classify_llm_error
+    from core.observability.tracing import _classify_llm_error
 
     assert _classify_llm_error(ValueError("bad value")) == "ValueError"
 
@@ -888,7 +888,7 @@ def test_format_summary():
 def test_format_error_chain_captures_cause():
     """wrapped exception 的 __cause__ 根因必须出现在 error 文本中，
     不应像旧实现那样只保留最外层 str(exc)。"""
-    from core.observability.middleware import format_error_chain
+    from core.observability.tracing import format_error_chain
 
     try:
         try:
@@ -906,7 +906,7 @@ def test_format_error_chain_captures_cause():
 
 def test_format_error_chain_preserves_full_stack():
     """栈深 > 3 的场景，完整栈都应保留，不被 limit=3 截断。"""
-    from core.observability.middleware import format_error_chain
+    from core.observability.tracing import format_error_chain
 
     def level_a():
         level_b()
@@ -932,7 +932,7 @@ def test_format_error_chain_preserves_full_stack():
 
 def test_format_error_chain_head_tail_truncation():
     """超过 max_len 时采用头尾截断，保留链顶根因 + 链尾外层异常 + 标记。"""
-    from core.observability.middleware import format_error_chain
+    from core.observability.tracing import format_error_chain
 
     # ROOT 异常消息填大量字符，让完整异常链远超 max_len 触发头尾截断；
     # OUTER 消息保持简短，模拟真实 LLM 错误链（深栈 + 短外层消息）。
@@ -957,7 +957,7 @@ def test_format_error_chain_head_tail_truncation():
 
 def test_format_error_chain_no_truncation_when_short():
     """短异常不应被截断，也不带 marker。"""
-    from core.observability.middleware import format_error_chain
+    from core.observability.tracing import format_error_chain
 
     try:
         raise ValueError("short")

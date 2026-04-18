@@ -28,7 +28,7 @@ from api.schemas.domain import (
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.observability import TimingMiddleware
-from core.observability.middleware import publish_stage as _publish_stage
+from core.observability.streaming import publish_stage as _publish_stage
 from core.tasks.stream_utils import strip_think_tags as _strip_think_tags
 from core.orchestrator.router import IntentRouter
 
@@ -293,7 +293,7 @@ class Orchestrator:
             _logger.warning(
                 "checkpointer init failed, short-term memory disabled: %s", exc
             )
-            from core.observability.middleware import record_span
+            from core.observability.tracing import record_span
 
             with record_span(
                 "checkpoint", "checkpointer_init_failed",
@@ -383,7 +383,7 @@ class Orchestrator:
         防止误匹配（如 "最近 10045 天" 中 10045 被当作 PO 号）。
         验证失败不阻塞主流程。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
 
         with record_span("entity", "validate_entities") as span_attrs:
             input_entities = {k: v for k, v in params.items() if k != "days" and v}
@@ -493,7 +493,7 @@ class Orchestrator:
 
         查询失败不阻塞主流程。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
 
         try:
             from modules.p2p.tools import _get_repository
@@ -614,7 +614,7 @@ class Orchestrator:
 
         读取失败返回空上下文，不阻塞主流程。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
         from core.orchestrator.router import _extract_params
 
         empty: dict[str, Any] = {"has_history": False, "context_summary": "", "entities": {}}
@@ -886,7 +886,7 @@ class Orchestrator:
                 duration_ms=duration_ms,
             )
         except Exception as exc:
-            from core.observability.middleware import format_error_chain
+            from core.observability.tracing import format_error_chain
 
             trace_status = "error"
             trace_error = format_error_chain(exc)
@@ -1339,7 +1339,7 @@ class Orchestrator:
         此处记录查询的 token 估算，工具输出 token
         在执行前未知，由 ReportAgent 的 model span 覆盖。
         """
-        from core.observability.middleware import estimate_tokens, record_span
+        from core.observability.tracing import estimate_tokens, record_span
 
         query_tokens = estimate_tokens(query)
         report_template_tokens = estimate_tokens("x" * 350)
@@ -1429,7 +1429,7 @@ class Orchestrator:
         与 LangGraph agent 内部一致（避免手动 put 导致格式不兼容）。
         写入失败不阻塞主流程。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
 
         with record_span("checkpoint", "dag_short_term_write") as span_attrs:
             span_attrs["session_id"] = session_id

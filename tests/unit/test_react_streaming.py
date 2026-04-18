@@ -546,7 +546,7 @@ async def test_b06_streaming_disabled_falls_back_to_ainvoke(
     """
     from unittest.mock import patch
 
-    from core.observability.middleware import _current_trace, _TraceContext
+    from core.observability.tracing import _current_trace, _TraceContext
     from modules.p2p.agent import P2PAgent
 
     # 关 streaming
@@ -652,7 +652,7 @@ async def test_b08_retry_resets_chunk_index_from_zero(
     """重试触发后，新一轮的首 chunk index=0；前端按"index <= lastChunkIndex"清 buffer。"""
     from unittest.mock import patch
 
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from modules.p2p.agent import P2PAgent
 
     settings.llm.streaming_enabled = True
@@ -730,7 +730,7 @@ async def test_b12_accumulated_delta_equals_report_markdown_via_analyze(
     """
     from unittest.mock import patch
 
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from modules.p2p.agent import P2PAgent
 
     settings.llm.streaming_enabled = True
@@ -802,7 +802,7 @@ async def test_b13_streaming_span_attributes_recorded(
     """
     from unittest.mock import patch
 
-    from core.observability.middleware import _TraceContext, _current_trace
+    from core.observability.tracing import _TraceContext, _current_trace
     from modules.p2p.agent import P2PAgent
 
     settings.llm.streaming_enabled = True

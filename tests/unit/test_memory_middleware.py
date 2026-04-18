@@ -258,7 +258,7 @@ class TestTrimSpanRecording:
     def test_no_span_when_not_trimmed(self):
         """未发生裁剪时不记录 span。"""
         with patch(
-            "core.observability.middleware.record_span"
+            "core.observability.tracing.record_span"
         ) as mock_record:
             MemoryMiddleware._record_trim_span({"trimmed": False})
             mock_record.assert_not_called()
@@ -282,7 +282,7 @@ class TestTrimSpanRecording:
         mock_ctx.__exit__ = MagicMock(return_value=False)
 
         with patch(
-            "core.observability.middleware.record_span", return_value=mock_ctx
+            "core.observability.tracing.record_span", return_value=mock_ctx
         ) as mock_record:
             MemoryMiddleware._record_trim_span(trim_info)
             mock_record.assert_called_once()

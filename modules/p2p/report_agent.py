@@ -292,7 +292,7 @@ class ReportAgent:
         Returns:
             Markdown 格式的分析报告。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
         import time as _time
 
         _start = _time.monotonic()
@@ -317,7 +317,7 @@ class ReportAgent:
                 #      保证多 key 场景下任何单个 key 都不会独占预算。
                 # 预算换算回字符数使用 llm_fast.token_estimate_ratio（字符/token）。
                 with record_span("report.prep", "merge_outputs") as merge_attrs:
-                    from core.observability.middleware import estimate_tokens
+                    from core.observability.tracing import estimate_tokens
 
                     report_cfg = self._settings.report
                     llm_fast_cfg = self._settings.llm_fast
@@ -436,7 +436,7 @@ class ReportAgent:
             span_attrs["prompt_length"] = len(prompt)
 
             # 显式记录 model span（ReportAgent 不经过 LangChain 中间件）
-            from core.observability.middleware import estimate_tokens
+            from core.observability.tracing import estimate_tokens
 
             model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "unknown")
 
@@ -447,7 +447,7 @@ class ReportAgent:
             # 或 chat_repo 未配置）用 trace_id 作为 fallback 填充 ChunkEvent.message_id，
             # 保证"只要有 trace_id 就能流式"。前端有 auto_persist 时按 assistant_message_id
             # 绑定气泡，没有时按 trace_id 绑定。
-            from core.observability.middleware import _current_trace
+            from core.observability.tracing import _current_trace
             from core.tasks.context import get_current_message_id
             from core.tasks.events import get_event_bus
 

@@ -41,7 +41,7 @@ def _pull_trace_id() -> str | None:
     以保证日志路径永远不被自己的依赖打挂。
     """
     try:
-        from core.observability.middleware import _current_trace  # noqa: WPS433
+        from core.observability.tracing import _current_trace  # noqa: WPS433
 
         ctx = _current_trace.get()
         if ctx is not None:

@@ -436,7 +436,7 @@ class IntentRouter:
 
     def _route(self, query: str, analyst_role: str = "general") -> QuerySignal:
         """三级路由主逻辑，记录完整决策过程到 trace。"""
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
 
         params = _extract_params(query, self._settings.analysis.entity_patterns)
         trace_data: dict[str, Any] = {
@@ -871,7 +871,7 @@ class IntentRouter:
         self, query: str, params: dict[str, Any], analyst_role: str = "general"
     ) -> QuerySignal:
         """LLM 分类兜底，始终返回结果。"""
-        from core.observability.middleware import (
+        from core.observability.tracing import (
             _safe_jsonable,
             estimate_tokens,
             record_span,

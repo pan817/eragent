@@ -89,7 +89,7 @@ def trim_to_token_budget(text: str, max_tokens: int, label: str) -> str:
     if not text or max_tokens <= 0:
         return text
 
-    from core.observability.middleware import estimate_tokens
+    from core.observability.tracing import estimate_tokens
 
     current = estimate_tokens(text)
     if current <= max_tokens:

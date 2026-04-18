@@ -72,7 +72,7 @@ class DAGCaseStore:
             route_type: 路由类型（DAG / ReAct）。
             exec_result: 执行结果字典。
         """
-        from core.observability.middleware import record_span
+        from core.observability.tracing import record_span
 
         if exec_result.get("status") != "ok":
             return

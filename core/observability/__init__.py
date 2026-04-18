@@ -1,7 +1,7 @@
 """可观测性模块：Agent / Model / Tool 调用链路监控与持久化。"""
 
 from core.observability.checkpointer import attach_tracing as attach_checkpointer_tracing
-from core.observability.middleware import TimingMiddleware
+from core.observability.tracing import TimingMiddleware
 from core.observability.store import (
     TraceStore,
     get_trace_store,

@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from core.logging_utils import get_logger
-from core.observability.middleware import (
+from core.observability.tracing import (
     TimingMiddleware,
     _current_trace,
     format_error_chain,
@@ -126,7 +126,7 @@ def _emit_span(
     middleware._emit(sp)  # noqa: SLF001
 
     # 高频调用 INFO：checkpointer 每次读写成功也打一条，受 verbose_calls 控制。
-    from core.observability.middleware import _verbose_calls as _vc  # 延迟导入避免循环
+    from core.observability.tracing import _verbose_calls as _vc  # 延迟导入避免循环
 
     if status == "ok" and _vc():
         _logger.info(
