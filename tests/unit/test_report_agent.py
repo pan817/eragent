@@ -176,12 +176,19 @@ class TestReportAgentGenerate:
         assert "已截断" not in prompt
 
     @pytest.mark.asyncio
-    async def test_prompt_contains_severity_thresholds(self, settings: Settings) -> None:
+    async def test_prompt_contains_severity_thresholds(self, settings: Settings, monkeypatch) -> None:
         """prompt 中应注入 AnomalySeverity 配置的具体阈值，不是写死在模板里。"""
         from modules.p2p.report_agent import ReportAgent
+        from modules.p2p.settings import P2PSettings, AnomalySeveritySettings
 
-        settings.p2p.anomaly_severity.high_amount_threshold = 800000.0
-        settings.p2p.anomaly_severity.variance_high_multiplier = 3.0
+        custom_p2p = P2PSettings(
+            anomaly_severity=AnomalySeveritySettings(
+                high_amount_threshold=800000.0,
+                variance_high_multiplier=3.0,
+            )
+        )
+        import modules.p2p.settings as _p2p_settings_mod
+        monkeypatch.setattr(_p2p_settings_mod, "get_p2p_settings", lambda: custom_p2p)
 
         agent = ReportAgent(settings=settings)
         mock_response = MagicMock()

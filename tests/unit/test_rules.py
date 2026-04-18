@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from config.settings import P2PSettings
+from modules.p2p.settings import P2PSettings
 from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 from modules.p2p.rules.price_variance import PriceVarianceAnalyzer
 from modules.p2p.rules.payment_compliance import PaymentComplianceChecker

@@ -58,11 +58,13 @@ def get_ontology_context() -> str:
     # Token 预算裁剪：避免本体过长挤占用户查询和记忆
     try:
         from config.settings import get_settings
+        from modules.p2p.settings import get_p2p_settings
         settings = get_settings()
-        if settings.p2p.ontology.context_trim_enabled:
+        p2p_cfg = get_p2p_settings()
+        if p2p_cfg.ontology.context_trim_enabled:
             max_tokens = int(
                 settings.llm.context_window
-                * settings.p2p.ontology.context_max_tokens_pct
+                * p2p_cfg.ontology.context_max_tokens_pct
                 / 100
             )
             text = trim_to_token_budget(text, max_tokens, "本体上下文")

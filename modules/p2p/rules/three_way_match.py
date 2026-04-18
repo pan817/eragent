@@ -17,7 +17,7 @@ from api.schemas.domain import (
     DocumentRef,
     Severity,
 )
-from config.settings import P2PSettings
+from modules.p2p.settings import P2PSettings
 from core.time_utils import now_cn
 from modules.p2p.rules._utils import AnomalyIdGenerator, safe_float
 

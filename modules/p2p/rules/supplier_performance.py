@@ -20,7 +20,7 @@ from api.schemas.domain import (
     KPIValue,
     SupplierKPIReport,
 )
-from config.settings import P2PSettings
+from modules.p2p.settings import P2PSettings
 
 
 class SupplierPerformanceCalculator:

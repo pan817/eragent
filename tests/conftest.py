@@ -18,10 +18,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config.settings import (  # noqa: E402
-    P2PSettings,
-    Settings,
-)
+from config.settings import Settings  # noqa: E402
+from modules.p2p.settings import P2PSettings  # noqa: E402
 from core.database import (  # noqa: E402
     Base,
     P2PRepository,
@@ -61,9 +59,9 @@ def settings() -> Settings:
 
 
 @pytest.fixture()
-def p2p_settings(settings: Settings) -> P2PSettings:
-    """提取 P2PSettings 子配置。"""
-    return settings.p2p
+def p2p_settings() -> P2PSettings:
+    """创建测试用 P2PSettings 实例（不依赖 config.yaml）。"""
+    return P2PSettings()
 
 
 # ============================================================

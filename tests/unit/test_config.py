@@ -15,7 +15,6 @@ import yaml
 from config.settings import (
     ChromaSettings,
     LoggingSettings,
-    P2PSettings,
     Settings,
 )
 
@@ -72,8 +71,9 @@ class TestDefaultSettings:
 
     def test_p2p_tolerances(self) -> None:
         """P2P 容差配置的默认值应正确。"""
-        s = Settings()
-        p2p = s.p2p
+        from modules.p2p.settings import P2PSettings
+
+        p2p = P2PSettings()
         assert p2p.three_way_match.default_tolerance_pct == 5.0
         assert p2p.three_way_match.max_tolerance_pct == 10.0
         assert p2p.payment_compliance.early_payment_threshold_days == 5
@@ -136,7 +136,6 @@ class TestFromYaml:
         assert s.app_version == "1.0.0"
         assert s.debug is True
         assert s.llm.provider == "openai"
-        assert s.p2p.three_way_match.default_tolerance_pct == 3.0
         assert s.memory.short_term_max_messages == 30
 
     def test_env_overrides_yaml(

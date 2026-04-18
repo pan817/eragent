@@ -391,7 +391,8 @@ class ReportAgent:
                 with record_span("report.prep", "format_prompt") as fmt_attrs:
                     from core.time_utils import get_timezone_name, now_cn
 
-                    anomaly_cfg = self._settings.p2p.anomaly_severity
+                    from modules.p2p.settings import get_p2p_settings
+                    anomaly_cfg = get_p2p_settings().anomaly_severity
                     prompt = _REPORT_PROMPT.format(
                         scenario=scenario,
                         outputs_text=outputs_text,

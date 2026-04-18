@@ -63,9 +63,9 @@ def _clip_and_dump(obj: Any) -> str:
     注意：只在结构层裁剪，保证截断后仍是合法 JSON；LLM 能正确解析并理解"数据
     已被系统预算裁剪"，而不是解析到半截坏 JSON。
     """
-    from config.settings import get_settings
+    from modules.p2p.settings import get_p2p_settings
 
-    cfg = get_settings().p2p.tool_output
+    cfg = get_p2p_settings().tool_output
     max_items = cfg.max_items
     max_chars = cfg.max_chars
 
@@ -282,7 +282,8 @@ def _run_three_way_match_sync(po_number: str) -> str:
     gr_lines = repo.get_flattened_receipts(po_number=po_number)
     invoice_lines = repo.get_flattened_invoices(po_number=po_number)
 
-    checker = ThreeWayMatchChecker(settings.p2p)
+    from modules.p2p.settings import get_p2p_settings
+    checker = ThreeWayMatchChecker(get_p2p_settings())
     anomalies = checker.check(po_lines, gr_lines, invoice_lines)
 
     result: list[dict[str, Any]] = [
@@ -315,7 +316,8 @@ def _run_price_variance_analysis_sync(supplier_id: str, days: int) -> str:
     po_lines = repo.get_flattened_purchase_orders(supplier_id=supplier_id)
     contract_prices = repo.get_contract_prices()
 
-    analyzer = PriceVarianceAnalyzer(settings.p2p)
+    from modules.p2p.settings import get_p2p_settings
+    analyzer = PriceVarianceAnalyzer(get_p2p_settings())
     anomalies = analyzer.analyze(po_lines, contract_prices)
 
     result: list[dict[str, Any]] = [
@@ -353,7 +355,8 @@ def _run_payment_compliance_check_sync(supplier_id: str, days: int) -> str:
     payments = repo.get_flattened_payments(supplier_id=supplier_id)
     invoices = repo.get_flattened_invoices(supplier_id=supplier_id)
 
-    checker = PaymentComplianceChecker(settings.p2p)
+    from modules.p2p.settings import get_p2p_settings
+    checker = PaymentComplianceChecker(get_p2p_settings())
     anomalies = checker.check(payments, invoices)
 
     result: list[dict[str, Any]] = [
@@ -400,7 +403,8 @@ def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
     if not period:
         period = "近30天"
 
-    calculator = SupplierPerformanceCalculator(settings.p2p)
+    from modules.p2p.settings import get_p2p_settings
+    calculator = SupplierPerformanceCalculator(get_p2p_settings())
     report = calculator.calculate(
         supplier_id=supplier_id,
         supplier_name=supplier_name,
