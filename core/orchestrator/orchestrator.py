@@ -207,7 +207,6 @@ class Orchestrator:
             self._dag_executor = DAGExecutor(
                 registry=registry,
                 report_agent=self._report_agent,
-                agent=self._lazy_agent,
             )
         return self._dag_executor
 
@@ -565,50 +564,33 @@ class Orchestrator:
 
             _logger.info(
                 "route decision: path=%s analysis_type=%s days=%d entities=%s",
-                "DAG" if use_dag else "ReAct",
+                "DAG" if use_dag else "agent",
                 analysis_type.value,
                 time_range_days,
                 {k: v for k, v in parsed_params.items() if k != "days" and v},
             )
 
-            if use_dag:
-                _publish_stage_safe(
-                    "dag_planned",
-                    {"analysis_type": analysis_type.value},
-                )
-                result = await self._execute_dag(
-                    analysis_type=analysis_type,
-                    params=parsed_params,
-                    query=request.query,
-                    report_id=report_id,
-                    trace_id=trace_id,
-                    user_id=request.user_id,
-                    session_id=session_id,
-                    time_range_days=time_range_days,
-                    start_time=start_time,
-                    signal=signal,
-                    output_mode_prompt=output_mode_prompt,
-                )
-            else:
-                _publish_stage_safe(
-                    "react_started",
-                    {"analysis_type": analysis_type.value},
-                )
-                result = await self._execute_react(
-                    analysis_type=analysis_type,
-                    params=parsed_params,
-                    query=request.query,
-                    report_id=report_id,
-                    trace_id=trace_id,
-                    user_id=request.user_id,
-                    session_id=session_id,
-                    time_range_days=time_range_days,
-                    start_time=start_time,
-                    signal=signal,
-                    context_summary=session_ctx.get("context_summary", ""),
-                    skip_memory_write=is_recall,
-                    output_mode_prompt=output_mode_prompt,
-                )
+            stage_name = "dag_planned" if use_dag else "react_started"
+            _publish_stage_safe(
+                stage_name,
+                {"analysis_type": analysis_type.value},
+            )
+            result = await self._execute_dag(
+                analysis_type=analysis_type,
+                params=parsed_params,
+                query=request.query,
+                report_id=report_id,
+                trace_id=trace_id,
+                user_id=request.user_id,
+                session_id=session_id,
+                time_range_days=time_range_days,
+                start_time=start_time,
+                signal=signal,
+                output_mode_prompt=output_mode_prompt,
+                use_agent_fallback=not use_dag,
+                context_summary=session_ctx.get("context_summary", ""),
+                skip_memory_write=is_recall,
+            )
 
             # 5. 持久化（非分析意图的回溯查询不写入长期记忆和报告，
             #    避免 "Q: 上次分析的结果呢 A: ..." 被存入记忆产生循环引用）
@@ -634,75 +616,144 @@ class Orchestrator:
         start_time: float,
         signal: Any,
         output_mode_prompt: str = "",
+        use_agent_fallback: bool = False,
+        context_summary: str = "",
+        skip_memory_write: bool = False,
     ) -> AnalysisResult:
-        """通过 DAG Executor 执行分析。"""
+        """通过 DAG Executor 执行分析（统一入口）。
+
+        当 use_agent_fallback=True 或 DAG 模板不可用时，构造单节点 agent DAG
+        交由 DAGExecutor 执行，等价于原 _execute_react 的行为。
+        """
         from core.orchestrator.dag.templates import load_dag_template
         from core.orchestrator.dag.validator import DAGValidator
 
-        dag_tasks = load_dag_template(analysis_type, params)
-        if dag_tasks is None:
-            # 无对应模板，降级到 ReAct
-            _logger.info("no DAG template for %s, fallback to ReAct", analysis_type.value)
-            return await self._execute_react(
-                analysis_type=analysis_type,
-                params=params,
-                query=query,
-                report_id=report_id,
-                trace_id=trace_id,
-                user_id=user_id,
-                session_id=session_id,
-                time_range_days=time_range_days,
-                start_time=start_time,
-                signal=signal,
-            )
+        is_agent_path = use_agent_fallback
+        dag_tasks = None
 
-        # 校验 DAG
+        if not use_agent_fallback:
+            dag_tasks = load_dag_template(analysis_type, params)
+            if dag_tasks is None:
+                _logger.info("no DAG template for %s, fallback to agent", analysis_type.value)
+                is_agent_path = True
+
+        if not is_agent_path and dag_tasks is not None:
+            _executor = self._lazy_dag_executor
+            validator = DAGValidator(_executor._registry)
+            is_valid, error = validator.validate(dag_tasks)
+            if not is_valid:
+                _logger.warning("DAG validation failed: %s, fallback to agent", error)
+                is_agent_path = True
+
+        # agent 路径：构造单节点 agent DAG
+        if is_agent_path:
+            dag_tasks = [
+                {
+                    "task_id": "react",
+                    "type": "agent",
+                    "tool_name": "agent",
+                    "inputs": {
+                        "analysis_type": analysis_type,
+                        "query": query,
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "time_range_days": time_range_days,
+                        "context_summary": context_summary,
+                        "output_mode_prompt": output_mode_prompt,
+                        "skip_memory_write": skip_memory_write,
+                    },
+                    "depends_on": [],
+                    "timeout_sec": 900,
+                    "output_key": "agent_result",
+                },
+            ]
+
         executor = self._lazy_dag_executor
-        validator = DAGValidator(executor._registry)
-        is_valid, error = validator.validate(dag_tasks)
-        if not is_valid:
-            _logger.warning("DAG validation failed: %s, fallback to ReAct", error)
-            return await self._execute_react(
-                analysis_type=analysis_type,
-                params=params,
-                query=query,
-                report_id=report_id,
-                trace_id=trace_id,
-                user_id=user_id,
-                session_id=session_id,
-                time_range_days=time_range_days,
-                start_time=start_time,
-                signal=signal,
-            )
 
         _logger.info(
-            "executing DAG: type=%s tasks=%d route_level=%d confidence=%.3f",
+            "executing DAG: type=%s tasks=%d route_level=%d confidence=%.3f path=%s",
             analysis_type.value,
             len(dag_tasks),
             signal.route_level,
             signal.confidence,
+            "agent" if is_agent_path else "DAG",
         )
 
         # 记录 context_budget span（DAG 路径）
-        self._record_dag_context_budget(query=query)
+        if not is_agent_path:
+            self._record_dag_context_budget(query=query)
 
         dag_result = await executor.execute(
             dag_tasks,
             output_mode_prompt=output_mode_prompt,
+            agent=self._lazy_agent if is_agent_path else None,
         )
         duration_ms = (time.monotonic() - start_time) * 1000.0
 
+        # ── agent 路径：从 agent_result dict 构造 AnalysisResult ──
+        if is_agent_path:
+            agent_result = dag_result.get("outputs", {}).get("agent_result")
+            if isinstance(agent_result, dict) and agent_result:
+                route_info: dict[str, Any] = {"route_type": "agent"}
+                if signal is not None:
+                    route_info["route_level"] = signal.route_level
+                    route_info["route_confidence"] = signal.confidence
+                    route_info["route_reasoning"] = signal.reasoning
+                summary = {**agent_result.get("summary", {}), **route_info}
+                return AnalysisResult(
+                    report_id=report_id,
+                    trace_id=trace_id,
+                    status=AnalysisStatus.SUCCESS,
+                    analysis_type=analysis_type,
+                    query=query,
+                    user_id=user_id,
+                    session_id=session_id,
+                    time_range=f"最近 {time_range_days} 天",
+                    anomalies=agent_result.get("anomalies", []),
+                    supplier_kpis=agent_result.get("supplier_kpis", []),
+                    summary=summary,
+                    report_markdown=_strip_think_tags(
+                        agent_result.get("report_markdown", "")
+                    ),
+                    completed_tasks=agent_result.get("completed_tasks", []),
+                    failed_tasks=agent_result.get("failed_tasks", []),
+                    duration_ms=duration_ms,
+                )
+            # agent 执行失败
+            failed_list = [
+                f"{tid}: {err}"
+                for tid, err in dag_result.get("failed_tasks", {}).items()
+            ]
+            return AnalysisResult(
+                report_id=report_id,
+                trace_id=trace_id,
+                status=AnalysisStatus.FAILED,
+                analysis_type=analysis_type,
+                query=query,
+                user_id=user_id,
+                session_id=session_id,
+                time_range=f"最近 {time_range_days} 天",
+                failed_tasks=failed_list,
+                error=ErrorInfo(
+                    code="AGENT_EXECUTION_FAILED",
+                    message="; ".join(failed_list[:3]) if failed_list else "agent returned no result",
+                ),
+                duration_ms=duration_ms,
+            )
+
+        # ── 标准 DAG 路径：工具 + 报告 ──
         report_text = dag_result.get("report", "")
 
         # 短期记忆写入
-        await self._save_dag_to_short_term_memory(
-            query=query,
-            response=report_text,
-            session_id=session_id,
-            time_range_days=time_range_days,
-        )
+        if not skip_memory_write:
+            await self._save_dag_to_short_term_memory(
+                query=query,
+                response=report_text,
+                session_id=session_id,
+                time_range_days=time_range_days,
+            )
 
-        # 长期记忆写入（save_memory）
+        # 长期记忆写入
         await self._save_dag_to_long_term_memory(
             user_id=user_id,
             session_id=session_id,
@@ -722,8 +773,6 @@ class Orchestrator:
             f"{tid}: {err}" for tid, err in dag_result.get("failed_tasks", {}).items()
         ]
 
-        # 报告生成失败是致命错误：没有 markdown 报告的分析结果对用户无意义
-        # 即便其他工具成功（status=warning），也升级为 FAILED
         error_info: ErrorInfo | None = None
         report_err = dag_result.get("report_error")
         if report_err:
@@ -733,7 +782,6 @@ class Orchestrator:
                 message=report_err["message"],
             )
         elif status == AnalysisStatus.FAILED and failed_list:
-            # 全部工具失败（无 report_error 但 dag_status=error）
             error_info = ErrorInfo(
                 code="DAG_EXECUTION_FAILED",
                 message="; ".join(failed_list[:3]),
@@ -880,64 +928,4 @@ class Orchestrator:
             agent=self._lazy_agent,
         )
 
-    # ── ReAct 执行路径（原有逻辑） ──────────────────────────────────
-
-    async def _execute_react(
-        self,
-        analysis_type: AnalysisType,
-        params: dict[str, Any],
-        query: str,
-        report_id: str,
-        trace_id: str,
-        user_id: str,
-        session_id: str,
-        time_range_days: int,
-        start_time: float,
-        signal: Any = None,
-        context_summary: str = "",
-        skip_memory_write: bool = False,
-        output_mode_prompt: str = "",
-    ) -> AnalysisResult:
-        """通过 P2PAgent ReAct 模式执行分析（Level 3 兜底）。"""
-        agent_result: dict[str, Any] = await self._lazy_agent.run(
-            analysis_type=analysis_type,
-            query=query,
-            params=params,
-            time_range_days=time_range_days,
-            user_id=user_id,
-            session_id=session_id,
-            context_summary=context_summary,
-            skip_memory_write=skip_memory_write,
-            output_mode_prompt=output_mode_prompt,
-        )
-
-        duration_ms = (time.monotonic() - start_time) * 1000.0
-
-        # 合并路由监控信息到 summary
-        route_info: dict[str, Any] = {"route_type": "ReAct"}
-        if signal is not None:
-            route_info["route_level"] = signal.route_level
-            route_info["route_confidence"] = signal.confidence
-            route_info["route_reasoning"] = signal.reasoning
-
-        summary = {**agent_result.get("summary", {}), **route_info}
-
-        return AnalysisResult(
-            report_id=report_id,
-            trace_id=trace_id,
-            status=AnalysisStatus.SUCCESS,
-            analysis_type=analysis_type,
-            query=query,
-            user_id=user_id,
-            session_id=session_id,
-            time_range=f"最近 {time_range_days} 天",
-            anomalies=agent_result.get("anomalies", []),
-            supplier_kpis=agent_result.get("supplier_kpis", []),
-            summary=summary,
-            report_markdown=_strip_think_tags(
-                agent_result.get("report_markdown", "")
-            ),
-            completed_tasks=agent_result.get("completed_tasks", []),
-            failed_tasks=agent_result.get("failed_tasks", []),
-            duration_ms=duration_ms,
-        )
+    # _execute_react 已删除——ReAct 场景通过 _execute_dag(use_agent_fallback=True) 统一走 DAG。

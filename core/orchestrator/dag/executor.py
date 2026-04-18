@@ -35,16 +35,15 @@ class DAGExecutor:
         self,
         registry: ToolRegistry,
         report_agent: Any = None,
-        agent: Any = None,
     ) -> None:
         self._registry = registry
         self._report_agent = report_agent
-        self._agent = agent
 
     async def execute(
         self,
         tasks: list[dict[str, Any]],
         output_mode_prompt: str = "",
+        agent: Any = None,
     ) -> dict[str, Any]:
         """执行 DAG 任务列表，记录完整执行过程到 trace。
 
@@ -145,17 +144,19 @@ class DAGExecutor:
                 # agent 类型节点：调用 Agent 执行 ReAct
                 task_type = task.get("type", "tool")
                 if task_type == "agent":
-                    if self._agent is not None:
+                    if agent is not None:
                         try:
                             inputs = task.get("inputs", {})
                             agent_result = await asyncio.wait_for(
-                                self._agent.analyze(
+                                agent.run(
+                                    analysis_type=inputs.get("analysis_type"),
                                     query=inputs.get("query", ""),
                                     session_id=inputs.get("session_id"),
                                     user_id=inputs.get("user_id", ""),
                                     time_range_days=inputs.get("time_range_days", 30),
                                     context_summary=inputs.get("context_summary", ""),
                                     output_mode_prompt=inputs.get("output_mode_prompt", ""),
+                                    skip_memory_write=inputs.get("skip_memory_write", False),
                                 ),
                                 timeout=task.get("timeout_sec", 900),
                             )

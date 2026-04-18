@@ -88,7 +88,7 @@ class TestOrchestratorReActPath:
         assert result.status == AnalysisStatus.SUCCESS
         assert result.report_markdown == "# Report"
         # 路由监控信息应被注入 summary
-        assert result.summary.get("route_type") == "ReAct"
+        assert result.summary.get("route_type") == "agent"
         assert result.summary.get("route_level") == 3
         assert result.summary.get("route_confidence") == 0.5
         # agent 原始 summary 也应保留
@@ -320,7 +320,7 @@ class TestOrchestratorIntentKindBranches:
         assert result.status == AnalysisStatus.SUCCESS
         mock_agent.run.assert_called_once()  # ReAct 路径触发 agent
         assert "PO-2024-0001" in result.report_markdown
-        assert result.summary.get("route_type") == "ReAct"
+        assert result.summary.get("route_type") == "agent"
 
     @pytest.mark.asyncio
     async def test_low_confidence_analysis_falls_back_to_react(
@@ -348,7 +348,7 @@ class TestOrchestratorIntentKindBranches:
         with patch.object(orch._intent_router, "route", return_value=signal):
             result = await orch.analyze(AnalysisRequest(query="模糊的查询"))
 
-        assert result.summary.get("route_type") == "ReAct"
+        assert result.summary.get("route_type") == "agent"
         mock_agent.run.assert_called_once()
 
     @pytest.mark.asyncio
