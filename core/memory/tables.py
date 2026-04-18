@@ -63,3 +63,21 @@ Index("reports_user_created", reports_table.c.user_id, reports_table.c.created_a
 # UNIQUE 语义表达"一个 trace 最多一份报告"的业务约束；PG 允许多个 NULL 共存，
 # 不影响历史行（trace_id=NULL）的存在。
 Index("reports_trace_id", reports_table.c.trace_id, unique=True)
+
+
+# ── 会话实体上下文 ───────────────────────────────────────────────────
+# 结构化存储每个 session 当前讨论的业务实体（po_number / supplier_id 等），
+# 不依赖从消息文本正则提取。每轮分析后 upsert 更新。
+
+session_entities_table = Table(
+    "session_entities",
+    metadata_obj,
+    Column("session_id", String(36), primary_key=True),
+    Column("entities", JSON, nullable=False, server_default=sa.text("'{}'")),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)

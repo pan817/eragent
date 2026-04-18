@@ -114,9 +114,7 @@ _META_PATTERNS: list[re.Pattern[str]] = [
 # _ANALYSIS_KEYWORDS, _LOOKUP_VERBS, _LOOKUP_ENTITIES, _LOOKUP_MODIFIERS
 # 已从 modules.p2p.intent_rules 导入（见上方 import 块）
 
-# L2 置信度长度比打折阈值（方案 D）
-_L2_LENGTH_RATIO_THRESHOLD = 0.4
-_L2_LENGTH_RATIO_DISCOUNT = 0.7
+# L2 length-ratio 阈值已迁到 IntentRoutingSettings（通过 self._settings 注入）
 
 
 def _has_analysis_keywords(query: str) -> bool:
@@ -201,6 +199,7 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "三路匹配", "三单", "匹配", "three way", "three-way", "3way",
             "发票", "收货", "invoice", "goods receipt", "mismatch",
+            "三单核对", "三方对账", "单据不一致", "数量不符", "金额不符",
         },
         "threshold": 0.15,
     },
@@ -209,6 +208,7 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "价格差异", "价格", "price", "variance", "ppv",
             "标准价", "合同价", "成本", "涨价", "单价",
+            "价差分析", "单价波动", "溢价", "成本偏高", "比上次贵",
         },
         "threshold": 0.15,
     },
@@ -216,7 +216,8 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "analysis_type": AnalysisType.PAYMENT_COMPLIANCE,
         "keywords": {
             "付款", "逾期", "payment", "overdue", "到期",
-            "应付", "账期", "折扣", "提前付款",
+            "应付", "账期", "提前付款",
+            "拖欠", "欠款", "延迟付款", "付款违规", "应付未付", "付款超期",
         },
         "threshold": 0.15,
     },
@@ -225,6 +226,7 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "供应商", "绩效", "kpi", "supplier", "performance",
             "准时交货", "交期", "质量", "评分", "scorecard", "otif",
+            "交期表现", "供货质量", "交付率", "供应商等级",
         },
         "threshold": 0.15,
     },
@@ -233,14 +235,16 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "支出", "spend", "采购金额", "花费", "费用",
             "品类", "支出分布", "采购额", "开支",
+            "采购总额", "品类支出", "支出占比", "花销分布",
         },
         "threshold": 0.15,
     },
     {
         "analysis_type": AnalysisType.RECEIPT_ANOMALY,
         "keywords": {
-            "收货", "超量", "拒收", "退货", "延迟收货",
+            "超量", "拒收", "退货", "延迟收货",
             "receipt", "过量", "短缺", "入库异常",
+            "多收", "少收", "收货异常", "验收不合格", "验货失败",
         },
         "threshold": 0.15,
     },
@@ -248,7 +252,8 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "analysis_type": AnalysisType.INVOICE_DUPLICATE,
         "keywords": {
             "重复发票", "duplicate", "重复", "相同发票",
-            "发票", "重复开票", "重复付款",
+            "重复开票", "重复付款",
+            "双开", "一票两付", "重复入账", "付两次", "开重了",
         },
         "threshold": 0.20,
     },
@@ -257,6 +262,7 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "折扣", "discount", "早付", "提前付款折扣",
             "折扣利用", "现金折扣", "节省",
+            "折扣损失", "折扣利用率", "错过折扣", "应得折扣",
         },
         "threshold": 0.15,
     },
@@ -265,6 +271,7 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "keywords": {
             "周期", "cycle", "耗时", "时效",
             "从下单到", "处理时间", "lead time", "效率",
+            "处理慢", "审批太久", "多久能到", "处理快慢",
         },
         "threshold": 0.15,
     },
@@ -272,7 +279,8 @@ _RULE_LIBRARY: list[dict[str, Any]] = [
         "analysis_type": AnalysisType.VENDOR_CONCENTRATION,
         "keywords": {
             "集中度", "依赖", "concentration", "单一来源",
-            "供应商", "占比", "垄断", "多元化",
+            "占比", "垄断", "多元化",
+            "太集中", "依赖度", "供应商太少", "单一供应商", "多元化不足",
         },
         "threshold": 0.20,
     },
@@ -324,7 +332,7 @@ _DEFAULT_ENTITY_PATTERNS: dict[str, list[str]] = {
     "supplier_id": [r"SUP-\d+"],
     "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
     "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
-    "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+"],
+    "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+", r"GR-\d+"],
     "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
 }
 
@@ -341,6 +349,20 @@ class IntentRouter:
         self._seeds_store: Any = None  # 延迟初始化的 VectorStore
         self._seeds_loaded: bool = False
         self._llm: Any = None  # 延迟初始化的 ChatOpenAI
+        self._case_store: Any = None  # 延迟注入的 DAGCaseStore
+        _ir = self._settings.intent_routing
+        _logger.info(
+            "intent_routing settings: l1=%.2f/%.2f l2_sim=%.2f l2_topk=%d "
+            "l3_dag_min=%.2f l25=%s generic_tpl=%s",
+            _ir.l1_threshold_default, _ir.l1_threshold_strict,
+            _ir.l2_similarity_threshold, _ir.l2_topk,
+            _ir.l3_dag_min_confidence, _ir.l25_enabled,
+            _ir.generic_template_enabled,
+        )
+
+    def set_case_store(self, case_store: Any) -> None:
+        """注入 DAGCaseStore 实例（由 Orchestrator 在启动时调用）。"""
+        self._case_store = case_store
 
     # ── 公开接口 ───────────────────────────────────────────────────
 
@@ -452,6 +474,24 @@ class IntentRouter:
                 attrs.update(trace_data)
                 return signal
 
+            # Level 2.5：案例库检索（L2 未命中时尝试）
+            with record_span("intent.l25", "case_search") as l25_attrs:
+                signal = self._try_level25(query, params)
+                l25_attrs["enabled"] = self._settings.intent_routing.l25_enabled
+                l25_attrs["hit"] = signal is not None
+                if signal is not None:
+                    l25_attrs["result_type"] = (
+                        signal.keywords[0] if signal.keywords else ""
+                    )
+                    l25_attrs["confidence"] = signal.confidence
+            if signal is not None:
+                trace_data["hit_level"] = 25
+                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
+                trace_data["confidence"] = signal.confidence
+                trace_data["reasoning"] = signal.reasoning
+                attrs.update(trace_data)
+                return signal
+
             # Level 3：LLM 分类（注入角色偏好）
             with record_span("intent.l3", "llm_classify") as l3_attrs:
                 signal = self._try_level3(query, params, analyst_role=analyst_role)
@@ -471,16 +511,22 @@ class IntentRouter:
     def _evaluate_all_rules(self, query: str) -> list[dict[str, Any]]:
         """评估所有 L1 规则并返回评分详情（仅用于 trace，不影响路由）。"""
         query_lower = query.lower()
+        cfg = self._settings.intent_routing
         scores = []
         for rule in _RULE_LIBRARY:
             rule_keywords: set[str] = rule["keywords"]
             hits = [kw for kw in rule_keywords if kw in query_lower]
             hit_rate = len(hits) / len(rule_keywords)
+            effective_threshold = (
+                cfg.l1_threshold_strict
+                if rule["threshold"] >= 0.20
+                else cfg.l1_threshold_default
+            )
             scores.append({
                 "rule": rule["analysis_type"].value,
                 "hit_rate": round(hit_rate, 3),
-                "threshold": rule["threshold"],
-                "matched": hit_rate >= rule["threshold"],
+                "threshold": effective_threshold,
+                "matched": hit_rate >= effective_threshold,
                 "hit_keywords": hits,
             })
         return scores
@@ -525,7 +571,13 @@ class IntentRouter:
             hits = sum(1 for kw in rule_keywords if kw in query_lower)
             hit_rate = hits / len(rule_keywords)
 
-            if hit_rate >= rule["threshold"] and hit_rate > best_score:
+            cfg = self._settings.intent_routing
+            threshold = (
+                cfg.l1_threshold_strict
+                if rule["threshold"] >= 0.20
+                else cfg.l1_threshold_default
+            )
+            if hit_rate >= threshold and hit_rate > best_score:
                 best_score = hit_rate
                 best_rule = rule
 
@@ -636,6 +688,60 @@ class IntentRouter:
             store.add_documents(docs)
             _logger.info("loaded %d intent seeds into Chroma", len(docs))
 
+    @staticmethod
+    def _aggregate_l2_votes(
+        results: list[dict[str, Any]],
+        similarity_threshold: float,
+    ) -> tuple[str | None, float, str]:
+        """Top-k 多数投票：按 analysis_type 分桶，取票数最多的桶。
+
+        投票规则（简化版，不用权重）：
+        1. 计算每条结果的 similarity = 1 - distance
+        2. 按 analysis_type 分桶，统计每桶的票数和最高 similarity
+        3. 取票数最多的桶；平票时取最高 similarity 的桶
+        4. 该桶的最高 similarity >= threshold → 命中
+        5. 否则返回 None
+
+        Returns:
+            (analysis_type_str | None, best_similarity, reasoning)
+        """
+        from collections import Counter
+
+        if not results:
+            return None, 0.0, "L2 voting: empty results"
+
+        votes: dict[str, list[float]] = {}
+        for r in results:
+            atype = r.get("metadata", {}).get("analysis_type", "")
+            if not atype:
+                continue
+            sim = 1.0 - r.get("distance", 999.0)
+            votes.setdefault(atype, []).append(sim)
+
+        if not votes:
+            return None, 0.0, "L2 voting: no valid types"
+
+        # Sort by: (vote_count DESC, max_similarity DESC)
+        ranked = sorted(
+            votes.items(),
+            key=lambda kv: (len(kv[1]), max(kv[1])),
+            reverse=True,
+        )
+        winner_type, winner_sims = ranked[0]
+        best_sim = max(winner_sims)
+        vote_count = len(winner_sims)
+        total = sum(len(v) for v in votes.values())
+
+        reasoning = (
+            f"L2 top-k 投票：{winner_type} 得票 {vote_count}/{total}，"
+            f"最高相似度 {best_sim:.1%}"
+        )
+
+        if best_sim >= similarity_threshold:
+            return winner_type, best_sim, reasoning
+
+        return None, best_sim, reasoning + "（未达阈值）"
+
     def _try_level2(
         self, query: str, params: dict[str, Any]
     ) -> QuerySignal | None:
@@ -647,7 +753,7 @@ class IntentRouter:
             return None
 
         try:
-            results = store.search(query=query, top_k=1)
+            results = store.search(query=query, top_k=self._settings.intent_routing.l2_topk)
         except Exception as exc:
             _logger.warning("intent seeds search failed, skip L2: %s", exc)
             return None
@@ -655,6 +761,49 @@ class IntentRouter:
         if not results:
             return None
 
+        cfg = self._settings.intent_routing
+        # Top-k voting when topk > 1
+        if cfg.l2_topk > 1 and len(results) > 1:
+            winner_type, best_sim, reasoning = self._aggregate_l2_votes(
+                results, cfg.l2_similarity_threshold,
+            )
+            if winner_type is None:
+                return None
+
+            # Sentinel types
+            if winner_type in (_KW_DATA_LOOKUP, _KW_META):
+                sentinel_kind = (
+                    IntentKind.DATA_LOOKUP if winner_type == _KW_DATA_LOOKUP
+                    else IntentKind.META
+                )
+                return QuerySignal(
+                    raw_query=query,
+                    intent_kind=sentinel_kind,
+                    keywords=[winner_type],
+                    entities=params,
+                    time_range_days=params.get("days"),
+                    route_level=2,
+                    confidence=round(best_sim, 3),
+                    reasoning=reasoning,
+                )
+
+            try:
+                analysis_type = AnalysisType(winner_type)
+            except ValueError:
+                return None
+
+            return QuerySignal(
+                raw_query=query,
+                intent_kind=IntentKind.ANALYSIS,
+                keywords=[analysis_type.value],
+                entities=params,
+                time_range_days=params.get("days"),
+                route_level=2,
+                confidence=round(best_sim, 3),
+                reasoning=reasoning,
+            )
+
+        # Original top-1 logic (topk=1 or only 1 result)
         best = results[0]
         distance: float = best.get("distance", 999.0)
         # Chroma cosine distance → similarity = 1 - distance
@@ -663,15 +812,16 @@ class IntentRouter:
         # 方案 D：query 远短于种子文本时，相似度可能虚高，打折处理
         seed_text: str = best.get("text", "")
         length_ratio = len(query) / max(len(seed_text), 1)
-        if length_ratio < _L2_LENGTH_RATIO_THRESHOLD:
+        _ir = self._settings.intent_routing
+        if length_ratio < _ir.l2_length_ratio_floor:
             original = similarity
-            similarity *= _L2_LENGTH_RATIO_DISCOUNT
+            similarity *= _ir.l2_length_ratio_penalty
             _logger.info(
                 "L2 length-ratio discount: query=%d seed=%d ratio=%.2f sim=%.3f→%.3f",
                 len(query), len(seed_text), length_ratio, original, similarity,
             )
 
-        if similarity < 0.80:
+        if similarity < self._settings.intent_routing.l2_similarity_threshold:
             return None
 
         matched_type_str: str = best.get("metadata", {}).get("analysis_type", "")
@@ -735,6 +885,59 @@ class IntentRouter:
                 f"L2 语义匹配 '{best.get('text', '')[:30]}…'，"
                 f"相似度 {similarity:.1%}"
             ),
+        )
+
+    # ── Level 2.5：案例库检索 ────────────────────────────────────────
+
+    def _try_level25(
+        self, query: str, params: dict[str, Any]
+    ) -> QuerySignal | None:
+        """L2.5 案例库检索：从历史成功 DAG 案例中匹配相似 query。
+
+        仅在 ``intent_routing.l25_enabled=True`` 时生效。命中时返回
+        route_level=25 的 signal，并通过 ``dag_hint`` 传递复用 DAG 定义。
+        """
+        if not self._settings.intent_routing.l25_enabled:
+            return None
+
+        if self._case_store is None:
+            return None
+
+        try:
+            case = self._case_store.search_similar_case(query)
+        except Exception as exc:
+            _logger.warning("L2.5 case search failed: %s", exc)
+            return None
+
+        if case is None:
+            return None
+
+        analysis_type_str = case.get("analysis_type", "")
+        dag_def = case.get("dag_definition")
+        similarity = case.get("similarity", 0.0)
+
+        _logger.info(
+            "L2.5 case hit: type=%s similarity=%.3f tasks=%d",
+            analysis_type_str, similarity, case.get("task_count", 0),
+        )
+
+        # 判断是否为合法 AnalysisType
+        try:
+            AnalysisType(analysis_type_str)
+        except ValueError:
+            _logger.warning("L2.5 case has invalid analysis_type: %s", analysis_type_str)
+            return None
+
+        return QuerySignal(
+            raw_query=query,
+            intent_kind=IntentKind.ANALYSIS,
+            keywords=[analysis_type_str],
+            entities=params,
+            time_range_days=params.get("days"),
+            route_level=25,
+            confidence=similarity,
+            dag_hint=dag_def if isinstance(dag_def, list) else None,
+            reasoning=f"L2.5 案例命中，相似度 {similarity:.1%}",
         )
 
     # ── Level 3：LLM 分类 ───────────────────────────────────────────

@@ -35,6 +35,22 @@ from core.orchestrator.router import IntentRouter
 _logger = get_logger(__name__)
 
 
+# 概览查询触发词（批 5）：需要同时包含"采购相关词"和"概览意图词"
+_OVERVIEW_PROCUREMENT_WORDS = {"采购", "procurement", "采购订单"}
+_OVERVIEW_INTENT_WORDS = {
+    "最近", "近期", "概览", "总体", "总览", "整体", "全面",
+    "现状", "情况", "怎么样", "近况", "健康度",
+}
+
+
+def _matches_overview_query(query: str) -> bool:
+    """判断 query 是否为概览类查询（需同时命中采购词 + 概览意图词）。"""
+    q = query.lower()
+    has_procurement = any(w in q for w in _OVERVIEW_PROCUREMENT_WORDS)
+    has_intent = any(w in q for w in _OVERVIEW_INTENT_WORDS)
+    return has_procurement and has_intent
+
+
 def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
     """orchestrator 内用的 stage 事件发布器：失败吞掉，不影响分析主流程。"""
     try:
@@ -164,6 +180,37 @@ class Orchestrator:
                 exc_info=True,
             )
 
+    async def _save_session_entities(
+        self,
+        session_id: str,
+        parsed_params: dict[str, Any],
+        result: AnalysisResult,
+    ) -> None:
+        """合并路由阶段 + 执行结果中的实体，写入 session_entities。"""
+        entity_keys = {"po_number", "supplier_id", "invoice_number",
+                       "payment_number", "receipt_number"}
+        # 来源 A：路由阶段已解析的实体（含继承 + 级联补充）
+        session_entities = {
+            k: v for k, v in parsed_params.items()
+            if k in entity_keys and v
+        }
+        # 来源 B：从执行结果报告中补充提取新实体
+        if result.report_markdown:
+            from core.orchestrator.router import _extract_params
+            result_entities = _extract_params(
+                result.report_markdown,
+                self._settings.analysis.entity_patterns,
+            )
+            for k, v in result_entities.items():
+                if k in entity_keys and v and k not in session_entities:
+                    session_entities[k] = v
+
+        if session_entities:
+            await asyncio.to_thread(
+                self._short_term.save_entity_context,
+                session_id, session_entities,
+            )
+
     # ── 延迟初始化 ─────────────────────────────────────────────────
 
     @property
@@ -192,6 +239,7 @@ class Orchestrator:
         """延迟初始化 DAG Executor（Level 1/2 DAG 执行）。"""
         if self._dag_executor is None:
             from core.orchestrator.dag.executor import DAGExecutor
+            from core.orchestrator.dag.case_store import DAGCaseStore
 
             if self._provider is not None:
                 from core.orchestrator.dag.registry import build_registry_from_provider
@@ -208,9 +256,11 @@ class Orchestrator:
                     from modules.p2p.report_agent import ReportAgent
 
                     self._report_agent = ReportAgent(settings=self._settings)
+            case_store = DAGCaseStore(settings=self._settings)
             self._dag_executor = DAGExecutor(
                 registry=registry,
                 report_agent=self._report_agent,
+                case_store=case_store,
             )
         return self._dag_executor
 
@@ -516,12 +566,15 @@ class Orchestrator:
             # - 其余 → ReAct 兜底
             from core.orchestrator.signal import IntentKind as _IntentKindRoute
 
+            # TECH-DEBT(#8): DATA_LOOKUP 强制走 ReAct，缺少 Lookup DAG 模板
             is_data_lookup = signal.intent_kind == _IntentKindRoute.DATA_LOOKUP
             low_confidence = (
                 signal.intent_kind == _IntentKindRoute.ANALYSIS
                 and signal.route_level == 3
-                and signal.confidence < 0.5
+                and signal.confidence < self._settings.intent_routing.l3_dag_min_confidence
             )
+
+            generic_template_key: str | None = None  # 通用模板键（批 5）
 
             if is_recall or is_data_lookup or low_confidence:
                 use_dag = False
@@ -533,8 +586,20 @@ class Orchestrator:
                     or parsed_params.get("invoice_number")
                     or parsed_params.get("receipt_number")
                 )
+
+                # 批 5：COMPREHENSIVE + 无实体 + 概览触发词 → 通用 DAG 模板
+                if (
+                    self._settings.intent_routing.generic_template_enabled
+                    and analysis_type == AnalysisType.COMPREHENSIVE
+                    and not has_entity
+                    and _matches_overview_query(request.query)
+                ):
+                    generic_template_key = "recent_procurement_health"
+
                 use_dag = (
-                    (signal.route_level in (1, 2) and analysis_type != AnalysisType.COMPREHENSIVE)
+                    generic_template_key is not None
+                    or signal.route_level == 25  # L2.5 案例命中
+                    or (signal.route_level in (1, 2) and analysis_type != AnalysisType.COMPREHENSIVE)
                     or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
                 )
 
@@ -581,6 +646,15 @@ class Orchestrator:
                 {k: v for k, v in parsed_params.items() if k != "days" and v},
             )
 
+            # trace span: 标记执行路径（DAG / agent），便于命中率聚合
+            from core.observability.tracing import record_span
+            with record_span("orchestrator", "route_execution") as exec_attrs:
+                exec_attrs["execution"] = "dag" if use_dag else "agent"
+                exec_attrs["analysis_type"] = analysis_type.value
+                exec_attrs["route_level"] = signal.route_level
+                exec_attrs["confidence"] = signal.confidence
+                exec_attrs["l3_threshold_used"] = self._settings.intent_routing.l3_dag_min_confidence
+
             stage_name = "dag_planned" if use_dag else "react_started"
             _publish_stage_safe(
                 stage_name,
@@ -601,11 +675,17 @@ class Orchestrator:
                 use_agent_fallback=not use_dag,
                 context_summary=session_ctx.get("context_summary", ""),
                 skip_memory_write=is_recall,
+                generic_template_key=generic_template_key,
             )
 
             # 5. 持久化（非分析意图的回溯查询不写入长期记忆和报告，
             #    避免 "Q: 上次分析的结果呢 A: ..." 被存入记忆产生循环引用）
             if not is_recall:
+                # 5a. 实体上下文持久化：合并路由阶段 + 执行结果中的实体
+                await self._save_session_entities(
+                    session_id, parsed_params, result,
+                )
+                # 5b. 报告持久化
                 await asyncio.to_thread(self._persist_report, result)
             return result
 
@@ -630,20 +710,37 @@ class Orchestrator:
         use_agent_fallback: bool = False,
         context_summary: str = "",
         skip_memory_write: bool = False,
+        generic_template_key: str | None = None,
     ) -> AnalysisResult:
         """通过 DAG Executor 执行分析（统一入口）。
 
         当 use_agent_fallback=True 或 DAG 模板不可用时，构造单节点 agent DAG
         交由 DAGExecutor 执行，等价于原 _execute_react 的行为。
         """
-        from core.orchestrator.dag.templates import load_dag_template
+        from core.orchestrator.dag.templates import load_dag_template, load_generic_template
         from core.orchestrator.dag.validator import DAGValidator
 
         is_agent_path = use_agent_fallback
         dag_tasks = None
 
         if not use_agent_fallback:
-            dag_tasks = load_dag_template(analysis_type, params)
+            # L2.5 案例命中 → 优先复用 dag_hint（跳过模板加载）
+            if getattr(signal, "dag_hint", None):
+                dag_tasks = signal.dag_hint
+                _logger.info(
+                    "L2.5 dag_hint reused: %d tasks, route_level=%d",
+                    len(dag_tasks), signal.route_level,
+                )
+            elif generic_template_key:
+                # 通用概览模板（批 5）
+                dag_tasks = load_generic_template(generic_template_key, params)
+                if dag_tasks is not None:
+                    _logger.info(
+                        "generic template loaded: key=%s tasks=%d",
+                        generic_template_key, len(dag_tasks),
+                    )
+            else:
+                dag_tasks = load_dag_template(analysis_type, params)
             if dag_tasks is None:
                 _logger.info("no DAG template for %s, fallback to agent", analysis_type.value)
                 is_agent_path = True
@@ -698,6 +795,8 @@ class Orchestrator:
             dag_tasks,
             output_mode_prompt=output_mode_prompt,
             agent=self._lazy_agent if is_agent_path else None,
+            query=query,
+            analysis_type=analysis_type.value,
         )
         duration_ms = (time.monotonic() - start_time) * 1000.0
 

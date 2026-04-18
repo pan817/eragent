@@ -47,7 +47,7 @@ LOOKUP_VERBS: set[str] = {
 LOOKUP_ENTITIES: set[str] = {
     "po", "po号", "采购单", "采购订单", "订单",
     "发票", "invoice", "inv",
-    "付款", "付款单", "payment",
+    "付款", "付款单", "payment", "支付单", "支付", "付款记录", "应付",
     "收货", "收货单", "receipt", "rcv", "gr",
     "供应商", "supplier", "sup",
     "合同", "contract",

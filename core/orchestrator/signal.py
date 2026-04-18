@@ -58,6 +58,8 @@ class QuerySignal:
         time_range_days: 提取的时间范围（天），None 表示未识别。
         route_level: 命中的路由层级（1 / 2 / 3）。
         confidence: 路由置信度（0.0~1.0）。
+        dag_hint: L2.5 案例检索命中时传递的 DAG 定义，供 orchestrator
+            跳过模板加载直接复用。None 表示未命中或未启用 L2.5。
         reasoning: 路由决策的可读说明，用于 trace 和调试。
     """
 
@@ -69,4 +71,5 @@ class QuerySignal:
     time_range_days: int | None = None
     route_level: int = 0
     confidence: float = 0.0
+    dag_hint: list[dict[str, Any]] | None = None
     reasoning: str = ""

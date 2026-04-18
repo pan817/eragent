@@ -57,6 +57,54 @@
 - **建议修复**：统一 TTL 层级关系（entry TTL ≥ orphan TTL），在 sweep 中增加"entry 已淘汰但 chat_messages 仍 pending"的兜底检查；或将三套清理逻辑收敛到一个 `cleanup()` 方法中统一调度。
 - **发现日期**：2026-04-18（重构分析时发现）
 
+### 5. LLM 调用缺少统一超时与重试策略
+- **问题**：当前 LLM 调用（主模型 + fast 模型）未统一配置超时和重试策略，部分调用点依赖框架默认值，存在无限等待或无退避重试的风险。
+- **影响**：LLM 服务抖动时可能导致请求堆积、线程/协程耗尽，进而引发雪崩。
+- **涉及文件**：
+  - [core/llm/model_factory.py](../core/llm/model_factory.py)
+  - [modules/p2p/model_factory.py](../modules/p2p/model_factory.py)
+  - [core/orchestrator/router/__init__.py](../core/orchestrator/router/__init__.py)（L3 LLM 调用）
+  - [modules/p2p/report_agent.py](../modules/p2p/report_agent.py)
+- **建议修复**：在 `model_factory` 层统一注入 `timeout`、`max_retries`、退避策略配置项（从 `config.yaml` 读取），所有 LLM 调用点继承统一配置。
+- **发现日期**：2026-04-18
+
+### 6. 资源上限未全面配置
+- **问题**：并发分析任务数、单次查询返回数据量等关键资源缺少硬上限配置，依赖隐式默认值或无限制。
+- **影响**：高并发场景下可能导致内存耗尽、数据库连接池打满、响应超时。
+- **涉及文件**：
+  - [core/tasks/registry.py](../core/tasks/registry.py)（并发任务数）
+  - [modules/p2p/repository.py](../modules/p2p/repository.py)（查询返回量）
+  - [core/memory/long_term.py](../core/memory/long_term.py)（记忆存储条数）
+- **建议修复**：在 `config.yaml` 中增加 `limits` 配置段，统一管理各类资源上限；代码中读取配置并做硬性截断。
+- **发现日期**：2026-04-18
+
+### 7. FastAPI 缺少优雅停机处理
+- **问题**：FastAPI shutdown 时未等待进行中的分析任务完成或超时取消，直接退出可能丢弃正在处理的请求。
+- **影响**：部署更新或重启时，用户正在进行的分析任务会中断，SSE 连接断开无恢复机制。
+- **涉及文件**：
+  - [api/main.py](../api/main.py)（lifespan shutdown）
+  - [core/tasks/registry.py](../core/tasks/registry.py)（任务生命周期）
+- **建议修复**：在 lifespan shutdown 阶段调用 `TaskRegistry.shutdown(timeout=30)`，等待所有运行中任务完成或超时后标记为 aborted；同时停止接受新任务。
+- **发现日期**：2026-04-18
+
+### 8. DATA_LOOKUP 查询缺少 DAG 模板，100% 走 ReAct
+- **问题**：所有被识别为 DATA_LOOKUP 的事实查询（"查最新 PO"/"列出发票"/"看下应付明细"等）在 orchestrator 中被强制排除在 DAG 路径之外（`is_data_lookup → use_dag = False`），只能走 ReAct（LLM Agent 自主调 tool）。
+- **影响**：
+  - 延迟高：每次至少 1 轮 LLM 推理（1-3s），而这类查询本质只需调 1 个 query_* tool（200-500ms）；
+  - 不可缓存：无法走 case_store（批 4）复用历史 DAG；
+  - 不可预测：LLM 可能多调无关 tool 或输出"4 段报告"格式，与用户期望的结构化表格不符；
+  - 成本浪费：简单事实查询不需要 LLM 推理。
+- **涉及文件**：
+  - [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py)（`is_data_lookup → use_dag = False` 决策）
+  - [modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py)（需新增 Lookup DAG 模板）
+- **建议修复**：
+  1. 新增 5 个 2 节点 Lookup DAG 模板（PO / Invoice / Payment / Receipt / Supplier），每个仅 `query_* → lookup_formatter`；
+  2. 新增 `lookup_formatter` tool（直接渲染 Markdown 表格，不走 LLM ReportAgent）；
+  3. orchestrator 中 DATA_LOOKUP 改为"Lookup 模板优先 + ReAct 兜底"两段决策；
+  4. 解决 DAG 路径 `output_mode=chat` 被强制升为 `brief` 的矛盾。
+  - 详细方案见 [docs/intent_routing_hit_rate_optimization.md 第 12-16 章](intent_routing_hit_rate_optimization.md)。
+- **发现日期**：2026-04-18
+
 ---
 
 ## 已修复

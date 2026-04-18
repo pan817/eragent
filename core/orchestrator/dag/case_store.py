@@ -280,3 +280,62 @@ class DAGCaseStore:
         except Exception as exc:
             _logger.warning("Chroma batch load failed: %s", exc)
             return 0
+
+    # ── 语义检索（L2.5） ──────────────────────────────────────────
+
+    def search_similar_case(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        min_similarity: float = 0.75,
+    ) -> dict[str, Any] | None:
+        """检索与 query 语义相似的成功案例。
+
+        复用现有 Chroma intent_cases collection。命中时返回案例详情
+        （含 dag_definition），未命中或异常返回 None。
+        """
+        try:
+            store = self._ensure_chroma()
+        except Exception as exc:
+            _logger.warning("case_store search: Chroma init failed: %s", exc)
+            return None
+
+        try:
+            results = store.search(query=query, top_k=top_k)
+        except Exception as exc:
+            _logger.warning("case_store search failed: %s", exc)
+            return None
+
+        if not results:
+            return None
+
+        best = results[0]
+        distance: float = best.get("distance", 999.0)
+        similarity = 1.0 - distance
+
+        if similarity < min_similarity:
+            return None
+
+        metadata = best.get("metadata", {})
+        dag_def_raw = metadata.get("dag_definition", "")
+
+        # dag_definition 在 Chroma 中存为 JSON 字符串
+        if isinstance(dag_def_raw, str) and dag_def_raw:
+            try:
+                dag_def = json.loads(dag_def_raw)
+            except (json.JSONDecodeError, TypeError):
+                _logger.warning("case_store search: invalid dag_definition JSON")
+                return None
+        elif isinstance(dag_def_raw, list):
+            dag_def = dag_def_raw
+        else:
+            return None
+
+        return {
+            "query": best.get("text", ""),
+            "analysis_type": metadata.get("analysis_type", ""),
+            "dag_definition": dag_def,
+            "similarity": round(similarity, 3),
+            "task_count": metadata.get("task_count", 0),
+        }

@@ -779,8 +779,8 @@ class TestL1DataLookupFallback:
 
     def test_analysis_keyword_takes_priority(self) -> None:
         """同时含 analysis 关键词与 lookup 动词时，仍优先判为 ANALYSIS。"""
-        # "查询发票重复情况" 含 "查询"+"发票" lookup signal，但更优是 INVOICE_DUPLICATE
-        signal = self.router._try_level1("发票重复检查", {})
+        # "查询重复发票重复付款" 含 "查询" lookup 动词，但 INVOICE_DUPLICATE 命中更优
+        signal = self.router._try_level1("查询重复发票重复付款", {})
         assert signal is not None
         assert signal.intent_kind == IntentKind.ANALYSIS
 

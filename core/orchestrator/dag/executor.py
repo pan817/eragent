@@ -35,15 +35,19 @@ class DAGExecutor:
         self,
         registry: ToolRegistry,
         report_agent: Any = None,
+        case_store: Any = None,
     ) -> None:
         self._registry = registry
         self._report_agent = report_agent
+        self._case_store = case_store
 
     async def execute(
         self,
         tasks: list[dict[str, Any]],
         output_mode_prompt: str = "",
         agent: Any = None,
+        query: str = "",
+        analysis_type: str = "",
     ) -> dict[str, Any]:
         """执行 DAG 任务列表，记录完整执行过程到 trace。
 
@@ -262,7 +266,7 @@ class DAGExecutor:
             f" failures={failed}" if failed else "",
         )
 
-        return {
+        result = {
             "status": status,
             "outputs": outputs,
             "completed_tasks": completed,
@@ -271,3 +275,18 @@ class DAGExecutor:
             "duration_sec": round(duration, 2),
             "report_error": report_error,
         }
+
+        # case_store 写入：成功 DAG 案例持久化（失败不阻断主流程）
+        if self._case_store is not None and result.get("status") == "ok":
+            try:
+                await self._case_store.store_successful_case(
+                    query=query,
+                    analysis_type=analysis_type,
+                    dag=tasks,
+                    route_type="DAG",
+                    exec_result=result,
+                )
+            except Exception as exc:
+                _logger.warning("case_store write failed (non-blocking): %s", exc)
+
+        return result

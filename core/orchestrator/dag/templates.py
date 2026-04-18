@@ -96,3 +96,31 @@ def load_dag_template(
         return None
 
     return _replace_params(template, effective_params)
+
+
+def load_generic_template(
+    template_key: str,
+    params: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """加载并参数化通用概览模板（不按 AnalysisType 索引）。
+
+    Args:
+        template_key: 模板键名（如 "recent_procurement_health"）。
+        params: 参数字典（至少含 days）。
+
+    Returns:
+        参数化后的 DAG 任务列表，或 None（键不存在）。
+    """
+    from modules.p2p.dag_templates import get_generic_template_map
+
+    generic_map = get_generic_template_map()
+    template = generic_map.get(template_key)
+    if template is None:
+        return None
+
+    effective_params = {
+        "days": params.get("days", 30),
+        "supplier_id": params.get("supplier_id", ""),
+        "po_number": params.get("po_number", ""),
+    }
+    return _replace_params(template, effective_params)

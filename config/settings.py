@@ -272,7 +272,7 @@ class AnalysisSettings(BaseSettings):
         "supplier_id": [r"SUP-\d+"],
         "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
         "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
-        "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+"],
+        "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+", r"GR-\d+"],
         "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
     })
 
@@ -423,6 +423,57 @@ class ReportSettings(BaseSettings):
     model_config = {"env_prefix": "REPORT_"}
 
 
+class IntentRoutingSettings(BaseSettings):
+    """意图路由配置（控制 L1/L2/L3 路由阈值与特性开关）。"""
+
+    # L1 关键词命中率门槛
+    l1_threshold_default: float = Field(
+        default=0.10,
+        description="L1 大多数规则的命中率门槛（hit_rate >= 此值才算命中）",
+    )
+    l1_threshold_strict: float = Field(
+        default=0.14,
+        description="INVOICE_DUPLICATE / VENDOR_CONCENTRATION 等高假阳性规则的命中率门槛",
+    )
+    # L2 Chroma 语义匹配
+    l2_similarity_threshold: float = Field(
+        default=0.80,
+        description="L2 命中所需的最低 cosine similarity（1 - distance）",
+    )
+    l2_length_ratio_floor: float = Field(
+        default=0.4,
+        description="query/seed 长度比低于此值时触发相似度折扣",
+    )
+    l2_length_ratio_penalty: float = Field(
+        default=0.7,
+        description="长度比过低时的相似度乘子",
+    )
+    l2_topk: int = Field(
+        default=1,
+        description="L2 检索返回的 top-k 数量（1=原行为，3=投票模式）",
+    )
+    # L3 LLM 分类置信度分档
+    l3_dag_min_confidence: float = Field(
+        default=0.5,
+        description="L3 ANALYSIS 走 DAG 的最低置信度（低于此值走 ReAct）",
+    )
+    l3_react_min_confidence: float = Field(
+        default=0.3,
+        description="L3 ANALYSIS 低于此值才走 ReAct（中间档预留 L2.5 用）",
+    )
+    # Feature flags
+    l25_enabled: bool = Field(
+        default=False,
+        description="L2.5 案例检索 feature flag（批4启用）",
+    )
+    generic_template_enabled: bool = Field(
+        default=True,
+        description="通用 DAG 模板 feature flag（批5启用）",
+    )
+
+    model_config = {"env_prefix": "INTENT_ROUTING_"}
+
+
 class MemorySettings(BaseSettings):
     """记忆管理配置。"""
 
@@ -510,6 +561,7 @@ class Settings(BaseSettings):
     report: ReportSettings = Field(default_factory=ReportSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    intent_routing: IntentRoutingSettings = Field(default_factory=IntentRoutingSettings)
 
     model_config = {"env_prefix": "APP_", "env_file": ".env", "extra": "ignore"}
 

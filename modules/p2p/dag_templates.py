@@ -708,6 +708,48 @@ _VENDOR_CONCENTRATION_DAG = [
 ]
 
 
+# ── 通用概览模板 ────────────────────────────────────────────────────
+
+_RECENT_PROCUREMENT_HEALTH_DAG: list[dict[str, Any]] = [
+    {
+        "task_id": "t1_po_summary",
+        "type": "tool",
+        "tool_name": "query_purchase_orders",
+        "inputs": {"days": "{days}", "supplier_id": ""},
+        "depends_on": [],
+        "timeout_sec": 60,
+        "output_key": "po_summary",
+    },
+    {
+        "task_id": "t2_anomaly_topn",
+        "type": "tool",
+        "tool_name": "rule_three_way_match",
+        "inputs": {"days": "{days}"},
+        "depends_on": [],
+        "timeout_sec": 120,
+        "output_key": "anomaly_topn",
+    },
+    {
+        "task_id": "t3_supplier_topn",
+        "type": "tool",
+        "tool_name": "rule_supplier_performance",
+        "inputs": {"days": "{days}", "supplier_id": ""},
+        "depends_on": [],
+        "timeout_sec": 120,
+        "output_key": "supplier_topn",
+    },
+    {
+        "task_id": "t4_report",
+        "type": "tool",
+        "tool_name": "generate_summary_report",
+        "inputs": {"scenario": "近{days}天采购健康度概览"},
+        "depends_on": ["t1_po_summary", "t2_anomaly_topn", "t3_supplier_topn"],
+        "timeout_sec": 120,
+        "output_key": "report",
+    },
+]
+
+
 # ── 模板注册表 ──────────────────────────────────────────────────────
 
 # 分析类型维度模板
@@ -734,6 +776,12 @@ _ENTITY_TEMPLATE_MAP: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# 通用概览模板（不按 AnalysisType 索引，按命名键检索）
+_GENERIC_TEMPLATE_MAP: dict[str, list[dict[str, Any]]] = {
+    "recent_procurement_health": _RECENT_PROCUREMENT_HEALTH_DAG,
+}
+
+
 def get_template_map() -> dict[AnalysisType, list[dict[str, Any]]]:
     """返回分析类型维度模板映射。"""
     return dict(_TEMPLATE_MAP)
@@ -742,3 +790,8 @@ def get_template_map() -> dict[AnalysisType, list[dict[str, Any]]]:
 def get_entity_template_map() -> dict[str, list[dict[str, Any]]]:
     """返回实体维度模板映射。"""
     return dict(_ENTITY_TEMPLATE_MAP)
+
+
+def get_generic_template_map() -> dict[str, list[dict[str, Any]]]:
+    """返回通用概览模板映射。"""
+    return dict(_GENERIC_TEMPLATE_MAP)

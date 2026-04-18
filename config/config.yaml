@@ -102,6 +102,7 @@ analysis:
     receipt_number:
       - 'RCV-\d[\da-zA-Z_-]*\d'     # RCV-2024-0001
       - 'RCV-\d+'                    # RCV-001
+      - 'GR-\d+'                     # GR-0001 (goods receipt)
     days:
       - '(?:最近|过去|近)\s*(\d+)\s*天'
       - '(?:past|last|recent)\s+(\d+)\s*days?'
@@ -227,6 +228,22 @@ memory:
     trim_enabled: true              # ReAct 循环内 LLM 输入裁剪总开关
     keep_recent_rounds: 2           # 保留最近几轮完整对话（含工具结果）
     tool_content_max_chars: 500     # 早期 ToolMessage 截断字符数（0=清空内容）
+
+intent_routing:
+  # L1 keyword hit-rate thresholds
+  l1_threshold_default: 0.10
+  l1_threshold_strict: 0.14
+  # L2 Chroma semantic matching
+  l2_similarity_threshold: 0.80
+  l2_length_ratio_floor: 0.4
+  l2_length_ratio_penalty: 0.7
+  l2_topk: 1
+  # L3 LLM classification confidence tiers
+  l3_dag_min_confidence: 0.5
+  l3_react_min_confidence: 0.3
+  # Feature flags (later batches)
+  l25_enabled: false
+  generic_template_enabled: true
 
 logging:
   level: "INFO"

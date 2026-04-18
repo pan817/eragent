@@ -118,7 +118,6 @@ class ShortTermMemory:
         读取失败返回空上下文，不阻塞主流程。
         """
         from core.observability.tracing import record_span
-        from core.orchestrator.router import _extract_params
 
         empty: dict[str, Any] = {"has_history": False, "context_summary": "", "entities": {}}
 
@@ -160,15 +159,8 @@ class ShortTermMemory:
                     if last_human and last_ai:
                         break
 
-                # 从历史 query 和 response 中提取实体
-                entities: dict[str, Any] = {}
-                for text in [last_human, last_ai]:
-                    extracted = _extract_params(
-                        text, self._settings.analysis.entity_patterns
-                    )
-                    for key, val in extracted.items():
-                        if key not in entities and val:
-                            entities[key] = val
+                # 从 session_entities 表读取结构化实体上下文
+                entities = self._load_entity_context(session_id)
 
                 # 集中裁剪：所有路径的短期记忆都经过此产出点
                 context_summary = last_ai if last_ai else ""
@@ -258,3 +250,97 @@ class ShortTermMemory:
                 _logger.warning(
                     "DAG short-term memory write failed (non-blocking): %s", exc
                 )
+
+    # ── 结构化实体上下文（session_entities 表）──────────────────────
+
+    # 仅保留业务实体键，排除 days 等参数
+    _ENTITY_KEYS = {"po_number", "supplier_id", "invoice_number",
+                    "payment_number", "receipt_number"}
+
+    def _get_entity_engine(self) -> Any:
+        """获取 session_entities 使用的 SQLAlchemy engine。
+
+        可在测试中通过赋值 ``stm._entity_engine = test_engine`` 替换。
+        """
+        if hasattr(self, "_entity_engine") and self._entity_engine is not None:
+            return self._entity_engine
+        from core.database.engine import get_engine
+        return get_engine(self._settings.postgresql)
+
+    def _load_entity_context(self, session_id: str) -> dict[str, Any]:
+        """从 session_entities 表读取实体上下文。
+
+        读取失败返回空 dict，不阻塞主流程。
+        """
+        try:
+            from core.memory.tables import session_entities_table
+            from sqlalchemy import select
+
+            engine = self._get_entity_engine()
+            with engine.connect() as conn:
+                row = conn.execute(
+                    select(session_entities_table.c.entities).where(
+                        session_entities_table.c.session_id == session_id
+                    )
+                ).first()
+                if row is None:
+                    return {}
+                return dict(row[0]) if row[0] else {}
+        except Exception as exc:
+            _logger.warning("load entity context failed (non-blocking): %s", exc)
+            return {}
+
+    def save_entity_context(
+        self, session_id: str, entities: dict[str, Any]
+    ) -> None:
+        """将实体上下文 upsert 写入 session_entities 表。
+
+        仅保留业务实体键的非空值。与现有值 merge（新值覆盖旧值，
+        旧有但本轮未出现的键保留）。写入失败不阻塞主流程。
+        """
+        filtered = {
+            k: v for k, v in entities.items()
+            if k in self._ENTITY_KEYS and v
+        }
+        if not filtered:
+            return
+
+        try:
+            from core.memory.tables import session_entities_table
+            from core.time_utils import now_cn
+
+            engine = self._get_entity_engine()
+
+            # 先读现有值做 merge
+            existing = self._load_entity_context(session_id)
+            merged = {**existing, **filtered}
+
+            from sqlalchemy import select, update
+
+            with engine.begin() as conn:
+                exists = conn.execute(
+                    select(session_entities_table.c.session_id).where(
+                        session_entities_table.c.session_id == session_id
+                    )
+                ).first()
+                if exists:
+                    conn.execute(
+                        update(session_entities_table)
+                        .where(session_entities_table.c.session_id == session_id)
+                        .values(entities=merged, updated_at=now_cn())
+                    )
+                else:
+                    conn.execute(
+                        session_entities_table.insert().values(
+                            session_id=session_id,
+                            entities=merged,
+                            updated_at=now_cn(),
+                        )
+                    )
+
+            _logger.info(
+                "entity context saved: session=%s entities=%s",
+                session_id, list(merged.keys()),
+            )
+        except Exception as exc:
+            _logger.warning("save entity context failed (non-blocking): %s", exc)

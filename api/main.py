@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes.analyze import router as analyze_router
 from api.routes.analyze_async import router as analyze_async_router
 from api.routes.sessions import router as sessions_router
+from api.routes.admin_metrics import router as admin_metrics_router
 from api.routes.traces import router as traces_router
 from config.settings import get_settings
 from core.database import (
@@ -235,6 +236,7 @@ def create_app() -> FastAPI:
     app.include_router(analyze_async_router, prefix="/api/v1/ptp-agent")
     app.include_router(sessions_router, prefix="/api/v1/ptp-agent")
     app.include_router(traces_router, prefix="/api/v1/ptp-agent")
+    app.include_router(admin_metrics_router, prefix="/api/v1/ptp-agent")
 
     return app
 

@@ -12,10 +12,10 @@
 | 项 | 值 |
 |---|---|
 | 创建日期 | 2026-04-16 |
-| 当前版本 | v1.0 (初稿) |
-| 范围 | 仅意图路由层（`core/orchestrator/router.py` + `orchestrator.py` + `dag/case_store.py` + 配套配置/测试/监控）|
+| 当前版本 | v2.0 (重构后核实刷新) |
+| 范围 | 仅意图路由层（`core/orchestrator/router/` 包 + `orchestrator.py` + `dag/case_store.py` + 配套配置/测试/监控）|
 | 不在范围 | LLM provider 切换、DAG 任务节点本身的实现质量、Agent ReAct prompt 优化（已有独立专题）|
-| 前置工作 | 已完成 [intent_kind 二段分类](../core/orchestrator/signal.py) 改造（CHITCHAT/META/CLARIFICATION/DATA_LOOKUP/RECALL/OUT_OF_SCOPE/ANALYSIS）|
+| 前置工作 | 已完成 [intent_kind 二段分类](../core/orchestrator/signal.py) 改造（CHITCHAT/META/CLARIFICATION/DATA_LOOKUP/RECALL/OUT_OF_SCOPE/ANALYSIS）；已完成 Phase1-7 架构重构（router 转包、实体/prompt/模板/规则迁移、ModuleProvider 引入、DAG 执行统一入口）|
 
 ---
 
@@ -40,11 +40,11 @@
 ### 1.1 触发背景
 
 eragent 当前的意图路由分三级：
-- **L1**：关键词命中率（[router.py `_RULE_LIBRARY`](../core/orchestrator/router.py)，10 条规则）
-- **L2**：Chroma 种子库语义匹配（[intent_seeds.yaml](../config/intent_seeds.yaml)）
-- **L3**：LLM 二段分类（intent_kind + analysis_type，[router.py `_LLM_CLASSIFY_PROMPT`](../core/orchestrator/router.py)）
+- **L1**：关键词命中率（[router/\_\_init\_\_.py `_RULE_LIBRARY`](../core/orchestrator/router/__init__.py)，10 条规则；规则引用的关键词常量集合已迁到 [modules/p2p/intent_rules.py](../modules/p2p/intent_rules.py)）
+- **L2**：Chroma 种子库语义匹配（[intent_seeds.yaml](../config/intent_seeds.yaml)，13 个类目约 148 条种子）
+- **L3**：LLM 二段分类（intent_kind + analysis_type，prompt 在 [router/\_\_init\_\_.py `_LLM_CLASSIFY_PROMPT`](../core/orchestrator/router/__init__.py)，analysis_type 列表由 `modules/p2p/intent_rules.ANALYSIS_TYPE_DESCRIPTIONS` 动态生成）
 
-orchestrator 拿到 `QuerySignal` 后再决定走 **DAG 模板**（结构化、快、稳）还是 **ReAct 兜底**（自由探索、慢、不可预测）。
+orchestrator 拿到 `QuerySignal` 后再决定走 **DAG 模板**（结构化、快、稳）还是 **ReAct 兜底**（自由探索、慢、不可预测）。重构后 ReAct 也走 DAGExecutor 统一入口（作为单节点 agent DAG），`_execute_react` 方法已删除。
 
 **问题**：当前 ReAct 兜底触发率偏高，原因有三：
 1. **L1 关键词库窄**——口语化表达大量漏命中（如"拖欠"漏过 `payment_compliance`、"砍价空间"漏过 `price_variance`）。
@@ -66,11 +66,12 @@ orchestrator 拿到 `QuerySignal` 后再决定走 **DAG 模板**（结构化、�
 ### 1.3 范围与约束
 
 **改动范围**：
-- `core/orchestrator/router.py`（L1/L2/L2.5 路由逻辑）
+- `core/orchestrator/router/__init__.py`（L1/L2/L2.5 路由逻辑；重构后 router 已转为包）
 - `core/orchestrator/orchestrator.py`（DAG 决策、监控 span、模板触发）
 - `core/orchestrator/dag/case_store.py`（新增 search 接口）
 - `core/orchestrator/dag/executor.py`（接入 case_store 写入）
-- `core/orchestrator/dag/templates.py`（新增通用模板）
+- `modules/p2p/dag_templates.py`（新增通用模板；重构后 DAG 模板定义已迁到此处）
+- `modules/p2p/intent_rules.py`（L1 规则常量，词库扩展在此文件操作）
 - `config/settings.py` + `config/config.yaml`（阈值配置化）
 - `tests/unit/`（每批单测、覆盖率不低于 90%）
 - `api/routes/admin_metrics.py`（新文件，命中率 dashboard API）
@@ -100,7 +101,7 @@ orchestrator 拿到 `QuerySignal` 后再决定走 **DAG 模板**（结构化、�
 
 ### 2.1 DAG 路径触发条件
 
-`use_dag` 决策位于 [orchestrator.py:1067-1096](../core/orchestrator/orchestrator.py)，逻辑：
+`use_dag` 决策位于 [orchestrator.py:510-539](../core/orchestrator/orchestrator.py)（重构后行号已变化），逻辑：
 
 ```
 强制 ReAct：
@@ -122,7 +123,7 @@ orchestrator 拿到 `QuerySignal` 后再决定走 **DAG 模板**（结构化、�
 
 ### 2.2 DAG 模板覆盖面
 
-[dag/templates.py](../core/orchestrator/dag/templates.py) 当前模板：
+重构后模板定义已迁到 [modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py)，[dag/templates.py](../core/orchestrator/dag/templates.py) 仅保留通用加载逻辑（`load_dag_template` + `_replace_params`）。当前模板：
 
 | 类别 | 数量 | 列表 |
 |---|---|---|
@@ -146,11 +147,11 @@ trace span 结构：
 
 ### 2.4 case_store 闭环现状
 
-[dag/case_store.py](../core/orchestrator/dag/case_store.py) 当前能力：
+[dag/case_store.py](../core/orchestrator/dag/case_store.py) 当前能力（类名已改为 `DAGCaseStore`）：
 
 | 能力 | 现状 | 缺口 |
 |---|---|---|
-| `store_successful_case(query, analysis_type, dag, route_type, exec_result)` | ✅ 实现完整（PG 权威 + Chroma 缓存）| ❌ **生产代码无任何 caller**——`grep` 显示只有 `tests/unit/test_dag*.py` 调用 |
+| `store_successful_case(query, analysis_type, dag, route_type, exec_result)` | ✅ 实现完整（PG 权威 + Chroma 缓存）| ❌ **生产代码无任何 caller**——仅 `tests/unit/test_dag_case_store.py` 与 `tests/unit/test_dag.py` 调用 |
 | `load_to_chroma_on_startup()` | ✅ 实现完整（服务启动时从 PG 拉到 Chroma）| 等案例库非空才有效 |
 | `search_similar_case(...)` | ❌ **不存在** | L2.5 检索的核心 API 缺失 |
 
@@ -160,20 +161,20 @@ trace span 结构：
 
 | 阈值 | 当前值 | 位置 | 性质 |
 |---|---|---|---|
-| L1 默认 hit_rate threshold | 0.15 | `_RULE_LIBRARY` 各 dict | 硬编码 |
-| L1 严格 hit_rate threshold | 0.20 | `_RULE_LIBRARY` 各 dict | 硬编码（INVOICE_DUPLICATE / VENDOR_CONCENTRATION）|
-| L2 similarity 阈值 | 0.80 | `router.py:733` | 硬编码常量 |
-| L2 length_ratio 折扣触发 | 0.4 | `router.py:177` | 硬编码常量 |
-| L2 length_ratio 折扣系数 | 0.7 | `router.py:178` | 硬编码常量 |
-| L2 top_k | 1 | `router.py:709` | 硬编码 |
-| L3 DAG 最低 confidence | 0.5 | `orchestrator.py:1077-1081` | 硬编码 |
+| L1 默认 hit_rate threshold | 0.15 | `router/__init__.py _RULE_LIBRARY` 各 dict | 硬编码 |
+| L1 严格 hit_rate threshold | 0.20 | `router/__init__.py _RULE_LIBRARY` 各 dict | 硬编码（INVOICE_DUPLICATE / VENDOR_CONCENTRATION）|
+| L2 similarity 阈值 | 0.80 | `router/__init__.py:674` | 硬编码常量 |
+| L2 length_ratio 折扣触发 | 0.4 | `router/__init__.py:118`（`_L2_LENGTH_RATIO_THRESHOLD`）| 硬编码常量 |
+| L2 length_ratio 折扣系数 | 0.7 | `router/__init__.py:119`（`_L2_LENGTH_RATIO_DISCOUNT`）| 硬编码常量 |
+| L2 top_k | 1 | `router/__init__.py:650` | 硬编码 |
+| L3 DAG 最低 confidence | 0.5 | `orchestrator.py:523` | 硬编码 |
 | L3 ReAct 最低 confidence | (无) | — | 不存在分档 |
 
 **结论**：所有路由阈值均无配置项，调优唯一手段是改源码 + 重启，无灰度能力。
 
 ### 2.6 L3 兜底策略
 
-代码位置：[orchestrator.py:1077-1081](../core/orchestrator/orchestrator.py)
+代码位置：[orchestrator.py:520-524](../core/orchestrator/orchestrator.py)
 
 ```python
 low_confidence = (
@@ -187,10 +188,12 @@ low_confidence = (
 
 ### 2.7 其他相关现状
 
-- **intent_seeds.yaml** 已包含 12 个类目（10 analysis + data_lookup + meta），共约 145 条种子（[intent_seeds.yaml](../config/intent_seeds.yaml)）
-- **L1 lookup 兜底**已在 intent_kind 改造时加入（`_looks_like_data_lookup`）
+- **intent_seeds.yaml** 已包含 13 个类目（10 analysis + data_lookup + meta + chitchat），共约 148 条种子（[intent_seeds.yaml](../config/intent_seeds.yaml)）
+- **L1 lookup 兜底**已在 intent_kind 改造时加入（`_looks_like_data_lookup`），关键词常量已迁到 [modules/p2p/intent_rules.py](../modules/p2p/intent_rules.py)
 - **bypass 已按 IntentKind 拆分**（CHITCHAT / META / RECALL）
-- 现有路由层测试 167 条（`tests/unit/test_router.py`），全部通过
+- 现有路由层测试 76 条（`tests/unit/test_router.py`），全部通过
+- **架构重构已完成**（Phase1-7）：router 转为 `router/` 包；实体处理提取到 `entity.py`；prompt 模板提取到 `prompts.py`；DAG 模板迁到 `modules/p2p/dag_templates.py`；L1 规则常量迁到 `modules/p2p/intent_rules.py`；L3 analysis_type 列表改为动态生成；引入 `ModuleProvider` 协议解耦 Orchestrator 与业务模块；`_execute_react` 删除，ReAct 作为单节点 agent DAG 走统一 `_execute_dag` 入口
+- 全量测试 1065 条，全部通过
 
 ---
 
@@ -269,7 +272,7 @@ low_confidence = (
 | `intent_kind` 二段分类（CHITCHAT/META/CLARIFICATION/...） | 已稳定，本方案在 ANALYSIS / DATA_LOOKUP 内部优化 |
 | bypass 拆分（CHITCHAT/META/RECALL 直出 sentinel）| 已正确，零改动 |
 | `_render_intent_kind_template`（早退模板渲染）| 已稳定 |
-| 现有 10 个 AnalysisType DAG 模板内容 | 不动模板内部，只动模板触发条件与新增模板 |
+| 现有 10 个 AnalysisType DAG 模板内容（已迁到 `modules/p2p/dag_templates.py`）| 不动模板内部，只动模板触发条件与新增模板 |
 | 长期记忆 / 短期记忆链路 | 独立专题 |
 | ReAct Agent prompt / tools | 独立专题 |
 
@@ -335,7 +338,7 @@ intent_routing:
 
 #### 步骤 1.3 · `_RULE_LIBRARY` threshold 改为 settings-driven
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py)
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py)
 
 - `_RULE_LIBRARY` 各 dict 的 `threshold` 字段语义改为"是否使用 strict 阈值"——保留 `0.15` / `0.20` 仅作为 fallback 标记，运行时由 `IntentRouter` 注入 settings 决定实际值
 - `_try_level1` 内部用 `self._settings.intent_routing.l1_threshold_default / l1_threshold_strict` 取代硬编码
@@ -343,7 +346,7 @@ intent_routing:
 
 #### 步骤 1.4 · L2 阈值改为 settings-driven
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py)
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py)
 
 - 删除模块常量 `_L2_LENGTH_RATIO_THRESHOLD` / `_L2_LENGTH_RATIO_DISCOUNT`
 - L2 内 `0.80` similarity 阈值改为 `self._settings.intent_routing.l2_similarity_threshold`
@@ -354,7 +357,7 @@ intent_routing:
 
 **文件**：[core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py)
 
-- `low_confidence` 计算中的 `0.5` 改为 `self._settings.intent_routing.l3_dag_min_confidence`
+- `low_confidence` 计算中的 `0.5`（当前位于第 523 行）改为 `self._settings.intent_routing.l3_dag_min_confidence`
 - 增加 trace span 属性 `route.l3_threshold_used`（便于回溯当时的配置）
 
 #### 步骤 1.6 · trace span 补 `execution` 属性
@@ -387,7 +390,7 @@ GET /admin/metrics/route-hit-rate?window=7d
 
 | 测试用例 | 期望 |
 |---|---|
-| `test_default_values_match_hardcoded` | Settings 默认值 == 当前 router.py / orchestrator.py 硬编码值 |
+| `test_default_values_match_hardcoded` | Settings 默认值 == 当前 router/\_\_init\_\_.py / orchestrator.py 硬编码值 |
 | `test_yaml_overrides_settings` | config.yaml 修改后 Settings 反映 |
 | `test_router_uses_injected_thresholds` | 修改 settings.intent_routing.l1_threshold_default 后，L1 行为变化 |
 | `test_l2_topk_respected` | settings.l2_topk=3 时 Chroma `search` 被调用 with `n_results=3` |
@@ -395,12 +398,12 @@ GET /admin/metrics/route-hit-rate?window=7d
 | `test_execution_attribute_in_span` | `intent.route_decision` span 含 `execution` 属性 |
 | `test_admin_metrics_route_hit_rate` | GET API 返回结构正确，window 参数支持 1d/7d/30d |
 
-**回归**：现有 `tests/unit/test_router.py` 167 条 + `test_orchestrator.py` 全部应继续通过（默认配置等价）。
+**回归**：现有 `tests/unit/test_router.py` 76 条 + `test_orchestrator.py` 全部应继续通过（默认配置等价）。
 
 ### 4.3 验收标准
 
 - [ ] `Settings.intent_routing.*` 全部字段有默认值且 yaml 可覆盖
-- [ ] router.py / orchestrator.py 内不再出现 `0.15` / `0.20` / `0.80` / `0.7` / `0.4` / `0.5` 这些硬编码数字（grep 校验）
+- [ ] router/\_\_init\_\_.py / orchestrator.py 内不再出现 `0.15` / `0.20` / `0.80` / `0.7` / `0.4` / `0.5` 这些硬编码数字（grep 校验）
 - [ ] `intent.route_decision` span 含 `execution` 字段
 - [ ] `scripts/route_hit_rate.sql` 在测试库可执行返回结果
 - [ ] `GET /admin/metrics/route-hit-rate` 返回非空 JSON
@@ -419,7 +422,7 @@ GET /admin/metrics/route-hit-rate?window=7d
 
 ### 5.1 目标
 
-- 给 [router.py `_RULE_LIBRARY`](../core/orchestrator/router.py) 10 条规则各补 5-10 个口语化同义词
+- 给 [router/\_\_init\_\_.py `_RULE_LIBRARY`](../core/orchestrator/router/__init__.py) 10 条规则各补 5-10 个口语化同义词
 - 不调阈值，仅靠词频提升直接提高 L1 命中率
 - 新增同义词都要有单测覆盖
 
@@ -427,7 +430,9 @@ GET /admin/metrics/route-hit-rate?window=7d
 
 #### 步骤 2.1 · 词库扩展（10 条规则同义词补充清单）
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py) `_RULE_LIBRARY`
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) `_RULE_LIBRARY`
+
+> **注意**：`_RULE_LIBRARY` 定义在 `router/__init__.py` 中，但引用的通用关键词常量（`_ANALYSIS_KEYWORDS`、`_LOOKUP_VERBS` 等）已迁到 [modules/p2p/intent_rules.py](../modules/p2p/intent_rules.py)。词库扩展操作在 `_RULE_LIBRARY` 内直接添加。
 
 下表给出每条规则建议补充的同义词。原则：
 - **覆盖口语化表达**（用户实际怎么说，不是教科书术语）
@@ -477,13 +482,13 @@ def test_l1_colloquial_query_hits_expected_type(query, expected_type):
     assert signal.keywords == [expected_type.value]
 ```
 
-**回归**：现有 `tests/unit/test_router.py::TestLevel1` 全部应继续通过（只加不删）。
+**回归**：现有 `tests/unit/test_router.py` 全部应继续通过（只加不删）。
 
 ### 5.3 验收标准
 
 - [ ] 10 条规则全部补充同义词，每条总关键词数 ∈ [15, 25]
 - [ ] 新增至少 80 条口语化 query 测试，全部命中预期 analysis_type
-- [ ] 现有 167 条 router 测试零回归
+- [ ] 现有 76 条 router 测试零回归
 - [ ] L1 命中率（基于批 1 监控）观察 7 天提升 ≥ 5 pp（保守目标）
 
 ### 5.4 回滚策略
@@ -506,7 +511,7 @@ def test_l1_colloquial_query_hits_expected_type(query, expected_type):
 
 #### 步骤 3.1 · L2 search 改为 top-k
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py) `_try_level2`
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) `_try_level2`
 
 - Chroma `search(query=query, top_k=self._settings.intent_routing.l2_topk)`
 - 默认 `l2_topk=1`（沿用），灰度切 3
@@ -514,7 +519,7 @@ def test_l1_colloquial_query_hits_expected_type(query, expected_type):
 
 #### 步骤 3.2 · 加权投票聚合算法
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py)
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py)
 
 新增私有方法 `_aggregate_l2_votes(results)`：
 
@@ -539,7 +544,7 @@ def test_l1_colloquial_query_hits_expected_type(query, expected_type):
 
 #### 步骤 3.3 · length_ratio 折扣弱化
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py)
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py)
 
 - 默认 penalty 0.7 → 0.85（更宽松，由 settings 配置）
 - **仅当 top-1 单独命中时打折**（top-k 投票场景下，多种子已经能消化噪声，无需打折）
@@ -653,7 +658,7 @@ await self._case_store.store_successful_case(
 
 #### 步骤 4.3 · router 新增 `_try_level25` 方法
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py)
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py)
 
 新增方法 `_try_level25(query, params) -> QuerySignal | None`：
 
@@ -673,7 +678,7 @@ await self._case_store.store_successful_case(
 
 #### 步骤 4.4 · 路由链注入 L2.5
 
-**文件**：[core/orchestrator/router.py](../core/orchestrator/router.py) `_route` 方法
+**文件**：[core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) `_route` 方法
 
 调用顺序变更：
 
@@ -818,14 +823,14 @@ T4: 汇总报告
 
 #### 步骤 5.1 · 模板定义
 
-**文件**：[core/orchestrator/dag/templates.py](../core/orchestrator/dag/templates.py)
+**文件**：[modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py)（重构后 DAG 模板定义已迁到此处）
 
 新增模板定义函数 `_recent_procurement_health_template(params)`：
 - 接收 `params: dict`（含 `days`，默认从 settings 取）
 - 返回 list[dict] 形式的 DAG 任务列表（4 节点，结构与现有模板一致）
 - 任务的 `task_id` 用 `t1_po_summary` / `t2_anomaly_topn` / `t3_supplier_topn` / `t4_report` 命名
 
-注册到 `load_dag_template` 的派发逻辑（新增独立分支，不与现有 AnalysisType 模板冲突）。
+注册到 `get_template_map()` 返回的映射中（或在 [core/orchestrator/dag/templates.py](../core/orchestrator/dag/templates.py) 的 `load_dag_template` 中新增独立分支），不与现有 AnalysisType 模板冲突。
 
 **实现约束**：
 - 全部用现有 P2P tools（不新增 tool）
@@ -1102,25 +1107,26 @@ curl -X POST 'http://localhost:8000/analyze' \
 |---|---|---|---|
 | 1 | [config/settings.py](../config/settings.py) | 新增类 | `IntentRoutingSettings` Pydantic 子模型 |
 | 1 | [config/config.yaml](../config/config.yaml) | 新增段 | `intent_routing:` |
-| 1 | [core/orchestrator/router.py](../core/orchestrator/router.py) | 改造 | `_RULE_LIBRARY` threshold + `_try_level1` + `_try_level2` 内常量替换 |
-| 1 | [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py) | 改造 | `low_confidence` 取 settings；`use_dag` 后 span 加 `execution` |
+| 1 | [core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) | 改造 | `_RULE_LIBRARY` threshold + `_try_level1` + `_try_level2` 内常量替换 |
+| 1 | [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py) | 改造 | `low_confidence` 取 settings（当前第 523 行）；`use_dag` 后 span 加 `execution` |
 | 1 | scripts/route_hit_rate.sql | 新建 | 7 天命中率聚合 SQL |
 | 1 | api/routes/admin_metrics.py | 新建 | `GET /admin/metrics/route-hit-rate` |
 | 1 | [api/main.py](../api/main.py) | 改造 | router include |
 | 1 | tests/unit/test_intent_routing_settings.py | 新建 | 7 个测试用例 |
-| 2 | [core/orchestrator/router.py](../core/orchestrator/router.py) | 数据 | `_RULE_LIBRARY` 各规则 keywords 集合扩充 |
+| 2 | [core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) | 数据 | `_RULE_LIBRARY` 各规则 keywords 集合扩充 |
 | 2 | tests/unit/test_router_l1_synonyms.py | 新建 | ~80 条口语化 query 参数化测试 |
-| 3 | [core/orchestrator/router.py](../core/orchestrator/router.py) | 改造 | `_try_level2` + 新增 `_aggregate_l2_votes` |
+| 3 | [core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) | 改造 | `_try_level2` + 新增 `_aggregate_l2_votes` |
 | 3 | tests/unit/test_router_l2_voting.py | 新建 | 8 个测试用例 |
-| 4 | [core/orchestrator/dag/case_store.py](../core/orchestrator/dag/case_store.py) | 新增方法 | `search_similar_case()` |
+| 4 | [core/orchestrator/dag/case_store.py](../core/orchestrator/dag/case_store.py) | 新增方法 | `DAGCaseStore.search_similar_case()` |
 | 4 | [core/orchestrator/dag/executor.py](../core/orchestrator/dag/executor.py) | 改造 | 成功路径调 `store_successful_case` |
-| 4 | [core/orchestrator/router.py](../core/orchestrator/router.py) | 新增方法 + 路由链 | `_try_level25`、`_route` 注入 L2.5 |
+| 4 | [core/orchestrator/router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) | 新增方法 + 路由链 | `_try_level25`、`_route` 注入 L2.5 |
 | 4 | [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py) | 改造 | DAG 决策识别 `route_level=25` 复用 dag_definition |
 | 4 | tests/unit/test_case_store_search.py | 新建 | search 方法测试 |
 | 4 | tests/unit/test_router_l25.py | 新建 | L2.5 路由测试 |
 | 4 | tests/unit/test_executor_case_store_write.py | 新建 | 写入闭环测试 |
 | 4 | tests/integration/test_l25_end_to_end.py | 新建 | 端到端测试 |
-| 5 | [core/orchestrator/dag/templates.py](../core/orchestrator/dag/templates.py) | 新增模板 | `_recent_procurement_health_template` + 注册 |
+| 5 | [modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py) | 新增模板 | `_recent_procurement_health_template` + 注册到 `get_template_map()` |
+| 5 | [core/orchestrator/dag/templates.py](../core/orchestrator/dag/templates.py) | 改造 | `load_dag_template` 新增通用模板分支 |
 | 5 | [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py) | 改造 | 路由决策新增分支 + `_query_matches_overview_keywords` |
 | 5 | tests/unit/test_dag_recent_procurement_health.py | 新建 | 模板与触发条件测试 |
 | 5 | tests/integration/test_recent_procurement_health.py | 新建 | 端到端测试 |
@@ -1153,12 +1159,12 @@ curl -X POST 'http://localhost:8000/analyze' \
 
 | 术语 | 全称/别名 | 含义 | 出处 |
 |---|---|---|---|
-| **L1** | Level 1 | 关键词命中率匹配（hit_rate = 命中关键词数 / 规则总关键词数）| [router.py `_try_level1`](../core/orchestrator/router.py) |
-| **L2** | Level 2 | Chroma 种子库语义匹配，cosine similarity = 1 - distance | [router.py `_try_level2`](../core/orchestrator/router.py) |
+| **L1** | Level 1 | 关键词命中率匹配（hit_rate = 命中关键词数 / 规则总关键词数）| [router/\_\_init\_\_.py `_try_level1`](../core/orchestrator/router/__init__.py) |
+| **L2** | Level 2 | Chroma 种子库语义匹配，cosine similarity = 1 - distance | [router/\_\_init\_\_.py `_try_level2`](../core/orchestrator/router/__init__.py) |
 | **L2.5** | Level 2.5（本专题新增）| 历史成功 DAG 案例检索，命中后直接复用 dag_definition | 本文档 7.1 节 |
-| **L3** | Level 3 | LLM 二段分类，输出 intent_kind + analysis_type | [router.py `_try_level3`](../core/orchestrator/router.py) |
-| **bypass** | 前置 bypass | CHITCHAT/META/RECALL 直接生成 sentinel signal，跳过 L1/L2/L3 | [router.py `_classify_bypass`](../core/orchestrator/router.py) |
-| **DAG** | Directed Acyclic Graph | 静态任务编排路径，由 `dag/templates.py` 加载预定义任务图，并行执行 | [dag/executor.py](../core/orchestrator/dag/executor.py) |
+| **L3** | Level 3 | LLM 二段分类，输出 intent_kind + analysis_type；analysis_type 列表由 `modules/p2p/intent_rules.ANALYSIS_TYPE_DESCRIPTIONS` 动态生成 | [router/\_\_init\_\_.py `_try_level3`](../core/orchestrator/router/__init__.py) |
+| **bypass** | 前置 bypass | CHITCHAT/META/RECALL 直接生成 sentinel signal，跳过 L1/L2/L3 | [router/\_\_init\_\_.py `_classify_bypass`](../core/orchestrator/router/__init__.py) |
+| **DAG** | Directed Acyclic Graph | 静态任务编排路径，由 `modules/p2p/dag_templates.py` 定义模板、`dag/templates.py` 加载并参数化、`dag/executor.py` 并行执行 | [dag/executor.py](../core/orchestrator/dag/executor.py) |
 | **ReAct** | Reasoning + Acting | LangChain Agent 自由探索路径，LLM 自主调用 tools | [modules/p2p/agent.py](../modules/p2p/agent.py) |
 | **IntentKind** | 意图大类 | ANALYSIS / DATA_LOOKUP / CLARIFICATION / META / CHITCHAT / OUT_OF_SCOPE / RECALL，7 类 | [signal.py `IntentKind`](../core/orchestrator/signal.py) |
 | **AnalysisType** | 分析子类型 | THREE_WAY_MATCH / PRICE_VARIANCE / ... / COMPREHENSIVE，11 类 | [api/schemas/analysis.py](../api/schemas/analysis.py) |
@@ -1170,15 +1176,15 @@ curl -X POST 'http://localhost:8000/analyze' \
 | **route_level** | 路由层级 | 0=bypass, 1=L1, 2=L2, 25=L2.5（新）, 3=L3 | [signal.py](../core/orchestrator/signal.py) |
 | **intent_kind** | 意图大类（字段名）| QuerySignal 字段，存 IntentKind 枚举 | 同上 |
 | **execution** | 执行路径 | 本专题批 1 新增的 trace span 属性，取值 "dag" / "react" | 本文档 4.2 节步骤 1.6 |
-| **confidence** | 置信度 | 0.0-1.0 浮点数；L1/L2 来自匹配分数，L3 由 LLM 输出 | [router.py](../core/orchestrator/router.py) |
-| **length_ratio** | 长度比 | query 长度 / seed 长度，过低时 L2 相似度打折避免短查询虚高 | [router.py](../core/orchestrator/router.py) |
+| **confidence** | 置信度 | 0.0-1.0 浮点数；L1/L2 来自匹配分数，L3 由 LLM 输出 | [router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) |
+| **length_ratio** | 长度比 | query 长度 / seed 长度，过低时 L2 相似度打折避免短查询虚高 | [router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) |
 | **top-k 投票** | top-k voting | 取 Chroma top-k 结果，按 analysis_type 分桶加权投票 | 本文档 6.2 节步骤 3.2 |
 | **rank_weight** | 排序权重 | top-k 投票中每个排名的权重，默认 [1.0, 0.6, 0.3] | 本文档 6.2 节步骤 3.2 |
-| **dag_definition** | DAG 定义 | list[dict] 形式的任务列表，每个 task 含 task_id/tool/depends_on/params | [dag/templates.py](../core/orchestrator/dag/templates.py) |
-| **trace span** | 追踪跨度 | OpenTelemetry-style 单次操作记录，含 name/attributes/start_time/end_time | [observability/middleware.py](../core/observability/middleware.py) |
+| **dag_definition** | DAG 定义 | list[dict] 形式的任务列表，每个 task 含 task_id/tool/depends_on/params | [modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py) + [dag/templates.py](../core/orchestrator/dag/templates.py) |
+| **trace span** | 追踪跨度 | OpenTelemetry-style 单次操作记录，含 name/attributes/start_time/end_time | [observability/tracing.py](../core/observability/tracing.py)（重构后从 middleware.py 拆分）|
 | **feature flag** | 特性开关 | 配置中的布尔字段，控制某能力是否启用，便于灰度与回滚 | 本文档 4.2 节步骤 1.1 |
 | **保守档 / 激进档** | conservative / aggressive | 阈值的两组建议值，保守=当前等价，激进=优化目标 | 本文档 4.2 节步骤 1.1 表格 |
-| **sentinel keyword** | 哨兵关键词 | 写入 `signal.keywords[0]` 的特殊字符串（"data_lookup"/"meta"/"chitchat"等），区别于 AnalysisType 枚举值 | [router.py](../core/orchestrator/router.py) |
+| **sentinel keyword** | 哨兵关键词 | 写入 `signal.keywords[0]` 的特殊字符串（"data_lookup"/"meta"/"chitchat"等），区别于 AnalysisType 枚举值 | [router/\_\_init\_\_.py](../core/orchestrator/router/__init__.py) |
 | **早退 / early-return** | early return | orchestrator 检测到 CHITCHAT/META/CLARIFICATION/OUT_OF_SCOPE 时，直接返回模板响应，不触发 DAG/ReAct | [orchestrator.py](../core/orchestrator/orchestrator.py) |
 | **冷启动** | cold start | 系统刚上线、案例库为空时的状态；L2.5 此时直接 fallback 到 L3 | 本文档 7.4 节 |
 
@@ -1190,6 +1196,7 @@ curl -X POST 'http://localhost:8000/analyze' \
 |---|---|---|
 | v1.0 | 2026-04-16 | 初稿：覆盖 5 批次方案 + punt 决策 + 验证回滚 + 术语表 |
 | v1.1 | 2026-04-16 | 增补：第 12-16 章。DATA_LOOKUP 模板化分析（5 类 Lookup 模板）+ 综合结论与方案融合（新增批 6/7、修订执行顺序、累计预估 ReAct 下降 45~70pp）。配套独立文档 [dag_template_expansion_analysis.md](dag_template_expansion_analysis.md) v1.0 |
+| v2.0 | 2026-04-18 | **重构后核实刷新**（不改代码）。Phase1-7 架构重构已完成，全面更新文件路径引用：`router.py` → `router/` 包；L1 规则常量迁到 `modules/p2p/intent_rules.py`；DAG 模板迁到 `modules/p2p/dag_templates.py`；L3 prompt analysis_type 列表改为动态生成；Orchestrator 统一 DAG 入口（`_execute_react` 已删除）；引入 `ModuleProvider` 协议。更新行号引用、种子库统计（13 类/148 条）、测试数量（76 条 router 测试/1065 条全量）、case_store 类名（`DAGCaseStore`）。五批次方案内容与可行性已重新核实，均未实施，方案本身仍然有效。 |
 
 ---
 
@@ -1217,7 +1224,7 @@ curl -X POST 'http://localhost:8000/analyze' \
 
 ### 12.3 DATA_LOOKUP 流量占比估算
 
-**当前缺乏精确数据**（监控未上线）。基于 intent_seeds.yaml 中 data_lookup 类目的种子数（15 条）vs 总 145 条，以及 P2P 业务直觉：
+**当前缺乏精确数据**（监控未上线）。基于 intent_seeds.yaml 中 data_lookup 类目的种子数（15 条）vs 总 148 条，以及 P2P 业务直觉：
 
 | 假设条件 | DATA_LOOKUP 占总流量比 |
 |---|---|
@@ -1387,11 +1394,12 @@ DATA_LOOKUP signal 进 orchestrator
 
 ### 15.1 当前 DATA_LOOKUP 在 orchestrator 中的处理
 
-[orchestrator.py](../core/orchestrator/orchestrator.py) `use_dag` 决策：
+[orchestrator.py:519](../core/orchestrator/orchestrator.py) `use_dag` 决策（重构后 ReAct 也走 `_execute_dag` 统一入口，通过 `use_agent_fallback=True` 区分）：
 
 ```python
-# 当前逻辑：DATA_LOOKUP 强制 ReAct
-if signal.intent_kind == _IntentKindRoute.DATA_LOOKUP:
+# 当前逻辑：DATA_LOOKUP 强制走 agent 路径（等价于原 ReAct）
+is_data_lookup = signal.intent_kind == _IntentKindRoute.DATA_LOOKUP
+if is_recall or is_data_lookup or low_confidence:
     use_dag = False
 ```
 
@@ -1589,10 +1597,6 @@ intent_kind == ANALYSIS, analysis_type != COMPREHENSIVE, route_level in {1,2,25}
 - DAG 模板膨胀的"模板骨架重构"专题（独立专题）
 
 ---
-
-
-
-
 
 
 
