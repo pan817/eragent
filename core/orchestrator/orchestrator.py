@@ -547,24 +547,31 @@ class Orchestrator:
             #   3) DAG 路径降级保护：解析后若是 chat，强制升 brief
             #         （ReportAgent prompt 主体是"报告生成器"，与 chat 冲突；
             #          这一保护对显式 chat 也生效，避免 DAG 路径行为漂移）
-            effective_output_mode = request.output_mode
-            if effective_output_mode == "auto":
-                if is_data_lookup:
-                    effective_output_mode = "chat"
-                    _logger.info("output_mode auto → 'chat' (intent=data_lookup)")
-                else:
-                    effective_output_mode = "detailed"
-                    _logger.info("output_mode auto → 'detailed' (default for non-lookup)")
-            if use_dag and effective_output_mode == "chat":
-                _logger.info(
-                    "output_mode 'chat' downgraded to 'brief' on DAG path "
-                    "(ReportAgent requires structured output)"
-                )
-                effective_output_mode = "brief"
+            from core.observability.tracing import record_span
 
-            output_mode_prompt = _build_output_mode_prompts(self._settings).get(
-                effective_output_mode, ""
-            )
+            with record_span("orchestrator", "resolve_output_mode") as om_attrs:
+                om_attrs["requested"] = request.output_mode
+                effective_output_mode = request.output_mode
+                if effective_output_mode == "auto":
+                    if is_data_lookup:
+                        effective_output_mode = "chat"
+                        _logger.info("output_mode auto → 'chat' (intent=data_lookup)")
+                    else:
+                        effective_output_mode = "detailed"
+                        _logger.info("output_mode auto → 'detailed' (default for non-lookup)")
+                if use_dag and effective_output_mode == "chat":
+                    _logger.info(
+                        "output_mode 'chat' downgraded to 'brief' on DAG path "
+                        "(ReportAgent requires structured output)"
+                    )
+                    effective_output_mode = "brief"
+
+                output_mode_prompt = _build_output_mode_prompts(self._settings).get(
+                    effective_output_mode, ""
+                )
+                om_attrs["resolved"] = effective_output_mode
+                om_attrs["has_prompt"] = bool(output_mode_prompt)
+                om_attrs["status"] = "ok"
 
             _logger.info(
                 "route decision: path=%s analysis_type=%s days=%d entities=%s",

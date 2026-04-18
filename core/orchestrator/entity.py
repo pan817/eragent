@@ -78,32 +78,46 @@ def resolve_references(
     - enhanced_query: 指代词替换后的 query（供路由器使用）
     - relevant_entities: 与指代相关的实体子集（供参数补充使用）
     """
-    if not session_ctx.get("has_history"):
-        return query, {}
+    from core.observability.tracing import record_span
 
-    entities = session_ctx.get("entities", {})
-    if not entities:
-        return query, {}
+    with record_span("entity", "resolve_references") as span_attrs:
+        span_attrs["query"] = query
+        span_attrs["has_history"] = session_ctx.get("has_history", False)
 
-    enhanced = query
-    relevant: dict[str, Any] = {}
+        if not session_ctx.get("has_history"):
+            span_attrs["status"] = "skipped"
+            span_attrs["reason"] = "no history"
+            return query, {}
 
-    for pattern, entity_key, replace_tpl in _REF_PATTERNS:
-        ref_match = re.search(pattern, enhanced, re.IGNORECASE)
-        if ref_match and entities.get(entity_key):
-            val = entities[entity_key]
-            replacement = replace_tpl.format(val=val)
-            enhanced = enhanced[:ref_match.start()] + replacement + enhanced[ref_match.end():]
-            relevant[entity_key] = val
+        entities = session_ctx.get("entities", {})
+        if not entities:
+            span_attrs["status"] = "skipped"
+            span_attrs["reason"] = "no entities in history"
+            return query, {}
 
-    # 通用指代但未匹配到具体实体类型："分析这个的风险" / "它的情况"
-    if not relevant:
-        generic_ref = re.search(_GENERIC_REF + r"(?:的)", query)
-        if generic_ref:
-            relevant = entities.copy()
+        enhanced = query
+        relevant: dict[str, Any] = {}
 
-    # 无指代词时不做隐式继承——避免用户的新查询被静默限定到历史实体范围。
-    return enhanced, relevant
+        for pattern, entity_key, replace_tpl in _REF_PATTERNS:
+            ref_match = re.search(pattern, enhanced, re.IGNORECASE)
+            if ref_match and entities.get(entity_key):
+                val = entities[entity_key]
+                replacement = replace_tpl.format(val=val)
+                enhanced = enhanced[:ref_match.start()] + replacement + enhanced[ref_match.end():]
+                relevant[entity_key] = val
+
+        # 通用指代但未匹配到具体实体类型："分析这个的风险" / "它的情况"
+        if not relevant:
+            generic_ref = re.search(_GENERIC_REF + r"(?:的)", query)
+            if generic_ref:
+                relevant = entities.copy()
+
+        span_attrs["enhanced_query"] = enhanced if enhanced != query else None
+        span_attrs["resolved_entities"] = relevant or None
+        span_attrs["status"] = "ok"
+
+        # 无指代词时不做隐式继承——避免用户的新查询被静默限定到历史实体范围。
+        return enhanced, relevant
 
 
 # ---------------------------------------------------------------------------
