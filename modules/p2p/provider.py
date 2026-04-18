@@ -91,9 +91,12 @@ class P2PModuleProvider:
         ]
 
     def get_dag_templates(self) -> dict[str, list[dict[str, Any]]]:
-        # Phase 5 时从 templates.py 迁入模板；当前阶段仍由
-        # load_dag_template() 直接加载，此方法为 Protocol 占位。
-        return {}
+        from modules.p2p.dag_templates import get_entity_template_map, get_template_map
+
+        return {
+            "type_map": get_template_map(),
+            "entity_map": get_entity_template_map(),
+        }
 
     def get_reference_patterns(self) -> list[tuple[str, str, str]]:
         from core.orchestrator.entity import _REF_PATTERNS
