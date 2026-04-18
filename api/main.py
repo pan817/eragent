@@ -19,12 +19,12 @@ from api.routes.sessions import router as sessions_router
 from api.routes.traces import router as traces_router
 from config.settings import get_settings
 from core.database import (
-    P2PRepository,
     create_tables,
     get_engine,
     get_session_factory,
     reset_and_seed,
 )
+from modules.p2p.repository import P2PRepository
 from core.chat import ChatRepository, init_chat_repository
 from core.logging_utils import get_logger
 from core.observability import init_trace_store, shutdown_trace_store

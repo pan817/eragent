@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.database.repository import P2PRepository
+from modules.p2p.repository import P2PRepository
 
 
 class TestQueryMethods:

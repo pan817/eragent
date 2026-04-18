@@ -14,7 +14,8 @@ from api.schemas.analysis import AnalysisResult, AnalysisStatus, AnalysisType
 def client() -> TestClient:
     """创建 FastAPI 测试客户端，使用 SQLite 内存库替代 PostgreSQL。"""
     from core.database.engine import create_engine_from_dsn
-    from core.database import get_session_factory, init_database, P2PRepository
+    from core.database import get_session_factory, init_database
+    from modules.p2p.repository import P2PRepository
     from modules.p2p.tools import set_repository
 
     from sqlalchemy.pool import StaticPool

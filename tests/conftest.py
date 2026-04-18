@@ -22,11 +22,11 @@ from config.settings import Settings  # noqa: E402
 from modules.p2p.settings import P2PSettings  # noqa: E402
 from core.database import (  # noqa: E402
     Base,
-    P2PRepository,
     get_session_factory,
     init_database,
     install_sqlite_timezone_hook,
 )
+from modules.p2p.repository import P2PRepository  # noqa: E402
 from core.database.engine import create_engine_from_dsn  # noqa: E402
 from core.time_utils import configure_timezone  # noqa: E402
 

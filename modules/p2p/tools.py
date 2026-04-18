@@ -18,7 +18,7 @@ from typing import Any
 from langchain.tools import tool
 
 from config.settings import get_settings
-from core.database.repository import P2PRepository
+from modules.p2p.repository import P2PRepository
 from modules.p2p.rules import (
     PaymentComplianceChecker,
     PriceVarianceAnalyzer,

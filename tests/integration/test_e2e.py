@@ -45,7 +45,8 @@ def e2e_client(real_settings: Settings):
 
     from sqlalchemy.pool import StaticPool
     from core.database.engine import create_engine_from_dsn
-    from core.database import get_session_factory, init_database, P2PRepository
+    from core.database import get_session_factory, init_database
+    from modules.p2p.repository import P2PRepository
     from modules.p2p.tools import set_repository
     # 提前注册 trace 模型到 Base.metadata，确保 init_database 时一并建表
     import core.observability  # noqa: F401
