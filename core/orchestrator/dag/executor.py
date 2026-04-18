@@ -35,9 +35,11 @@ class DAGExecutor:
         self,
         registry: ToolRegistry,
         report_agent: Any = None,
+        agent: Any = None,
     ) -> None:
         self._registry = registry
         self._report_agent = report_agent
+        self._agent = agent
 
     async def execute(
         self,
@@ -137,6 +139,41 @@ class DAGExecutor:
                     else:
                         completed.append(task_id)
                         span_attrs["status"] = "skipped"
+                    events[task_id].set()
+                    return
+
+                # agent 类型节点：调用 Agent 执行 ReAct
+                task_type = task.get("type", "tool")
+                if task_type == "agent":
+                    if self._agent is not None:
+                        try:
+                            inputs = task.get("inputs", {})
+                            agent_result = await asyncio.wait_for(
+                                self._agent.analyze(
+                                    query=inputs.get("query", ""),
+                                    session_id=inputs.get("session_id"),
+                                    user_id=inputs.get("user_id", ""),
+                                    time_range_days=inputs.get("time_range_days", 30),
+                                    context_summary=inputs.get("context_summary", ""),
+                                    output_mode_prompt=inputs.get("output_mode_prompt", ""),
+                                ),
+                                timeout=task.get("timeout_sec", 900),
+                            )
+                            output_key = task.get("output_key", task_id)
+                            outputs[output_key] = agent_result
+                            completed.append(task_id)
+                            span_attrs["status"] = "ok"
+                        except asyncio.TimeoutError:
+                            failed[task_id] = f"Agent 超时（{task.get('timeout_sec', 900)}s）"
+                            span_attrs["status"] = "error"
+                            span_attrs["error_code"] = "AGENT_TIMEOUT"
+                        except Exception as exc:  # noqa: BLE001
+                            failed[task_id] = f"{type(exc).__name__}: {exc}"
+                            span_attrs["status"] = "error"
+                            span_attrs["error"] = str(exc)
+                    else:
+                        failed[task_id] = "Agent 未注入"
+                        span_attrs["status"] = "error"
                     events[task_id].set()
                     return
 

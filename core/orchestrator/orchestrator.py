@@ -207,6 +207,7 @@ class Orchestrator:
             self._dag_executor = DAGExecutor(
                 registry=registry,
                 report_agent=self._report_agent,
+                agent=self._lazy_agent,
             )
         return self._dag_executor
 
