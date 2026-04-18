@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import sqlalchemy as sa
 
-from core.memory import LongTermMemory, MemoryRepository, ReportRepository, memories_table, metadata_obj
+from core.memory import LongTermMemory, MemoryRepository, ReportRepository
+from core.memory.tables import memories_table, metadata_obj
 from core.memory.long_term import _VectorStoreProxy, _content_hash, _normalize_content, _rrf_fuse, _to_tsquery_or
 
 
