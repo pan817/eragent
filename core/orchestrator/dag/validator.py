@@ -11,21 +11,7 @@ from typing import Any
 
 from core.orchestrator.dag.registry import ToolRegistry
 
-# 数据采集类工具（分析任务必须依赖至少一个）
-_DATA_TOOLS = {
-    "query_purchase_orders", "query_receipts", "query_goods_receipts",
-    "query_invoices", "query_vendor_invoices", "query_payments",
-    "query_vendor_master", "query_material_master",
-}
-
-# 分析计算类工具（必须有数据依赖）
-_ANALYSIS_TOOLS = {
-    "run_three_way_match", "calculate_ppv", "run_price_variance_analysis",
-    "calculate_spend_analysis", "calculate_po_cycle_time",
-    "run_vendor_risk_scoring", "calculate_supplier_kpis", "get_vendor_scorecard",
-}
-
-# 报告工具（必须是 DAG 终点）
+# 报告工具名（由 ReportAgent 处理，不注册到 ToolRegistry）
 _REPORT_TOOLS = {"generate_summary_report", "generate_chart"}
 
 # 最大任务数
@@ -80,12 +66,14 @@ class DAGValidator:
             if rt_id in all_deps:
                 return False, f"报告任务 '{rt_id}' 不能被其他任务依赖"
 
-        # 6. 分析任务必须有数据依赖
+        # 6. 分析任务必须有数据依赖（从 Registry 元数据动态获取类别）
+        data_tools = self._registry.names_by_category("data")
+        analysis_tools = self._registry.names_by_category("analysis")
         data_task_ids = {
-            t["task_id"] for t in tasks if t.get("tool_name", "") in _DATA_TOOLS
+            t["task_id"] for t in tasks if t.get("tool_name", "") in data_tools
         }
         for t in tasks:
-            if t.get("tool_name", "") in _ANALYSIS_TOOLS:
+            if t.get("tool_name", "") in analysis_tools:
                 if not set(t.get("depends_on", [])) & data_task_ids:
                     return False, (
                         f"分析任务 '{t['task_id']}' ({t['tool_name']}) "

@@ -83,6 +83,8 @@ class TestToolRegistry:
 class TestDAGValidator:
 
     def _make_registry(self) -> ToolRegistry:
+        from core.orchestrator.dag.registry import _infer_category
+
         reg = ToolRegistry()
         for name in [
             "query_purchase_orders", "query_receipts", "query_invoices",
@@ -90,7 +92,7 @@ class TestDAGValidator:
             "run_three_way_match", "run_price_variance_analysis",
             "run_payment_compliance_check", "calculate_supplier_kpis",
         ]:
-            reg.register(name, AsyncMock())
+            reg.register(name, AsyncMock(), category=_infer_category(name))
         return reg
 
     def test_valid_dag(self) -> None:
