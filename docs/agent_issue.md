@@ -39,6 +39,24 @@
 - **建议修复**：把 `api/schemas/analysis.py` 下沉到 `core/schemas/analysis.py`，作为业务数据契约的归属。`api/schemas/` 仅保留与 HTTP 协议强相关的 wrapper（如分页 envelope、错误响应格式），并 re-export `core.schemas` 中的核心模型，对外 API 兼容性不变。
 - **发现日期**：2026-04-16（pyreverse 扫描 [packages_toplevel.png](architecture/packages_toplevel.png) 时定位）
 
+### 3. EventBus ephemeral 事件缺乏类型区分
+- **问题**：`core/tasks/events.py` 的 `publish()` 方法通过 `ephemeral` 布尔标志区分"可丢弃的高频事件"（LLM chunk）和"必须送达的状态事件"（done/error），但在类型层面无区分（都是 `dict`），消费方无法从事件结构上判断是否可安全回放。
+- **影响**：依赖 `Last-Event-ID` 回放的 SSE 客户端可能漏掉 ephemeral 事件后误认为数据丢失；未来新增事件类型时，开发者需翻源码确认是否 ephemeral。
+- **涉及文件**：
+  - [core/tasks/events.py](../core/tasks/events.py)
+  - [core/tasks/events_redis.py](../core/tasks/events_redis.py)
+  - [api/routes/analyze_async.py](../api/routes/analyze_async.py)
+- **建议修复**：引入 `EphemeralEvent` / `PersistentEvent` 类型标记或在事件 payload 中增加 `replay_safe: bool` 字段，让消费方无需了解内部实现即可判断回放安全性。
+- **发现日期**：2026-04-18（重构分析时发现）
+
+### 4. TaskRegistry 多级 TTL 清理协调风险
+- **问题**：`core/tasks/registry.py` 存在三套独立的清理机制——`result_cache_ttl_sec`（600s，entry 从内存淘汰）、`orphan_pending_chat_max_age_sec`（1800s，pending 状态 chat_messages 标记 error）、启动/关闭时的 `_mark_stale_as_aborted()`——三者的 TTL 窗口和触发时机互不感知。
+- **影响**：极端情况下（worker 崩溃 + sweep 间隔过长），chat_messages 可能在 pending 状态停留超过 30 分钟无人回收；entry 过期淘汰后 orphan 清理器找不到对应 entry，跳过清理。
+- **涉及文件**：
+  - [core/tasks/registry.py](../core/tasks/registry.py)
+- **建议修复**：统一 TTL 层级关系（entry TTL ≥ orphan TTL），在 sweep 中增加"entry 已淘汰但 chat_messages 仍 pending"的兜底检查；或将三套清理逻辑收敛到一个 `cleanup()` 方法中统一调度。
+- **发现日期**：2026-04-18（重构分析时发现）
+
 ---
 
 ## 已修复
