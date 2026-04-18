@@ -1420,7 +1420,7 @@ class TestOrchestratorOutputModeChat:
 
     def test_chat_mode_in_build_output_mode_prompts(self, settings: Settings) -> None:
         """chat 模式必须出现在可选模式列表中，文本与 detailed/brief/table 不同。"""
-        from core.orchestrator.orchestrator import _build_output_mode_prompts
+        from core.orchestrator.prompts import build_output_mode_prompts as _build_output_mode_prompts
 
         modes = _build_output_mode_prompts(settings)
         assert set(modes.keys()) == {"detailed", "brief", "table", "chat"}

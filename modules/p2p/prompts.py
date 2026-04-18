@@ -216,3 +216,76 @@ def build_system_prompt(long_term_context: str = "") -> str:
 ## 本体知识上下文
 {ontology_context}
 {long_term_block}"""
+
+
+# ---------------------------------------------------------------------------
+# ReportAgent 报告生成 Prompt
+# ---------------------------------------------------------------------------
+
+_REPORT_PROMPT = """你是 ERP 采购分析系统的报告生成器。根据以下分析工具的输出，生成一份结构化的 Markdown 分析报告。
+
+## 时间上下文
+当前日期：{current_date}（{timezone}）。所有"最近 N 天"/"本月"等相对时间以此为基准。
+
+## 分析场景
+{scenario}
+
+## 工具输出数据
+{outputs_text}
+
+## 严重等级判定规则（客观阈值，不要主观评估）
+- HIGH: 涉及金额 > ¥{high_amount} 的异常；或偏差比例超过容差的 {variance_mult} 倍以上
+- MEDIUM: 已超容差但未达 HIGH 阈值的异常
+- LOW: 疑似异常但未超容差，或数据不完整需人工复核
+
+## 报告要求
+1. 包含：摘要、关键发现、详细数据、建议措施
+2. 对每项异常按上述规则标注严重等级（HIGH/MEDIUM/LOW）
+3. 提供具体数据支撑（单据号、金额、偏差比例）
+4. 给出可操作的改进建议
+
+## 重要约束（必须遵守）
+- **语言必须是中文**：所有段落、标题、要点、结论均使用简体中文；即使工具输出数据中含英文字段名或枚举值，正文叙述仍用中文
+- 所有结论、数据、单据号、金额、供应商名称必须直接来源于上文"工具输出数据"；禁止推断、猜测或虚构未提供的具体数值
+- 建议措施必须基于上文工具输出中已出现的具体异常或数据；不得引入未提及的供应商、未发生的事件或假想的系统改造项
+- 如工具输出为空或数据不足以支撑某项结论，必须明确写"数据不足"或"无异常发现"，不得编造
+- 本系统为分析只读系统，不会执行任何 ERP 写操作（付款、审批、工单创建、单据修改、邮件发送等）；改进动作一律以"建议人工处理"措辞表达，不要承诺或模拟执行
+- 直接输出 Markdown 正文，不要添加前言或"好的，以下是..."之类的导语
+- 禁止输出 <think>、</think> 或任何 XML 推理标签；不要输出推理过程，只输出最终报告
+
+请输出 Markdown 报告："""
+
+
+def build_report_prompt(
+    *,
+    scenario: str,
+    outputs_text: str,
+    output_mode_prompt: str = "",
+) -> str:
+    """渲染 ReportAgent 的完整 prompt。
+
+    Args:
+        scenario: 分析场景描述。
+        outputs_text: 合并后的工具输出文本。
+        output_mode_prompt: 可选的输出格式指令（brief/table/chat 等）。
+    """
+    from core.time_utils import get_timezone_name, now_cn
+
+    from modules.p2p.settings import get_p2p_settings
+
+    anomaly_cfg = get_p2p_settings().anomaly_severity
+    prompt = _REPORT_PROMPT.format(
+        scenario=scenario,
+        outputs_text=outputs_text,
+        high_amount=f"{int(anomaly_cfg.high_amount_threshold):,}",
+        variance_mult=f"{anomaly_cfg.variance_high_multiplier:g}",
+        current_date=now_cn().strftime("%Y-%m-%d"),
+        timezone=get_timezone_name(),
+    )
+    if output_mode_prompt:
+        prompt += (
+            f"\n\n## 输出格式要求（优先级高于上文\"报告要求\"）\n"
+            f"{output_mode_prompt}\n"
+            f"若与上文\"报告要求\"的结构或字数规定冲突，以本节为准。"
+        )
+    return prompt
