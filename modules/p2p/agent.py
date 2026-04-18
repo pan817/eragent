@@ -362,7 +362,7 @@ class P2PAgent:
             tools = self._build_tools()
             system_prompt = build_system_prompt()
 
-            from core.memory.middleware import MemoryMiddleware
+            from core.memory.trimmer import MemoryMiddleware
 
             mem_cfg = self._settings.memory
             memory_middleware = MemoryMiddleware(

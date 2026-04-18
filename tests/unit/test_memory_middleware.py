@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from core.memory.middleware import MemoryMiddleware, _TRUNCATION_SUFFIX
+from core.memory.trimmer import MemoryMiddleware, _TRUNCATION_SUFFIX
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ class TestFindKeepBoundary:
 class TestTrimRequest:
     """测试消息裁剪核心逻辑。"""
 
-    @patch("core.memory.middleware.logger")
+    @patch("core.memory.trimmer.logger")
     def test_early_tool_messages_truncated(self, _mock_logger):
         """早期 ToolMessage 内容被截断到 max_chars。"""
         mw = MemoryMiddleware(keep_recent_rounds=1, tool_content_max_chars=100)
