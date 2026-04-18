@@ -56,7 +56,9 @@ def _get_orchestrator() -> Orchestrator:
     """获取 Orchestrator 单例（延迟初始化）。"""
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = Orchestrator()
+        from modules.p2p.provider import P2PModuleProvider
+
+        _orchestrator = Orchestrator(provider=P2PModuleProvider())
     return _orchestrator
 
 
