@@ -46,68 +46,36 @@ class ToolRegistry:
         return name in self._tools
 
 
-def build_default_registry() -> ToolRegistry:
-    """构建包含所有 P2P 工具的默认注册表（含 execute.md 别名）。
+# execute.md 中使用的工具别名（canonical_name → alias_name 列表）
+_TOOL_ALIASES: list[tuple[str, str]] = [
+    ("query_goods_receipts", "query_receipts"),
+    ("query_vendor_invoices", "query_invoices"),
+    ("calculate_ppv", "run_price_variance_analysis"),
+    ("get_vendor_scorecard", "calculate_supplier_kpis"),
+    ("validate_compliance", "run_payment_compliance_check"),
+]
 
-    调用时才导入 tools 模块，避免模块级循环依赖。
+
+def build_registry_from_provider(provider: Any) -> ToolRegistry:
+    """从 ModuleProvider 自动注册全部工具。
+
+    工具名取自 @tool 装饰器生成的 ``.name`` 属性（即函数名）。
     """
-    from modules.p2p.tools import (
-        analyze_discount_utilization,
-        analyze_receipt_anomalies,
-        analyze_vendor_concentration,
-        calculate_po_cycle_time,
-        calculate_spend_analysis,
-        calculate_supplier_kpis,
-        check_approval_limits,
-        check_blacklist,
-        detect_duplicate_invoices,
-        query_invoices,
-        query_payments,
-        query_purchase_orders,
-        query_receipts,
-        query_vendor_master,
-        query_material_master,
-        run_payment_compliance_check,
-        run_price_variance_analysis,
-        run_three_way_match,
-        run_vendor_risk_scoring,
-    )
-
     registry = ToolRegistry()
+    for tool_fn in provider.get_tools():
+        name = getattr(tool_fn, "name", None) or tool_fn.__name__
+        registry.register(name, tool_fn)
 
-    # 现有工具（canonical name）
-    for name, fn in [
-        ("query_purchase_orders", query_purchase_orders),
-        ("query_receipts", query_receipts),
-        ("query_invoices", query_invoices),
-        ("query_payments", query_payments),
-        ("run_three_way_match", run_three_way_match),
-        ("run_price_variance_analysis", run_price_variance_analysis),
-        ("run_payment_compliance_check", run_payment_compliance_check),
-        ("calculate_supplier_kpis", calculate_supplier_kpis),
-        # Phase 2 新增
-        ("query_vendor_master", query_vendor_master),
-        ("calculate_spend_analysis", calculate_spend_analysis),
-        # 第一梯队新增工具
-        ("analyze_receipt_anomalies", analyze_receipt_anomalies),
-        ("detect_duplicate_invoices", detect_duplicate_invoices),
-        ("analyze_discount_utilization", analyze_discount_utilization),
-        ("calculate_po_cycle_time", calculate_po_cycle_time),
-        ("analyze_vendor_concentration", analyze_vendor_concentration),
-        # 存根
-        ("query_material_master", query_material_master),
-        ("run_vendor_risk_scoring", run_vendor_risk_scoring),
-        ("check_approval_limits", check_approval_limits),
-        ("check_blacklist", check_blacklist),
-    ]:
-        registry.register(name, fn)
-
-    # execute.md 别名映射
-    registry.register_alias("query_goods_receipts", "query_receipts")
-    registry.register_alias("query_vendor_invoices", "query_invoices")
-    registry.register_alias("calculate_ppv", "run_price_variance_analysis")
-    registry.register_alias("get_vendor_scorecard", "calculate_supplier_kpis")
-    registry.register_alias("validate_compliance", "run_payment_compliance_check")
+    for alias, canonical in _TOOL_ALIASES:
+        if canonical in registry:
+            registry.register_alias(alias, canonical)
 
     _logger.info("tool registry built: %d tools (incl. aliases)", len(registry.tool_names))
     return registry
+
+
+def build_default_registry() -> ToolRegistry:
+    """兼容入口：无 Provider 时从 P2P 模块直接构建注册表。"""
+    from modules.p2p.provider import P2PModuleProvider
+
+    return build_registry_from_provider(P2PModuleProvider())

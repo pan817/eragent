@@ -192,9 +192,13 @@ class Orchestrator:
         """延迟初始化 DAG Executor（Level 1/2 DAG 执行）。"""
         if self._dag_executor is None:
             from core.orchestrator.dag.executor import DAGExecutor
-            from core.orchestrator.dag.registry import build_default_registry
 
-            registry = build_default_registry()
+            if self._provider is not None:
+                from core.orchestrator.dag.registry import build_registry_from_provider
+                registry = build_registry_from_provider(self._provider)
+            else:
+                from core.orchestrator.dag.registry import build_default_registry
+                registry = build_default_registry()
             if self._report_agent is None:
                 if self._provider is not None:
                     self._report_agent = self._provider.get_report_agent(
