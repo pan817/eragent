@@ -6,6 +6,21 @@
 
 from __future__ import annotations
 
+# L3 LLM 分类 prompt 中的 analysis_type 枚举描述
+ANALYSIS_TYPE_DESCRIPTIONS: list[tuple[str, str]] = [
+    ("three_way_match", "采购订单、收货单、发票的三单匹配异常检查"),
+    ("price_variance", "实际采购价格与合同价/标准价的偏差分析"),
+    ("payment_compliance", "付款逾期、提前付款、折扣滥用等合规检查"),
+    ("supplier_performance", "供应商交期、质量、KPI 综合绩效评估"),
+    ("spend_analysis", "按品类/供应商维度的采购支出分布分析"),
+    ("receipt_anomaly", "超量收货、拒收、延迟收货等收货异常分析"),
+    ("invoice_duplicate", "重复发票检测"),
+    ("discount_utilization", "早付折扣利用率分析"),
+    ("po_cycle_time", "采购订单全流程周期分析"),
+    ("vendor_concentration", "供应商集中度与采购依赖风险分析"),
+    ("comprehensive", "明确需要跨多个维度组合分析（如\"综合评估供应商风险\"）"),
+]
+
 # L1 分析关键词（出现这些词说明用户有具体业务意图）
 ANALYSIS_KEYWORDS: set[str] = {
     # 分析动词
