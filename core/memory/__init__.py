@@ -1,8 +1,4 @@
-"""长期记忆模块（PostgreSQL 持久化，按 user_id 隔离）。
-
-短期记忆由 LangGraph PostgresSaver checkpointer 承担（thread_id = session_id），
-通过 core.observability.checkpointer 注入 trace 监控，不在本包中管理。
-"""
+"""记忆模块：长期记忆（PostgreSQL）+ 短期记忆（LangGraph checkpointer）。"""
 
 from core.memory.long_term import (
     LongTermMemory,
@@ -14,8 +10,11 @@ from core.memory.long_term import (
     reset_long_term_memory,
     reset_repositories,
 )
+from core.memory.short_term import ShortTermMemory
+
 __all__ = [
     "LongTermMemory",
+    "ShortTermMemory",
     "MemoryRepository",
     "ReportRepository",
     "get_long_term_memory",

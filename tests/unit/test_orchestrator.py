@@ -528,7 +528,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.return_value = None
-        orch._checkpointer = mock_checkpointer
+        orch._short_term._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -551,7 +551,7 @@ class TestOrchestratorSessionContext:
             }
         }
         mock_checkpointer.get_tuple.return_value = mock_tuple
-        orch._checkpointer = mock_checkpointer
+        orch._short_term._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is True
@@ -563,7 +563,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.side_effect = RuntimeError("db error")
-        orch._checkpointer = mock_checkpointer
+        orch._short_term._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -1080,7 +1080,7 @@ class TestSessionContextTrim:
             }
         }
         mock_cp.get_tuple.return_value = mock_tuple
-        orch._checkpointer = mock_cp
+        orch._short_term._checkpointer = mock_cp
 
         ctx = orch._load_session_context("s1")
         assert ctx["context_summary"] == "SUP-001 准时率 95%"
@@ -1104,7 +1104,7 @@ class TestSessionContextTrim:
             }
         }
         mock_cp.get_tuple.return_value = mock_tuple
-        orch._checkpointer = mock_cp
+        orch._short_term._checkpointer = mock_cp
 
         ctx = orch._load_session_context("s1")
         summary = ctx["context_summary"]
@@ -1212,12 +1212,12 @@ class TestCheckpointerLifecycle:
         orch = Orchestrator(settings=settings)
         mock_cm = MagicMock()
         mock_cm.__exit__ = MagicMock(side_effect=RuntimeError("close error"))
-        orch._checkpointer_cm = mock_cm
-        orch._checkpointer = MagicMock()
+        orch._short_term._checkpointer_cm = mock_cm
+        orch._short_term._checkpointer = MagicMock()
 
         orch._close_checkpointer()
-        assert orch._checkpointer is None
-        assert orch._checkpointer_cm is None
+        assert orch._short_term._checkpointer is None
+        assert orch._short_term._checkpointer_cm is None
 
     def test_close_checkpointer_idempotent(self, settings: Settings) -> None:
         """重复关闭不应报错。"""
