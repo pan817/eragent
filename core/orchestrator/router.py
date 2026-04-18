@@ -18,8 +18,7 @@ from typing import Any
 
 import yaml
 
-# TECH-DEBT(#2): core/modules 反向 import api.schemas，待下沉到 core/schemas
-from api.schemas.analysis import AnalysisType
+from api.schemas.domain import AnalysisType
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.orchestrator.signal import IntentKind, QuerySignal

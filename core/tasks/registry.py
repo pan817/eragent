@@ -19,9 +19,8 @@ from typing import Any
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
-# TECH-DEBT(#2): core/modules 反向 import api.schemas，待下沉到 core/schemas
-from api.schemas.analysis import (
-    AnalysisRequest,
+from api.schemas.analysis import AnalysisRequest
+from api.schemas.domain import (
     AnalysisResult,
     AnalysisStatus,
     ErrorInfo,

@@ -11,8 +11,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-# TECH-DEBT(#2): core/modules 反向 import api.schemas，待下沉到 core/schemas
-from api.schemas.analysis import (
+from api.schemas.domain import (
     AnomalyDetail,
     AnomalyRecord,
     DocumentRef,
