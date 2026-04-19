@@ -246,15 +246,18 @@ DATA_LOOKUP 走 ReAct 的典型延迟构成：
 
 ## 5. 推荐解决方案
 
-**推荐方案 C（轻量级 Lookup 快捷路径）**，分两期实施。
+**推荐方案 C（轻量级 Lookup 快捷路径）**，一次性实施，开关统一保护。
 
-### 5.1 第一期：快赢——直调工具快捷路径（覆盖 80% DATA_LOOKUP）
+### 5.1 方案概述
 
-**核心思路**：对于路由阶段已提取到明确实体的 DATA_LOOKUP 查询，在 orchestrator 中直接调用对应 `query_*` 工具，跳过 ReAct Agent。
+**核心思路**：对于被识别为 DATA_LOOKUP 的查询，在 orchestrator 中直接调用对应 `query_*` 工具，跳过 ReAct Agent。按实体来源分两条路径，共享同一开关和基础设施：
 
-#### 5.1.1 实体 → 工具映射规则
+- **路径 A（有实体编号）**：路由阶段 `_extract_params()` 已提取到具体编号（如 `PO-2024-001`），直接映射到对应工具
+- **路径 B（关键词推断）**：无具体编号但 query 中有实体类型关键词（如"查最新PO"），推断调用的工具并用默认参数
 
-路由阶段 `_extract_params()` 已从 query 中正则提取了实体。根据已有实体确定调用的工具：
+#### 5.1.1 路径 A：实体编号 → 工具映射规则
+
+路由阶段 `_extract_params()` 已从 query 中正则提取了实体编号。根据已有实体确定调用的工具：
 
 | 已提取实体 | 调用工具 | 说明 |
 |-----------|---------|------|
@@ -263,7 +266,7 @@ DATA_LOOKUP 走 ReAct 的典型延迟构成：
 | `payment_number` | `query_payments(payment_number=...)` | 查询特定付款单 |
 | `receipt_number` | **降级 ReAct** | 见下方缺口说明 |
 | `supplier_id`（无其他实体） | `query_vendor_master(vendor_ids=...)` + `query_purchase_orders(supplier_id=...)` | 先查供应商主数据，再查其 PO 列表 |
-| 无任何实体 | **降级 ReAct** | 如"查最新的PO"，需要 LLM 判断参数 |
+| 无实体编号 | 进入路径 B（关键词推断） | 见 5.1.3 |
 
 优先级：`po_number > invoice_number > payment_number > supplier_id`（与现有实体维度 DAG 模板的优先级一致）。
 
@@ -276,7 +279,24 @@ DATA_LOOKUP 走 ReAct 的典型延迟构成：
 | 合同（contract）无 query 工具 | `LOOKUP_ENTITIES` 词表包含"合同/contract"，但系统中没有 `query_contracts` 工具，且缺少合同数据模型、Repository 查询方法和模拟数据 | 第一期降级 ReAct；后续需先补齐数据层（ORM 模型 + Repository + mock 数据），再新建 `query_contracts` 工具并纳入快捷路径 |
 | 物料（material）仅 stub | `LOOKUP_ENTITIES` 词表包含"物料/material"，`query_material_master` 当前为 stub 实现 | 降级 ReAct（stub 会返回"功能尚未上线"提示） |
 
-#### 5.1.3 lookup_formatter：JSON → Markdown 表格
+#### 5.1.3 路径 B：关键词推断 → 工具映射规则
+
+路径 A 未命中时（无实体编号），从 query 中提取实体类型关键词，推断应调用的工具，参数取默认值。
+
+| query 关键词 | 推断工具 | 默认参数 |
+|-------------|---------|---------|
+| po/采购单/采购订单/订单 | `query_purchase_orders` | days=30 |
+| 发票/invoice/inv | `query_invoices` | days=30 |
+| 付款/付款单/payment/应付 | `query_payments` | days=30 |
+| 收货/收货单/receipt/rcv/gr | `query_receipts` | days=30 |
+| 供应商/supplier/sup | `query_vendor_master` + `query_purchase_orders` | days=30 |
+| 无法推断 | **降级 ReAct** | — |
+
+关键词映射表放在 `modules/p2p/intent_rules.py`，与现有的 `LOOKUP_ENTITIES` 词表复用。
+
+> **误判风险说明**：关键词推断**仅在 `intent_kind=DATA_LOOKUP` 已确定后**才生效。如"发票和收货对不上"中的"发票"不会被推断为 `query_invoices`——该 query 在路由阶段会被 L1 命中为 `ANALYSIS`（三路匹配），根本不进入 DATA_LOOKUP 分支。
+
+#### 5.1.4 lookup_formatter：JSON → Markdown 表格
 
 新增一个纯 Python 格式化函数（非 @tool），将 `_clip_and_dump` 返回的 JSON 字符串转为 Markdown 表格：
 
@@ -285,7 +305,7 @@ DATA_LOOKUP 走 ReAct 的典型延迟构成：
 - 不需要 LLM 调用
 - 表格列根据实体类型预定义（PO 展示 po_number/supplier/amount/status/date，发票展示 invoice_number/po_number/amount/status 等）
 
-#### 5.1.4 配置开关
+#### 5.1.5 配置开关
 
 在 `IntentRoutingSettings` 中新增开关，控制有明确实体的 DATA_LOOKUP 走快捷路径（直调工具）还是走 ReAct：
 
@@ -303,38 +323,27 @@ intent_routing:
 2. **快速回滚**：如果快捷路径的格式化输出不满足业务需求，改一行配置即可恢复
 3. **按场景选择**：某些客户可能偏好 ReAct 的自然语言回复风格，可按部署关闭
 
-#### 5.1.5 orchestrator 改动
+#### 5.1.6 orchestrator 改动
 
-在 [orchestrator.py:548](../core/orchestrator/orchestrator.py#L548) 的 `if is_data_lookup` 分支中，增加"开关判断 + 快捷路径优先 + ReAct 兜底"的决策：
+在 [orchestrator.py:548](../core/orchestrator/orchestrator.py#L548) 的 `if is_data_lookup` 分支中，增加"开关 + 路径 A/B + ReAct 兜底"的三段决策：
 
 ```
 if is_data_lookup:
-    if lookup_shortcut_enabled and 有明确实体:
+    if not lookup_shortcut_enabled:
+        → use_dag = False（走 ReAct，保持原行为）
+    elif 有实体编号（路径 A）:
         → 直调 query_* 工具 → lookup_formatter → 返回结果
+    elif 关键词可推断工具（路径 B）:
+        → 直调推断的 query_* 工具 → lookup_formatter → 返回结果
     else:
-        → use_dag = False（走 ReAct，保持现有行为）
+        → use_dag = False（走 ReAct 兜底）
 ```
 
-#### 5.1.6 output_mode 处理
+#### 5.1.7 output_mode 处理
 
 快捷路径不经过 ReportAgent，不存在 `chat→brief` 升级矛盾。直接使用 `chat` 格式输出 Markdown 表格 + 摘要。
 
-### 5.2 第二期：增强——无实体 DATA_LOOKUP 的关键词推断
-
-覆盖第一期降级到 ReAct 的场景（无明确实体，如"查最新的PO"/"列出最近的发票"）。
-
-**思路**：从 query 中提取实体类型关键词（"PO/采购订单" → PO 类查询、"发票" → 发票类查询），结合 `_LOOKUP_ENTITIES` 词表，推断应调用哪个 `query_*` 工具，参数取默认值（`days=30`）。
-
-| query 关键词 | 推断工具 | 默认参数 |
-|-------------|---------|---------|
-| po/采购单/采购订单/订单 | `query_purchase_orders` | days=30 |
-| 发票/invoice/inv | `query_invoices` | days=30 |
-| 付款/付款单/payment/应付 | `query_payments` | days=30 |
-| 收货/收货单/receipt/rcv/gr | `query_receipts` | days=30 |
-| 供应商/supplier/sup | `query_purchase_orders` | days=30, 按 supplier 聚合 |
-| 无法推断 | **降级 ReAct** | — |
-
-### 5.3 与技术债 #8 原方案的差异
+### 5.2 与技术债 #8 原方案的差异
 
 | 项 | 原方案（5 DAG 模板） | 推荐方案（快捷路径） |
 |---|---|---|
@@ -349,41 +358,29 @@ if is_data_lookup:
 
 ## 6. 实施路线图
 
-### 6.1 第一期：快捷路径（预计改动 3 个文件）
+### 6.1 实施步骤（一次性交付，开关统一保护）
 
 | 步骤 | 内容 | 涉及文件 | 验收标准 |
 |------|------|---------|---------|
-| 1 | `IntentRoutingSettings` 新增 `lookup_shortcut_enabled: bool = True` 配置项，`config.yaml` 同步新增 | `config/settings.py` + `config/config.yaml` | 配置项可读取，默认 `True` |
-| 2 | 新增 `lookup_formatter` 函数：JSON → Markdown 表格 + 摘要 | `modules/p2p/tools/_output.py` 或新建 `core/orchestrator/lookup.py` | 单元测试覆盖 5 种实体类型的格式化输出 |
-| 3 | orchestrator 中 DATA_LOOKUP 分支增加"开关 + 有实体 → 直调工具"快捷路径 | `core/orchestrator/orchestrator.py` | 开关开启 + 有实体 → 快捷路径；开关关闭 → ReAct |
-| 4 | 快捷路径增加 trace span 记录（`lookup_shortcut`） | `core/orchestrator/orchestrator.py` | trace 中可区分 lookup 快捷路径和 ReAct 路径 |
-| 5 | 补充单元测试 | `tests/unit/test_orchestrator.py` 或新建 `tests/unit/test_lookup.py` | 覆盖：开关开 + 有 PO → 快捷路径 / 开关关 → ReAct / 无实体 → ReAct 降级 |
+| 1 | `IntentRoutingSettings` 新增 `lookup_shortcut_enabled: bool = True`，`config.yaml` 同步 | `config/settings.py` + `config/config.yaml` | 配置项可读取，默认 `True` |
+| 2 | `intent_rules.py` 新增实体类型关键词→工具映射表（路径 B 用） | `modules/p2p/intent_rules.py` | 映射表覆盖 PO/发票/付款/收货/供应商 5 类 |
+| 3 | 新增 `lookup_formatter` 函数：JSON → Markdown 表格 + 摘要 | 新建 `core/orchestrator/lookup.py` | 单元测试覆盖 5 种实体类型的格式化输出 |
+| 4 | orchestrator 中 DATA_LOOKUP 分支改为三段决策：开关关→ReAct / 路径 A（有实体编号）→直调 / 路径 B（关键词推断）→直调 / 兜底→ReAct | `core/orchestrator/orchestrator.py` | 四条分支均可触发 |
+| 5 | 快捷路径增加 trace span（`lookup_shortcut`），记录命中路径 A/B | `core/orchestrator/orchestrator.py` | trace 中可区分 lookup_a / lookup_b / react |
+| 6 | 单元测试 | 新建 `tests/unit/test_lookup.py` | 覆盖：开关开+有实体→路径A / 开关开+关键词→路径B / 开关关→ReAct / 无法推断→ReAct |
+| 7 | 移除 `# TECH-DEBT(#8)` 注释，`agent_issue.md` #8 移到已修复区 | `orchestrator.py` + `docs/agent_issue.md` | 双记录同步清理 |
+| 8 | commit | — | `fix(#8): DATA_LOOKUP lookup shortcut, bypass ReAct when entity or keyword matches` |
 
-### 6.2 第二期：关键词推断（预计改动 2 个文件）
-
-| 步骤 | 内容 | 涉及文件 | 验收标准 |
-|------|------|---------|---------|
-| 6 | 新增实体类型关键词 → 工具映射表 | `modules/p2p/intent_rules.py` | 映射表覆盖 PO/发票/付款/收货/供应商 5 类 |
-| 7 | orchestrator 中无实体 DATA_LOOKUP 增加关键词推断逻辑（受同一开关控制） | `core/orchestrator/orchestrator.py` | "查最新PO" 不走 ReAct，延迟 < 1s |
-| 8 | 补充单元测试 | `tests/unit/test_lookup.py` | 覆盖：关键词命中 → 快捷路径 / 关键词不明 → ReAct 降级 |
-
-### 6.3 完成后清理
-
-| 步骤 | 内容 |
-|------|------|
-| 9 | 移除 `orchestrator.py:538` 的 `# TECH-DEBT(#8)` 注释 |
-| 10 | 将 `agent_issue.md` #8 条目移到"已修复"区，更新修复方案描述 |
-| 11 | commit message 引用 `#8`，格式：`fix(#8): DATA_LOOKUP 快捷路径，有实体时跳过 ReAct` |
-
-### 6.4 回滚策略
+### 6.2 回滚策略（开关保护）
 
 快捷路径通过步骤 1 新增的 `lookup_shortcut_enabled` 配置开关控制。将 `config.yaml` 中 `intent_routing.lookup_shortcut_enabled` 设为 `false` 即可让所有 DATA_LOOKUP 恢复走 ReAct，与改动前行为完全一致，无需回滚代码。
 
-### 6.5 预期效果
+### 6.3 预期效果
 
-| 指标 | 改动前 | 第一期后 | 第二期后 |
-|------|--------|---------|---------|
-| 有实体 DATA_LOOKUP 延迟 | 4~6s | **< 1s** | < 1s |
-| 无实体 DATA_LOOKUP 延迟 | 4~6s | 4~6s（仍走 ReAct） | **< 1s**（关键词可推断时） |
-| DATA_LOOKUP token 消耗 | 3000~5000/次 | **0**（有实体时） | **0**（可推断时） |
-| ReAct 降级率 | 100% | ~25%（无实体 + receipt_number + 合同/物料） | ~10%（仅完全模糊 + 不支持的实体类型） |
+| 指标 | 改动前 | 改动后（开关开启） |
+|------|--------|-----------------|
+| 有实体编号的 DATA_LOOKUP 延迟 | 4~6s | **< 1s**（路径 A） |
+| 无实体但关键词可推断的延迟 | 4~6s | **< 1s**（路径 B） |
+| 完全模糊查询延迟 | 4~6s | 4~6s（ReAct 兜底，不变） |
+| DATA_LOOKUP token 消耗 | 3000~5000/次 | **0**（路径 A/B 命中时） |
+| ReAct 降级率 | 100% | **~10%**（仅完全模糊 + receipt_number + 合同/物料） |

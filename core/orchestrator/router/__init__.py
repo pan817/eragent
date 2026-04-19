@@ -123,6 +123,36 @@ def _has_analysis_keywords(query: str) -> bool:
     return any(kw in q_lower for kw in _ANALYSIS_KEYWORDS)
 
 
+# 强分析意图关键词：特定于某个 analysis_type 的核心术语。
+# 与 _ANALYSIS_KEYWORDS（含"分析""查询"等泛用词）的区别在于：
+# 这些词出现在查询中时，几乎确定用户要做一次新的分析，而非回溯历史。
+_STRONG_ANALYSIS_INTENT_KEYWORDS: set[str] = {
+    # 分析类型核心名词
+    "三路匹配", "三单", "three way", "three-way", "3way",
+    "价格差异", "ppv", "价差", "溢价",
+    "付款合规", "逾期", "overdue", "拖欠", "应付未付",
+    "供应商绩效", "kpi", "scorecard", "otif", "准时交货",
+    "支出分析", "spend", "支出分布", "品类支出",
+    "收货异常", "超量", "拒收", "退货", "入库异常",
+    "重复发票", "duplicate", "重复开票", "一票两付",
+    "折扣利用", "现金折扣", "折扣损失",
+    "周期", "cycle", "lead time", "处理时间",
+    "集中度", "concentration", "单一来源", "垄断",
+    # 明确的新分析动作词（排除"分析"本身，因为"上次分析的结果"不是新分析意图）
+    "检查一下", "帮我分析", "做一下", "再分析", "重新分析", "再做",
+}
+
+
+def _has_strong_analysis_intent(query: str) -> bool:
+    """检查 query 是否包含强分析意图关键词。
+
+    用于 RECALL bypass 的二次确认：含明确回溯词 + 强分析意图时，
+    不走 bypass 让 L1/L2/L3 正常路由。
+    """
+    q_lower = query.lower()
+    return any(kw in q_lower for kw in _STRONG_ANALYSIS_INTENT_KEYWORDS)
+
+
 def _classify_bypass(query: str) -> IntentKind | None:
     """前置 bypass 分类——若命中则返回对应 ``IntentKind``，否则返回 None。
 
@@ -139,7 +169,8 @@ def _classify_bypass(query: str) -> IntentKind | None:
     1. CHITCHAT 严格匹配（``^...$``）：避免把 "你好，分析一下三路匹配" 这种
        开头问候 + 真实意图的查询误判为闲聊。
     2. META 子串匹配（"你能做什么 / 支持哪些"）。
-    3. 明确回溯（"上次 / 刚才 / 结果呢"）→ RECALL，不做分析关键词校验。
+    3. 明确回溯（"上次 / 刚才 / 结果呢"）→ 仅当不含分析关键词时判 RECALL，
+       避免误吃 "上次那个供应商的三路匹配再分析一下" 中的回溯前缀。
     4. 歧义回溯（"之前 / previous"）→ 仅当不含分析关键词时判 RECALL，
        避免误吃 "分析之前 30 天的价格差异" 中的时间修饰用法。
     """
@@ -153,9 +184,15 @@ def _classify_bypass(query: str) -> IntentKind | None:
         if pattern.search(q):
             return IntentKind.META
 
+    # RECALL 与歧义 RECALL 统一处理：含强分析意图关键词时不 bypass，
+    # 让 L1/L2/L3 正常路由以保留分析意图。
+    # 使用 _has_strong_analysis_intent 而非 _has_analysis_keywords，
+    # 避免"分析"等泛用词让真正的回溯查询（"上次分析的结果呢"）逃逸。
     for pattern in _RECALL_PATTERNS:
         if pattern.search(q):
-            return IntentKind.RECALL
+            if not _has_strong_analysis_intent(q):
+                return IntentKind.RECALL
+            return None
 
     for pattern in _AMBIGUOUS_RECALL_PATTERNS:
         if pattern.search(q):
@@ -947,28 +984,29 @@ class IntentRouter:
 当前日期：{current_date}（{timezone}）。"最近 N 天"/"本月"/"上周"等相对时间以此为基准计算 days 参数。
 {role_section}
 ## intent_kind 枚举（先选这个，再决定其他字段）
-- analysis: 用户要做某种异常检测/合规检查/绩效评估等"分析"工作（必须能落入下面 11 类 analysis_type 之一）
+- analysis: 用户要做某种异常检测/合规检查/绩效评估等"分析"工作（必须能落入下面 11 类 analysis_type 之一）。**即使用户未指定时间范围、供应商、PO 编号等参数，只要分析意图明确就判 analysis**，系统会自动使用默认参数执行。
 - data_lookup: 纯事实查询/单据检索（"查最新 PO"/"列出 SUP-001 的发票"/"看看这单的金额"），不涉及异常或评估
-- clarification: 采购分析意图明确但关键参数严重缺失（如只说"做个三路匹配"没给任何范围/对象，需要追问后才能执行）
+- clarification: 用户意图本身不明确，无法判定属于哪种 analysis_type 或 data_lookup（如"帮我看看采购"过于笼统，无法确定要做什么类型的分析）。**注意：仅当意图本身模糊时才判 clarification；如果能识别出具体 analysis_type，即使缺少时间/实体参数也应判 analysis**
 - meta: 系统能力或数据元信息询问（"你支持哪些分析"/"数据更新到什么时候"）
 - chitchat: 闲聊/问候/与采购无关的常识/情感问答（"今天天气"/"hi"）
-- out_of_scope: 业务相关但本系统不覆盖的场景（如"销售订单分析"/"库存周转"/"HR 数据"）
+- out_of_scope: 明确指向非 P2P 业务模块的场景（如"销售订单分析"/"HR 数据"/"生产排程"）。**若查询与采购流程有任何关联（即使间接），应优先判 analysis 并选最相关的 analysis_type**
 
 ## analysis_type 枚举（仅当 intent_kind=analysis 时填，否则置空字符串）
 {analysis_types_section}
 
 ## 判定规则
-1. 先判 intent_kind，再决定其他字段。**不要把"信息不足"塞进 chitchat/out_of_scope，应判 clarification 或 data_lookup**。
+1. 先判 intent_kind，再决定其他字段。**核心原则：尽量判为 analysis 让系统执行，而不是拒绝用户**。
 2. 用户在"查/查询/查看/列出/最新/最近"等动词配合业务实体（PO/发票/供应商/订单等）时，优先判 data_lookup，而不是强行归入某个 analysis 类型。
-3. 只有"明确无业务关联"的才判 chitchat（如问候/天气/闲聊）；"业务相关但缺细节"判 clarification；"业务相关但本系统不支持"判 out_of_scope。
-4. analysis 类型选最具体的；只有明确需要跨多个维度时才选 comprehensive，"模糊但相关"不要强行归为 comprehensive。
-5. clarification 时在 missing_params 中列出缺失字段（取值：``time_range`` / ``supplier_id`` / ``po_number`` / ``analysis_scope`` 中的一个或多个）。
+3. 只有"明确无业务关联"的才判 chitchat（如问候/天气/闲聊）；只有"明确指向非 P2P 模块"才判 out_of_scope（如销售/HR/生产）。
+4. **禁止因缺少时间范围、供应商、PO 编号等可选参数就判 clarification**。系统有默认时间范围和全量分析能力，只有当分析意图本身无法判断时才用 clarification。
+5. analysis 类型选最具体的；只有明确需要跨多个维度时才选 comprehensive，"模糊但相关"不要强行归为 comprehensive。
+6. clarification 时在 missing_params 中列出缺失字段（取值：``time_range`` / ``supplier_id`` / ``po_number`` / ``analysis_scope`` 中的一个或多个）。
 
 ## confidence 判定锚点（严格按区间给分，不要一律给 0.8/0.9）
 - >0.9: 查询直接命中某 intent_kind+type 的核心名词（如"三路匹配"/"重复发票"），语义无歧义
 - 0.7-0.9: 语义强相关需要推断（如"发票和收货对不上"→analysis/three_way_match）
 - 0.5-0.7: 多类共存或表述模糊
-- <0.5: 信息严重不足；这种情况下倾向选 clarification 而不是降低 analysis 的 confidence
+- <0.5: 表述极度模糊且无法推断出任何 analysis_type；优先尝试 analysis + comprehensive，实在无法关联才考虑 clarification
 
 ## 参数抽取规则
 - 只抽取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null。
@@ -978,11 +1016,13 @@ class IntentRouter:
 
 ## 边界 case 示例
 - "查询最新的一个 PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
-- "做一下三路匹配" → {{"intent_kind":"clarification","type":"three_way_match","confidence":0.85,"missing_params":["time_range"],"supplier_id":null,"po_number":null,"days":null}}
+- "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
+- "分析一下付款合规" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "你支持哪些采购分析" → {{"intent_kind":"meta","type":"","confidence":0.95,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "今天天气怎么样" → {{"intent_kind":"chitchat","type":"","confidence":0.95,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "帮我看看销售订单的回款情况" → {{"intent_kind":"out_of_scope","type":"","confidence":0.9,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "分析最近 30 天供应商 SUP-001 的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"missing_params":[],"supplier_id":"SUP-001","po_number":null,"days":30}}
+- "帮我看看采购" → {{"intent_kind":"clarification","type":"","confidence":0.4,"missing_params":["analysis_scope"],"supplier_id":null,"po_number":null,"days":null}}
 
 用户查询：{query}"""
 

@@ -232,6 +232,7 @@ class TestOrchestratorIntentKindBranches:
     async def test_out_of_scope_returns_boundary_message(
         self, settings: Settings
     ) -> None:
+        """纯 OUT_OF_SCOPE（query 不含分析关键词）走早退模板。"""
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
         mock_agent = _make_mock_agent(return_value={})
@@ -240,7 +241,7 @@ class TestOrchestratorIntentKindBranches:
         signal = self._make_signal(IntentKind.OUT_OF_SCOPE)
         with patch.object(orch._intent_router, "route", return_value=signal):
             result = await orch.analyze(
-                AnalysisRequest(query="帮我看销售订单的回款")
+                AnalysisRequest(query="帮我做销售预测")
             )
 
         assert result.status == AnalysisStatus.SUCCESS
@@ -249,13 +250,44 @@ class TestOrchestratorIntentKindBranches:
         assert "超出本系统覆盖范围" in result.report_markdown
 
     @pytest.mark.asyncio
-    async def test_clarification_with_missing_params_renders_questions(
+    async def test_out_of_scope_with_analysis_keywords_downgrades(
         self, settings: Settings
     ) -> None:
-        """CLARIFICATION 早退时按 missing_params 渲染具体追问，而非泛泛"信息不足"。"""
+        """OUT_OF_SCOPE + query 含分析关键词 → 降级为 ANALYSIS/COMPREHENSIVE。"""
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
-        mock_agent = _make_mock_agent(return_value={})
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [], "supplier_kpis": [], "summary": {},
+            "report_markdown": "# Comprehensive",
+            "completed_tasks": [], "failed_tasks": [],
+        })
+        orch._agent = mock_agent
+
+        signal = self._make_signal(IntentKind.OUT_OF_SCOPE)
+        with patch.object(orch._intent_router, "route", return_value=signal):
+            result = await orch.analyze(
+                AnalysisRequest(query="供应商合同价格管理情况")
+            )
+
+        # 含"供应商""价格"等分析关键词，不应早退
+        mock_agent.run.assert_called_once()
+        assert result.status == AnalysisStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_clarification_with_valid_type_downgrades_to_analysis(
+        self, settings: Settings
+    ) -> None:
+        """CLARIFICATION + 有效 analysis_type 提示 → 降级为 ANALYSIS，不早退。
+
+        系统有默认参数（时间范围等），不需要追问用户。
+        """
+        from core.orchestrator.signal import IntentKind
+        orch = Orchestrator(settings=settings)
+        mock_agent = _make_mock_agent(return_value={
+            "anomalies": [], "supplier_kpis": [], "summary": {},
+            "report_markdown": "# Price Variance Report",
+            "completed_tasks": ["analysis"], "failed_tasks": [],
+        })
         orch._agent = mock_agent
 
         signal = self._make_signal(
@@ -267,26 +299,22 @@ class TestOrchestratorIntentKindBranches:
         with patch.object(orch._intent_router, "route", return_value=signal):
             result = await orch.analyze(AnalysisRequest(query="价格差异"))
 
+        # 不应早退，agent 应被调用执行分析
+        mock_agent.run.assert_called_once()
         assert result.status == AnalysisStatus.SUCCESS
-        mock_agent.run.assert_not_called()
-        assert result.summary.get("route_type") == "clarification"
-        assert result.summary.get("missing_params") == ["time_range", "supplier_id"]
-        # 报告应展示具体追问项（时间范围 / 供应商）
-        assert "时间范围" in result.report_markdown
-        assert "供应商" in result.report_markdown
 
     @pytest.mark.asyncio
-    async def test_clarification_without_missing_params_falls_back(
+    async def test_clarification_without_valid_type_still_early_returns(
         self, settings: Settings
     ) -> None:
-        """CLARIFICATION 但 missing_params 为空时，给出通用追问。"""
+        """CLARIFICATION + 无有效 type 提示 → 仍然早退追问。"""
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
         orch._agent = _make_mock_agent(return_value={})
 
         signal = self._make_signal(IntentKind.CLARIFICATION, missing_params=[])
         with patch.object(orch._intent_router, "route", return_value=signal):
-            result = await orch.analyze(AnalysisRequest(query="分析"))
+            result = await orch.analyze(AnalysisRequest(query="帮我看看"))
 
         assert "缺少关键参数" in result.report_markdown
 
@@ -534,8 +562,12 @@ class TestOrchestratorSessionContext:
         assert ctx["has_history"] is False
 
     def test_load_context_with_history(self, settings: Settings) -> None:
-        """有历史时应提取实体。"""
+        """有历史时应提取实体（从 session_entities 表读取）。"""
         from langchain_core.messages import AIMessage, HumanMessage
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+
+        from core.memory.tables import metadata_obj, session_entities_table
 
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
@@ -552,6 +584,20 @@ class TestOrchestratorSessionContext:
         }
         mock_checkpointer.get_tuple.return_value = mock_tuple
         orch._short_term._checkpointer = mock_checkpointer
+
+        # 预置 session_entities 表数据
+        entity_engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        metadata_obj.create_all(entity_engine)
+        with entity_engine.begin() as conn:
+            conn.execute(session_entities_table.insert().values(
+                session_id="s1",
+                entities={"po_number": "PO-2024-0035", "supplier_id": "SUP-001"},
+            ))
+        orch._short_term._entity_engine = entity_engine
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is True

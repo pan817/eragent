@@ -87,26 +87,18 @@
 - **建议修复**：在 lifespan shutdown 阶段调用 `TaskRegistry.shutdown(timeout=30)`，等待所有运行中任务完成或超时后标记为 aborted；同时停止接受新任务。
 - **发现日期**：2026-04-18
 
-### 8. DATA_LOOKUP 查询缺少 DAG 模板，100% 走 ReAct
-- **问题**：所有被识别为 DATA_LOOKUP 的事实查询（"查最新 PO"/"列出发票"/"看下应付明细"等）在 orchestrator 中被强制排除在 DAG 路径之外（`is_data_lookup → use_dag = False`），只能走 ReAct（LLM Agent 自主调 tool）。
-- **影响**：
-  - 延迟高：每次至少 1 轮 LLM 推理（1-3s），而这类查询本质只需调 1 个 query_* tool（200-500ms）；
-  - 不可缓存：无法走 case_store（批 4）复用历史 DAG；
-  - 不可预测：LLM 可能多调无关 tool 或输出"4 段报告"格式，与用户期望的结构化表格不符；
-  - 成本浪费：简单事实查询不需要 LLM 推理。
-- **涉及文件**：
-  - [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py)（`is_data_lookup → use_dag = False` 决策）
-  - [modules/p2p/dag_templates.py](../modules/p2p/dag_templates.py)（需新增 Lookup DAG 模板）
-- **建议修复**：
-  1. 新增 5 个 2 节点 Lookup DAG 模板（PO / Invoice / Payment / Receipt / Supplier），每个仅 `query_* → lookup_formatter`；
-  2. 新增 `lookup_formatter` tool（直接渲染 Markdown 表格，不走 LLM ReportAgent）；
-  3. orchestrator 中 DATA_LOOKUP 改为"Lookup 模板优先 + ReAct 兜底"两段决策；
-  4. 解决 DAG 路径 `output_mode=chat` 被强制升为 `brief` 的矛盾。
-  - 详细方案见 [docs/intent_routing_hit_rate_optimization.md 第 12-16 章](intent_routing_hit_rate_optimization.md)。
-- **发现日期**：2026-04-18
-
 ---
 
 ## 已修复
 
-（暂无）
+### 8. DATA_LOOKUP 查询缺少 DAG 模板，100% 走 ReAct
+- **问题**：所有被识别为 DATA_LOOKUP 的事实查询在 orchestrator 中被强制排除在 DAG 路径之外，只能走 ReAct。
+- **修复方案**：采用轻量级 Lookup 快捷路径（非 DAG 模板方案），在 orchestrator 中直调 query_* 工具，跳过 ReAct Agent。通过 `lookup_shortcut_enabled` 配置开关控制。
+- **修复文件**：
+  - [core/orchestrator/lookup.py](../core/orchestrator/lookup.py)（快捷路径核心逻辑 + 格式化）
+  - [core/orchestrator/orchestrator.py](../core/orchestrator/orchestrator.py)（三段决策 + trace span）
+  - [modules/p2p/intent_rules.py](../modules/p2p/intent_rules.py)（关键词→工具映射表）
+  - [config/settings.py](../config/settings.py) + [config/config.yaml](../config/config.yaml)（开关配置）
+- **详细分析**：[docs/data_lookup_react_analysis.md](data_lookup_react_analysis.md)
+- **发现日期**：2026-04-18
+- **修复日期**：2026-04-19

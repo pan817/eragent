@@ -636,15 +636,23 @@ class TestNonAnalysisQueryDetection:
     def test_ambiguous_recall_with_analysis_not_blocked(self, query: str) -> None:
         assert _is_non_analysis_query(query) is False
 
-    # ── 明确回溯词（即使含分析词也应 bypass）──
+    # ── 明确回溯词 + 无强分析意图 → 仍应 bypass ──
     @pytest.mark.parametrize("query", [
-        "上次分析那个供应商的价格差异",    # "上次"是明确回溯
-        "帮我总结一下刚才的分析",          # "总结一下"是明确回溯
-        "刚才收到一批货有质量问题",        # "刚才"是明确回溯
-        "上一次分析的异常有哪些",          # "上一次"是明确回溯
+        "帮我总结一下刚才的分析",          # "总结一下"是明确回溯，无强分析意图词
+        "刚才收到一批货有质量问题",        # "刚才"是明确回溯，无强分析意图词
+        "上一次分析的异常有哪些",          # "上一次"是明确回溯，"异常"非强意图词
     ])
-    def test_clear_recall_always_bypass(self, query: str) -> None:
+    def test_clear_recall_without_strong_intent_bypass(self, query: str) -> None:
         assert _is_non_analysis_query(query) is True
+
+    # ── 明确回溯词 + 有强分析意图 → 不应 bypass，走 L1/L2/L3 ──
+    @pytest.mark.parametrize("query", [
+        "上次分析那个供应商的价格差异",    # "上次" + "价格差异"(强意图)
+        "上次的三路匹配结果不对，再分析一下",  # "上次" + "三路匹配"(强意图)
+        "刚才的ppv分析有问题",            # "刚才" + "ppv"(强意图)
+    ])
+    def test_clear_recall_with_strong_intent_not_bypass(self, query: str) -> None:
+        assert _is_non_analysis_query(query) is False
 
     # ── 正常分析查询（不应 bypass）──
     @pytest.mark.parametrize("query", [
@@ -726,6 +734,8 @@ class TestClassifyBypass:
         "检查价格差异",
         "查询最新的一个 PO",
         "分析之前 30 天的价格差异",  # 歧义回溯 + 含分析关键词
+        "上次的三路匹配再分析一下",  # 明确回溯 + 强分析意图 → 不 bypass
+        "刚才那个ppv有问题重新分析",  # 明确回溯 + 强分析意图 → 不 bypass
     ])
     def test_no_bypass(self, query: str) -> None:
         assert _classify_bypass(query) is None

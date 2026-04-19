@@ -241,9 +241,10 @@ intent_routing:
   # L3 LLM classification confidence tiers
   l3_dag_min_confidence: 0.5
   l3_react_min_confidence: 0.3
-  # Feature flags (later batches)
+  # Feature flags
   l25_enabled: false
   generic_template_enabled: true
+  lookup_shortcut_enabled: true    # DATA_LOOKUP shortcut: true=direct tool call, false=ReAct
 
 logging:
   level: "INFO"

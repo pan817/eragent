@@ -125,6 +125,7 @@ class Orchestrator:
         self._agent: Any = None
         self._dag_executor: Any = None
         self._report_agent: Any = None
+        self._registry: Any = None
         self._lock = threading.RLock()
         self._init_components()
         from core.memory.short_term import ShortTermMemory
@@ -136,6 +137,8 @@ class Orchestrator:
         self._timing_middleware: TimingMiddleware = TimingMiddleware(
             agent_name="p2p_agent"
         )
+        from core.orchestrator.param_extractor import ParamExtractor
+        self._param_extractor: ParamExtractor = ParamExtractor(self._settings)
 
     # ── 短期记忆（委托 core/memory/short_term.py）─────────────────
 
@@ -235,18 +238,25 @@ class Orchestrator:
         return self._agent
 
     @property
+    def _lazy_tool_registry(self) -> Any:
+        """延迟初始化 ToolRegistry（供 DAG Executor 和 Lookup 快捷路径共用）。"""
+        if self._registry is None:
+            if self._provider is not None:
+                from core.orchestrator.dag.registry import build_registry_from_provider
+                self._registry = build_registry_from_provider(self._provider)
+            else:
+                from core.orchestrator.dag.registry import build_default_registry
+                self._registry = build_default_registry()
+        return self._registry
+
+    @property
     def _lazy_dag_executor(self) -> Any:
         """延迟初始化 DAG Executor（Level 1/2 DAG 执行）。"""
         if self._dag_executor is None:
             from core.orchestrator.dag.executor import DAGExecutor
             from core.orchestrator.dag.case_store import DAGCaseStore
 
-            if self._provider is not None:
-                from core.orchestrator.dag.registry import build_registry_from_provider
-                registry = build_registry_from_provider(self._provider)
-            else:
-                from core.orchestrator.dag.registry import build_default_registry
-                registry = build_default_registry()
+            registry = self._lazy_tool_registry
             if self._report_agent is None:
                 if self._provider is not None:
                     self._report_agent = self._provider.get_report_agent(
@@ -448,16 +458,55 @@ class Orchestrator:
                         list(relevant_entities.keys()),
                     )
 
+            # 1.5 前置 LLM 参数拆解（bypass 类查询跳过）
+            llm_extracted_params: dict[str, Any] = {}
+            if not is_recall:
+                llm_extracted_params = await asyncio.to_thread(
+                    self._param_extractor.extract, enhanced_query
+                )
+                if llm_extracted_params:
+                    _logger.info(
+                        "llm param extraction: %s", llm_extracted_params,
+                    )
+
             # 2. 意图解析（用增强后的 query 路由，传入角色偏好）
             signal = self._intent_router.route(
                 enhanced_query, analyst_role=request.analyst_role
             )
 
-            # 2.5 按 intent_kind 早退路由：CLARIFICATION / META / CHITCHAT /
-            # OUT_OF_SCOPE 都不触发 DAG / ReAct，由模板生成响应即可。
+            # 2.5 按 intent_kind 早退路由：META / CHITCHAT 由模板生成响应即可。
+            # CLARIFICATION / OUT_OF_SCOPE 需二次确认后才早退（见下方降级逻辑）。
             # ANALYSIS / DATA_LOOKUP / RECALL 继续走完整执行路径。
             # 用户显式指定 analysis_type 时跳过早退（视为强制走分析路径）。
             from core.orchestrator.signal import IntentKind as _IntentKind
+
+            # CLARIFICATION 降级：若 L3 同时给出了有效 analysis_type 提示，
+            # 说明意图其实可识别，只是参数不全——系统有默认参数，降级为 ANALYSIS。
+            if signal.intent_kind == _IntentKind.CLARIFICATION and request.analysis_type is None:
+                _hint_type = signal.keywords[0] if signal.keywords else ""
+                try:
+                    from api.schemas.domain import AnalysisType as _AT
+                    _AT(_hint_type)
+                    _logger.info(
+                        "CLARIFICATION with valid analysis_type hint '%s' → "
+                        "downgrade to ANALYSIS (system has default params)",
+                        _hint_type,
+                    )
+                    signal.intent_kind = _IntentKind.ANALYSIS
+                except ValueError:
+                    pass  # hint 无效，保持 CLARIFICATION 早退
+
+            # OUT_OF_SCOPE 降级：若 query 中包含分析关键词，说明与 P2P 有关联，
+            # 降级为 COMPREHENSIVE ANALYSIS 让 ReAct 尝试回答。
+            if signal.intent_kind == _IntentKind.OUT_OF_SCOPE and request.analysis_type is None:
+                from core.orchestrator.router import _has_analysis_keywords
+                if _has_analysis_keywords(request.query):
+                    _logger.info(
+                        "OUT_OF_SCOPE but query contains analysis keywords → "
+                        "downgrade to ANALYSIS/COMPREHENSIVE",
+                    )
+                    signal.intent_kind = _IntentKind.ANALYSIS
+                    signal.keywords = [AnalysisType.COMPREHENSIVE.value]
 
             if request.analysis_type is None and signal.intent_kind in (
                 _IntentKind.CLARIFICATION,
@@ -533,13 +582,20 @@ class Orchestrator:
             )
 
             # 3. 合并参数
-            parsed_params = signal.entities.copy()
+            # 优先级：regex/路由提取 > LLM 前置提取 > 默认值
+            # LLM 提取作为底层，路由提取的非空值覆盖
+            parsed_params = {**llm_extracted_params, **signal.entities}
+            # 移除 LLM-only 字段中被路由层意外清空的情况
+            for key in ("limit", "order_by"):
+                if key not in signal.entities and key in llm_extracted_params:
+                    parsed_params[key] = llm_extracted_params[key]
             # time_range 优先级: time_range > time_range_days > query 提取 > config 默认
             resolved_days = _resolve_time_range(request.time_range)
             time_range_days: int = (
                 resolved_days
                 or request.time_range_days
                 or signal.time_range_days
+                or llm_extracted_params.get("days")
                 or self._settings.analysis.default_time_range_days
             )
             parsed_params["days"] = time_range_days
@@ -558,15 +614,14 @@ class Orchestrator:
                 await self._enrich_entities(parsed_params)
 
             # 5. 路由决策
-            # - RECALL / DATA_LOOKUP / 低置信度 ANALYSIS → 强制 ReAct
-            #   （回溯需要看短期记忆；事实查询直接调 query_* 工具；低置信度不
-            #    宜走 DAG 模板分析以免输出离题报告）
+            # - RECALL / 低置信度 ANALYSIS → 强制 ReAct
+            # - DATA_LOOKUP + 开关开启 + 实体/关键词可推断 → Lookup 快捷路径（零 LLM）
+            # - DATA_LOOKUP 其余情况 → ReAct 兜底
             # - L1/L2 命中且非 COMPREHENSIVE → DAG 执行
             # - COMPREHENSIVE + 有具体实体 → 实体维度 DAG
             # - 其余 → ReAct 兜底
             from core.orchestrator.signal import IntentKind as _IntentKindRoute
 
-            # TECH-DEBT(#8): DATA_LOOKUP 强制走 ReAct，缺少 Lookup DAG 模板
             is_data_lookup = signal.intent_kind == _IntentKindRoute.DATA_LOOKUP
             low_confidence = (
                 signal.intent_kind == _IntentKindRoute.ANALYSIS
@@ -575,6 +630,26 @@ class Orchestrator:
             )
 
             generic_template_key: str | None = None  # 通用模板键（批 5）
+
+            # DATA_LOOKUP 快捷路径：开关开启时尝试直调工具
+            if is_data_lookup and self._settings.intent_routing.lookup_shortcut_enabled:
+                lookup_result = await self._try_lookup_shortcut(
+                    query=request.query,
+                    params=parsed_params,
+                    signal=signal,
+                    report_id=report_id,
+                    trace_id=trace_id,
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    time_range_days=time_range_days,
+                    start_time=start_time,
+                )
+                if lookup_result is not None:
+                    if not is_recall:
+                        await asyncio.to_thread(self._persist_report, lookup_result)
+                    return lookup_result
+                # 快捷路径未命中，降级到 ReAct
+                _logger.info("lookup shortcut miss, fallback to ReAct")
 
             if is_recall or is_data_lookup or low_confidence:
                 use_dag = False
@@ -691,6 +766,89 @@ class Orchestrator:
 
         except Exception:
             raise
+
+    # ── Lookup 快捷路径 ─────────────────────────────────────────────
+
+    async def _try_lookup_shortcut(
+        self,
+        *,
+        query: str,
+        params: dict[str, Any],
+        signal: Any,
+        report_id: str,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        time_range_days: int,
+        start_time: float,
+    ) -> AnalysisResult | None:
+        """DATA_LOOKUP 快捷路径：直调 query_* 工具，跳过 ReAct。
+
+        Returns:
+            AnalysisResult 或 None（无法确定工具，应降级 ReAct）。
+        """
+        from core.observability.tracing import record_span
+        from core.orchestrator.lookup import resolve_lookup_tool, execute_lookup
+
+        resolved = resolve_lookup_tool(params, query)
+        if resolved is None:
+            return None
+
+        tool_name, tool_kwargs = resolved
+
+        with record_span("orchestrator", "lookup_shortcut") as span_attrs:
+            lookup_path = "entity" if params.get("po_number") or params.get(
+                "invoice_number") or params.get("payment_number") or params.get(
+                "supplier_id") else "keyword"
+            span_attrs["lookup_path"] = lookup_path
+            span_attrs["tool_name"] = tool_name
+            span_attrs["tool_kwargs"] = {
+                k: v for k, v in tool_kwargs.items() if v
+            }
+            span_attrs["route_level"] = signal.route_level
+            span_attrs["confidence"] = signal.confidence
+
+            _publish_stage_safe(
+                "lookup_shortcut",
+                {"tool_name": tool_name, "lookup_path": lookup_path},
+            )
+
+            registry = self._lazy_tool_registry
+            result_md = await execute_lookup(tool_name, tool_kwargs, registry)
+
+            if result_md is None:
+                span_attrs["status"] = "miss"
+                return None
+
+            span_attrs["status"] = "ok"
+            span_attrs["output_length"] = len(result_md)
+
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+        _logger.info(
+            "lookup shortcut hit: path=%s tool=%s duration=%.1fms",
+            lookup_path, tool_name, duration_ms,
+        )
+
+        return AnalysisResult(
+            report_id=report_id,
+            trace_id=trace_id,
+            status=AnalysisStatus.SUCCESS,
+            analysis_type=AnalysisType.COMPREHENSIVE,
+            query=query,
+            user_id=user_id,
+            session_id=session_id,
+            time_range=f"最近 {time_range_days} 天",
+            summary={
+                "route_type": "lookup_shortcut",
+                "route_level": signal.route_level,
+                "route_confidence": signal.confidence,
+                "route_reasoning": signal.reasoning,
+                "lookup_path": lookup_path,
+                "lookup_tool": tool_name,
+            },
+            report_markdown=result_md,
+            duration_ms=duration_ms,
+        )
 
     # ── DAG 执行路径 ────────────────────────────────────────────────
 

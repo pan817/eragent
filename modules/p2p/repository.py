@@ -8,6 +8,7 @@ P2P 数据访问层（Repository）。
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 import threading
@@ -31,6 +32,38 @@ _logger = get_logger(__name__)
 _CONTRACT_PRICE_TTL_SECONDS = 3600.0
 
 
+def _apply_order_and_limit(
+    stmt: Any,
+    order_by: str,
+    limit: int,
+    *,
+    date_col: Any,
+    amount_col: Any | None,
+) -> Any:
+    """为 SELECT 语句追加 ORDER BY 和 LIMIT 子句。
+
+    Args:
+        stmt: SQLAlchemy Select 语句。
+        order_by: 排序方式枚举值（date_desc/date_asc/amount_desc/amount_asc）。
+        limit: 结果数量上限，0 表示不限制。
+        date_col: 日期排序列（必须提供）。
+        amount_col: 金额排序列（可选，为 None 时 amount 排序静默跳过）。
+    """
+    if order_by == "date_desc":
+        stmt = stmt.order_by(date_col.desc())
+    elif order_by == "date_asc":
+        stmt = stmt.order_by(date_col.asc())
+    elif order_by == "amount_desc" and amount_col is not None:
+        stmt = stmt.order_by(amount_col.desc())
+    elif order_by == "amount_asc" and amount_col is not None:
+        stmt = stmt.order_by(amount_col.asc())
+
+    if limit > 0:
+        stmt = stmt.limit(limit)
+
+    return stmt
+
+
 class P2PRepository:
     """P2P 业务数据查询仓库，所有方法直接执行 SQL 查询。"""
 
@@ -50,6 +83,8 @@ class P2PRepository:
         status: str = "",
         days: int = 30,
         po_number: str = "",
+        limit: int = 0,
+        order_by: str = "",
     ) -> list[dict[str, Any]]:
         """查询采购订单（扁平化格式，供查询工具使用）。"""
         with self._session_factory() as session:
@@ -80,6 +115,16 @@ class P2PRepository:
                 stmt = stmt.where(PoHeader.status == status.upper())
             if po_number:
                 stmt = stmt.where(PoHeader.po_number == po_number)
+            if days > 0:
+                stmt = stmt.where(
+                    PoHeader.creation_date >= date.today() - timedelta(days=days)
+                )
+
+            stmt = _apply_order_and_limit(
+                stmt, order_by, limit,
+                date_col=PoHeader.creation_date,
+                amount_col=PoHeader.total_amount,
+            )
 
             rows = session.execute(stmt).all()
             return [
@@ -107,6 +152,8 @@ class P2PRepository:
         po_number: str = "",
         supplier_id: str = "",
         days: int = 30,
+        limit: int = 0,
+        order_by: str = "",
     ) -> list[dict[str, Any]]:
         """查询收货记录。"""
         with self._session_factory() as session:
@@ -116,6 +163,16 @@ class P2PRepository:
                 stmt = stmt.where(RcvTransaction.po_number == po_number)
             if supplier_id:
                 stmt = stmt.where(RcvTransaction.supplier_id == supplier_id)
+            if days > 0:
+                stmt = stmt.where(
+                    RcvTransaction.transaction_date >= date.today() - timedelta(days=days)
+                )
+
+            stmt = _apply_order_and_limit(
+                stmt, order_by, limit,
+                date_col=RcvTransaction.transaction_date,
+                amount_col=None,
+            )
 
             rows = session.scalars(stmt).all()
             return [
@@ -138,6 +195,8 @@ class P2PRepository:
         status: str = "",
         invoice_number: str = "",
         days: int = 30,
+        limit: int = 0,
+        order_by: str = "",
     ) -> list[dict[str, Any]]:
         """查询发票数据。"""
         with self._session_factory() as session:
@@ -151,6 +210,16 @@ class P2PRepository:
                 stmt = stmt.where(ApInvoice.supplier_id == supplier_id)
             if status:
                 stmt = stmt.where(ApInvoice.status == status.upper())
+            if days > 0:
+                stmt = stmt.where(
+                    ApInvoice.invoice_date >= date.today() - timedelta(days=days)
+                )
+
+            stmt = _apply_order_and_limit(
+                stmt, order_by, limit,
+                date_col=ApInvoice.invoice_date,
+                amount_col=ApInvoice.invoice_amount,
+            )
 
             rows = session.scalars(stmt).all()
             return [
@@ -175,6 +244,8 @@ class P2PRepository:
         supplier_id: str = "",
         payment_number: str = "",
         days: int = 30,
+        limit: int = 0,
+        order_by: str = "",
     ) -> list[dict[str, Any]]:
         """查询付款记录。"""
         with self._session_factory() as session:
@@ -186,6 +257,16 @@ class P2PRepository:
                 stmt = stmt.where(ApPayment.invoice_number == invoice_number)
             if supplier_id:
                 stmt = stmt.where(ApPayment.supplier_id == supplier_id)
+            if days > 0:
+                stmt = stmt.where(
+                    ApPayment.payment_date >= date.today() - timedelta(days=days)
+                )
+
+            stmt = _apply_order_and_limit(
+                stmt, order_by, limit,
+                date_col=ApPayment.payment_date,
+                amount_col=ApPayment.payment_amount,
+            )
 
             rows = session.scalars(stmt).all()
             return [
@@ -216,7 +297,7 @@ class P2PRepository:
         ``po_number`` 已下推到 SQL WHERE，避免全表加载后内存过滤。
         """
         return self.query_purchase_orders(
-            supplier_id=supplier_id, po_number=po_number
+            supplier_id=supplier_id, po_number=po_number, days=0
         )
 
     def get_flattened_receipts(
@@ -225,7 +306,7 @@ class P2PRepository:
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的收货数据（供规则引擎使用）。"""
-        return self.query_receipts(po_number=po_number, supplier_id=supplier_id)
+        return self.query_receipts(po_number=po_number, supplier_id=supplier_id, days=0)
 
     def get_flattened_invoices(
         self,
@@ -233,7 +314,7 @@ class P2PRepository:
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的发票数据（供规则引擎使用）。"""
-        return self.query_invoices(po_number=po_number, supplier_id=supplier_id)
+        return self.query_invoices(po_number=po_number, supplier_id=supplier_id, days=0)
 
     def get_flattened_payments(
         self,
@@ -246,7 +327,7 @@ class P2PRepository:
         避免「先查全部付款 + 再查发票号 + 内存过滤」的多轮 IO。
         """
         if not po_number:
-            return self.query_payments(supplier_id=supplier_id)
+            return self.query_payments(supplier_id=supplier_id, days=0)
 
         with self._session_factory() as session:
             stmt = (

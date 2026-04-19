@@ -16,6 +16,8 @@ async def query_purchase_orders(
     status: str = "",
     po_number: str = "",
     days: int = 30,
+    limit: int = 0,
+    order_by: str = "",
 ) -> str:
     """查询采购订单数据。
 
@@ -26,6 +28,8 @@ async def query_purchase_orders(
         status: 订单状态过滤，如 approved、pending，为空则不过滤。
         po_number: 采购订单号，为空则不按 PO 过滤。
         days: 查询最近 N 天内的订单，默认 30 天。
+        limit: 返回结果数量上限，0 表示不限制。
+        order_by: 排序方式（date_desc/date_asc/amount_desc/amount_asc），为空则不排序。
 
     Returns:
         JSON 格式的采购订单列表字符串。
@@ -37,6 +41,8 @@ async def query_purchase_orders(
         status=status,
         po_number=po_number,
         days=days,
+        limit=limit,
+        order_by=order_by,
     )
     return _clip_and_dump(pos)
 
@@ -46,6 +52,8 @@ async def query_receipts(
     po_number: str = "",
     supplier_id: str = "",
     days: int = 30,
+    limit: int = 0,
+    order_by: str = "",
 ) -> str:
     """查询收货记录。
 
@@ -55,6 +63,8 @@ async def query_receipts(
         po_number: 采购订单号，为空则不按 PO 过滤。
         supplier_id: 供应商 ID，为空则不按供应商过滤。
         days: 查询最近 N 天内的记录，默认 30 天。
+        limit: 返回结果数量上限，0 表示不限制。
+        order_by: 排序方式（date_desc/date_asc），为空则不排序。
 
     Returns:
         JSON 格式的收货记录列表字符串。
@@ -65,6 +75,8 @@ async def query_receipts(
         po_number=po_number,
         supplier_id=supplier_id,
         days=days,
+        limit=limit,
+        order_by=order_by,
     )
     return _clip_and_dump(receipts)
 
@@ -76,6 +88,8 @@ async def query_invoices(
     status: str = "",
     invoice_number: str = "",
     days: int = 30,
+    limit: int = 0,
+    order_by: str = "",
 ) -> str:
     """查询发票数据。
 
@@ -87,6 +101,8 @@ async def query_invoices(
         status: 发票状态过滤，如 pending、paid，为空则不过滤。
         invoice_number: 发票号，为空则不按发票过滤。
         days: 查询最近 N 天内的发票，默认 30 天。
+        limit: 返回结果数量上限，0 表示不限制。
+        order_by: 排序方式（date_desc/date_asc/amount_desc/amount_asc），为空则不排序。
 
     Returns:
         JSON 格式的发票列表字符串。
@@ -99,6 +115,8 @@ async def query_invoices(
         status=status,
         invoice_number=invoice_number,
         days=days,
+        limit=limit,
+        order_by=order_by,
     )
     return _clip_and_dump(invoices)
 
@@ -109,6 +127,8 @@ async def query_payments(
     supplier_id: str = "",
     payment_number: str = "",
     days: int = 30,
+    limit: int = 0,
+    order_by: str = "",
 ) -> str:
     """查询付款记录。
 
@@ -119,6 +139,8 @@ async def query_payments(
         supplier_id: 供应商 ID，为空则不按供应商过滤。
         payment_number: 付款单号，为空则不按付款单过滤。
         days: 查询最近 N 天内的付款，默认 30 天。
+        limit: 返回结果数量上限，0 表示不限制。
+        order_by: 排序方式（date_desc/date_asc/amount_desc/amount_asc），为空则不排序。
 
     Returns:
         JSON 格式的付款记录列表字符串。
@@ -130,5 +152,7 @@ async def query_payments(
         supplier_id=supplier_id,
         payment_number=payment_number,
         days=days,
+        limit=limit,
+        order_by=order_by,
     )
     return _clip_and_dump(payments)

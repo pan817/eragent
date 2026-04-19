@@ -10,48 +10,48 @@ class TestQueryMethods:
 
     def test_query_purchase_orders_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有 PO。"""
-        pos = repository.query_purchase_orders()
+        pos = repository.query_purchase_orders(days=0)
         assert len(pos) == 50
         assert all("po_number" in po for po in pos)
         assert all("supplier_id" in po for po in pos)
 
     def test_query_purchase_orders_by_supplier(self, repository: P2PRepository) -> None:
         """按供应商过滤应只返回该供应商的 PO。"""
-        pos = repository.query_purchase_orders(supplier_id="SUP-001")
+        pos = repository.query_purchase_orders(supplier_id="SUP-001", days=0)
         assert len(pos) > 0
         assert all(po["supplier_id"] == "SUP-001" for po in pos)
 
     def test_query_receipts_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有收货记录。"""
-        receipts = repository.query_receipts()
+        receipts = repository.query_receipts(days=0)
         assert len(receipts) == 50
         assert all("gr_number" in r for r in receipts)
 
     def test_query_receipts_by_po(self, repository: P2PRepository) -> None:
         """按 PO 号过滤。"""
-        receipts = repository.query_receipts(po_number="PO-2024-0001")
+        receipts = repository.query_receipts(po_number="PO-2024-0001", days=0)
         assert len(receipts) >= 1
         assert all(r["po_number"] == "PO-2024-0001" for r in receipts)
 
     def test_query_invoices_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有发票。"""
-        invoices = repository.query_invoices()
+        invoices = repository.query_invoices(days=0)
         assert len(invoices) == 50
 
     def test_query_invoices_by_supplier(self, repository: P2PRepository) -> None:
         """按供应商过滤。"""
-        invoices = repository.query_invoices(supplier_id="SUP-002")
+        invoices = repository.query_invoices(supplier_id="SUP-002", days=0)
         assert len(invoices) > 0
         assert all(inv["supplier_id"] == "SUP-002" for inv in invoices)
 
     def test_query_payments_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有付款记录。"""
-        payments = repository.query_payments()
+        payments = repository.query_payments(days=0)
         assert len(payments) == 50
 
     def test_query_payments_by_invoice(self, repository: P2PRepository) -> None:
         """按发票号过滤。"""
-        payments = repository.query_payments(invoice_number="INV-2024-0001")
+        payments = repository.query_payments(invoice_number="INV-2024-0001", days=0)
         assert len(payments) >= 1
         assert all(p["invoice_number"] == "INV-2024-0001" for p in payments)
 
@@ -133,4 +133,4 @@ class TestResetAndSeed:
         reset_and_seed(db_engine, seed=0, count=30)
         from sqlalchemy.orm import sessionmaker
         repo = P2PRepository(sessionmaker(bind=db_engine, expire_on_commit=False))
-        assert len(repo.query_purchase_orders()) == 30
+        assert len(repo.query_purchase_orders(days=0)) == 30

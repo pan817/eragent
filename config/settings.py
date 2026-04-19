@@ -470,6 +470,10 @@ class IntentRoutingSettings(BaseSettings):
         default=True,
         description="通用 DAG 模板 feature flag（批5启用）",
     )
+    lookup_shortcut_enabled: bool = Field(
+        default=True,
+        description="DATA_LOOKUP 快捷路径开关：开启时有实体/关键词的事实查询直调工具，关闭时一律走 ReAct",
+    )
 
     model_config = {"env_prefix": "INTENT_ROUTING_"}
 
