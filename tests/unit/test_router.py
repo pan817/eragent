@@ -279,8 +279,8 @@ class TestLevel3:
         signal = self.router._try_level3("查询", {})
         assert signal.keywords == [AnalysisType.COMPREHENSIVE.value]
 
-    def test_llm_legacy_unknown_type_falls_back_to_clarification(self) -> None:
-        """老版本 prompt 仅返回 type=unknown 时，应兼容映射为 CLARIFICATION 信号。"""
+    def test_llm_legacy_unknown_type_falls_back_to_analysis(self) -> None:
+        """老版本 prompt 仅返回 type=unknown 时，应降级为 ANALYSIS（不再走 CLARIFICATION）。"""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = (
@@ -292,7 +292,7 @@ class TestLevel3:
 
         signal = self.router._try_level3("今天天气怎么样", {})
         assert signal.route_level == 3
-        assert signal.intent_kind == IntentKind.CLARIFICATION
+        assert signal.intent_kind == IntentKind.ANALYSIS
         assert signal.confidence == 0.7
 
     def test_llm_classify_prompt_contains_intent_kind_enum(self) -> None:
@@ -313,7 +313,7 @@ class TestLevel3:
         """L3 prompt 应包含边界 case 的 few-shot 示例。"""
         prompt = self.router._LLM_CLASSIFY_PROMPT
         assert "查询最新的一个 PO" in prompt  # data_lookup 示例
-        assert "做一下三路匹配" in prompt  # clarification 示例
+        assert "做一下三路匹配" in prompt  # analysis 示例
         assert "今天天气" in prompt  # chitchat 示例
 
     def test_llm_classify_prompt_contains_confidence_anchors(self) -> None:
@@ -362,60 +362,94 @@ class TestLevel3:
 
 
 class TestParseIntegration:
-    """parse() 方法端到端测试。"""
+    """parse() / route() 方法端到端测试（mock 统一 LLM）。"""
 
     def setup_method(self) -> None:
         self.router = IntentRouter(settings=Settings())
 
-    def test_level1_hit(self) -> None:
-        """Level 1 命中时应直接返回，不走 Level 2/3。"""
-        analysis_type, params = self.router.parse("分析Q1三路匹配异常")
-        assert analysis_type == AnalysisType.THREE_WAY_MATCH
+    def _mock_unified(self, response_json: str) -> None:
+        """注入 mock UnifiedRouter。"""
+        from core.orchestrator.unified_router import UnifiedRouter, _parse_unified_response
 
-    def test_level1_with_params(self) -> None:
-        """Level 1 命中时参数应正确提取。"""
-        analysis_type, params = self.router.parse("分析 SUP-001 最近60天的价格差异")
-        assert analysis_type == AnalysisType.PRICE_VARIANCE
-        assert params.get("supplier_id") == "SUP-001"
-        assert params.get("days") == 60
+        mock_ur = MagicMock(spec=UnifiedRouter)
+        mock_ur.route.side_effect = lambda query, **kw: _parse_unified_response(
+            response_json, query,
+        )
+        self.router._unified_router = mock_ur
 
-    def test_level3_fallback_on_no_match(self) -> None:
-        """Level 1/2 均未命中时应走 Level 3（mock LLM）。"""
-        mock_llm = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = '{"type": "comprehensive", "confidence": 0.5}'
-        mock_llm.invoke.return_value = mock_response
-        self.router._llm = mock_llm
+    def test_unified_llm_analysis(self) -> None:
+        """统一 LLM 返回 analysis 类型。"""
+        self._mock_unified(
+            '{"intent_kind":"analysis","type":"three_way_match","confidence":0.9,'
+            '"is_cross_entity":false,"resolved_query":"分析三路匹配","missing_params":[],'
+            '"po_number":null,"supplier_id":null,"invoice_number":null,'
+            '"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
+        )
+        signal = self.router.route("分析三路匹配")
+        assert signal.intent_kind == IntentKind.ANALYSIS
+        assert signal.keywords == ["three_way_match"]
+        assert signal.confidence == 0.9
 
-        # 跳过 Level 2（mock store 返回空结果）
-        mock_store = MagicMock()
-        mock_store.search.return_value = []
-        self.router._seeds_store = mock_store
-        self.router._seeds_loaded = True
+    def test_unified_llm_data_lookup(self) -> None:
+        """统一 LLM 返回 data_lookup 类型。"""
+        self._mock_unified(
+            '{"intent_kind":"data_lookup","type":"","confidence":0.9,'
+            '"is_cross_entity":false,"resolved_query":"查最新PO","missing_params":[],'
+            '"po_number":null,"supplier_id":null,"invoice_number":null,'
+            '"payment_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}'
+        )
+        signal = self.router.route("查最新的一个PO")
+        assert signal.intent_kind == IntentKind.DATA_LOOKUP
+        assert signal.entities.get("limit") == 1
+        assert signal.entities.get("order_by") == "date_desc"
 
-        analysis_type, _ = self.router.parse("哪些采购员的谈判能力弱")
-        assert analysis_type == AnalysisType.COMPREHENSIVE
+    def test_unified_llm_cross_entity(self) -> None:
+        """统一 LLM 识别跨实体查询。"""
+        self._mock_unified(
+            '{"intent_kind":"data_lookup","type":"","confidence":0.85,'
+            '"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的PO","missing_params":[],'
+            '"po_number":null,"supplier_id":null,"invoice_number":null,'
+            '"payment_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}'
+        )
+        signal = self.router.route("这个支付单对应的PO")
+        assert signal.is_cross_entity is True
+        assert signal.entities.get("payment_number") == "PAY-001"
 
-    def test_backward_compatible_with_old_tests(self) -> None:
-        """与原 IntentParser 的测试用例保持兼容。"""
-        # 这些用例来自 test_intent.py，确保行为一致
-        t, _ = self.router.parse("分析最近三个月的三路匹配异常")
-        assert t == AnalysisType.THREE_WAY_MATCH
+    def test_unified_llm_with_params(self) -> None:
+        """统一 LLM 提取参数。"""
+        self._mock_unified(
+            '{"intent_kind":"analysis","type":"price_variance","confidence":0.95,'
+            '"is_cross_entity":false,"resolved_query":"分析SUP-001价格差异","missing_params":[],'
+            '"po_number":null,"supplier_id":"SUP-001","invoice_number":null,'
+            '"payment_number":null,"receipt_number":null,"days":60,"limit":null,"order_by":null}'
+        )
+        signal = self.router.route("分析 SUP-001 最近60天的价格差异")
+        assert signal.entities.get("supplier_id") == "SUP-001"
+        assert signal.time_range_days == 60
 
-        t, _ = self.router.parse("检查价格差异情况")
-        assert t == AnalysisType.PRICE_VARIANCE
+    def test_bypass_chitchat_skips_llm(self) -> None:
+        """CHITCHAT bypass 不调用统一 LLM。"""
+        signal = self.router.route("你好")
+        assert signal.intent_kind == IntentKind.CHITCHAT
+        assert signal.route_level == 0  # bypass level
 
-        t, _ = self.router.parse("分析付款逾期风险")
-        assert t == AnalysisType.PAYMENT_COMPLIANCE
+    def test_bypass_meta_skips_llm(self) -> None:
+        """META bypass 不调用统一 LLM。"""
+        signal = self.router.route("你能做什么")
+        assert signal.intent_kind == IntentKind.META
+        assert signal.route_level == 0
 
-        t, _ = self.router.parse("评估供应商绩效")
-        assert t == AnalysisType.SUPPLIER_PERFORMANCE
-
-        _, params = self.router.parse("查看 SUP-001 的采购订单")
-        assert params.get("supplier_id") == "SUP-001"
-
-        _, params = self.router.parse("分析最近60天的三路匹配异常")
-        assert params.get("days") == 60
+    def test_regex_fallback_for_entities(self) -> None:
+        """统一 LLM 未提取到的实体由 regex 兜底。"""
+        self._mock_unified(
+            '{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,'
+            '"is_cross_entity":false,"resolved_query":"分析SUP-001三路匹配","missing_params":[],'
+            '"po_number":null,"supplier_id":null,"invoice_number":null,'
+            '"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
+        )
+        # query 中有 SUP-001，LLM 没提取到，regex 兜底
+        signal = self.router.route("分析 SUP-001 三路匹配")
+        assert signal.entities.get("supplier_id") == "SUP-001"
 
 
 # ============================================================
@@ -572,10 +606,24 @@ class TestAnalystRoleInjection:
         assert signal.keywords[0] == "price_variance"
 
     def test_route_passes_analyst_role(self) -> None:
-        """route() 应将 analyst_role 透传到 L3。"""
-        # L1 命中，不会到 L3，role 不影响
-        signal = self.router.route("分析三路匹配发票收货异常", analyst_role="finance")
-        assert signal.route_level == 1  # L1 命中，不受角色影响
+        """route() 应将 analyst_role 透传到统一 LLM。"""
+        from core.orchestrator.unified_router import UnifiedRouter
+
+        mock_ur = MagicMock(spec=UnifiedRouter)
+        mock_ur.route.return_value = QuerySignal(
+            raw_query="分析三路匹配",
+            intent_kind=IntentKind.ANALYSIS,
+            keywords=["three_way_match"],
+            route_level=3,
+            confidence=0.9,
+        )
+        self.router._unified_router = mock_ur
+
+        self.router.route("分析三路匹配", analyst_role="finance")
+        # 验证 analyst_role 被传递到 UnifiedRouter
+        mock_ur.route.assert_called_once()
+        call_kwargs = mock_ur.route.call_args
+        assert call_kwargs.kwargs.get("analyst_role") == "finance"
 
 
 # ============================================================
@@ -833,16 +881,17 @@ class TestL3IntentKindBranches:
         assert signal.intent_kind == IntentKind.DATA_LOOKUP
         assert signal.keywords == ["data_lookup"]
 
-    def test_intent_kind_clarification_with_missing_params(self) -> None:
+    def test_clarification_downgrades_to_analysis(self) -> None:
+        """L3 返回 clarification 时应降级为 ANALYSIS（不再早退）。"""
         self._mock_llm(
             '{"intent_kind":"clarification","type":"three_way_match","confidence":0.7,'
             '"missing_params":["time_range","supplier_id"],'
             '"supplier_id":null,"po_number":null,"days":null}'
         )
         signal = self.router._try_level3("做一下三路匹配", {})
-        assert signal.intent_kind == IntentKind.CLARIFICATION
-        assert signal.missing_params == ["time_range", "supplier_id"]
-        # type hint 保留在 keywords 中供下游展示
+        # clarification 已废弃，降级为 ANALYSIS
+        assert signal.intent_kind == IntentKind.ANALYSIS
+        # type hint 保留在 keywords 中
         assert signal.keywords == ["three_way_match"]
 
     def test_intent_kind_meta(self) -> None:
@@ -881,18 +930,16 @@ class TestL3IntentKindBranches:
         signal = self.router._try_level3("查询", {})
         assert signal.intent_kind == IntentKind.ANALYSIS
 
-    def test_missing_params_non_string_filtered(self) -> None:
-        """missing_params 中的非字符串元素应被过滤。"""
+    def test_clarification_without_type_downgrades_to_comprehensive(self) -> None:
+        """L3 返回 clarification 且无有效 type 时，降级为 ANALYSIS/comprehensive。"""
         self._mock_llm(
             '{"intent_kind":"clarification","type":"","confidence":0.6,'
             '"missing_params":["time_range",null,{"foo":1}],'
             '"supplier_id":null,"po_number":null,"days":null}'
         )
         signal = self.router._try_level3("分析", {})
-        assert signal.intent_kind == IntentKind.CLARIFICATION
-        assert "time_range" in signal.missing_params
-        # null 与 dict 应被丢弃
-        assert all(isinstance(p, str) for p in signal.missing_params)
+        assert signal.intent_kind == IntentKind.ANALYSIS
+        assert signal.keywords == ["comprehensive"]
 
 
 class TestRouteEndToEndIntentKinds:
@@ -933,20 +980,23 @@ class TestRouteEndToEndIntentKinds:
         assert signal.route_level == 0
         mock_llm.invoke.assert_not_called()
 
-    def test_lookup_query_l1_hits_data_lookup(self) -> None:
-        """'查询最新的一个 po' 应在 L1 直接判为 DATA_LOOKUP，不进 L2/L3。"""
-        mock_llm = MagicMock()
-        self.router._llm = mock_llm
-        # 模拟 L2 store 永远空，避免误命中
-        mock_store = MagicMock()
-        mock_store.search.return_value = []
-        self.router._seeds_store = mock_store
-        self.router._seeds_loaded = True
+    def test_lookup_query_unified_llm(self) -> None:
+        """'查询最新的一个 po' 应由统一 LLM 判为 DATA_LOOKUP。"""
+        from core.orchestrator.unified_router import UnifiedRouter
+
+        mock_ur = MagicMock(spec=UnifiedRouter)
+        mock_ur.route.return_value = QuerySignal(
+            raw_query="查询最新的一个 po",
+            intent_kind=IntentKind.DATA_LOOKUP,
+            keywords=["data_lookup"],
+            route_level=3,
+            confidence=0.9,
+            entities={"limit": 1, "order_by": "date_desc"},
+        )
+        self.router._unified_router = mock_ur
 
         signal = self.router.route("查询最新的一个 po")
         assert signal.intent_kind == IntentKind.DATA_LOOKUP
-        assert signal.route_level == 1
-        mock_llm.invoke.assert_not_called()
 
 
 class TestL2SentinelCategoryMatching:

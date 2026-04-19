@@ -51,10 +51,15 @@ def _matches_overview_query(query: str) -> bool:
     return has_procurement and has_intent
 
 
-def _publish_stage_safe(name: str, attrs: dict[str, Any] | None = None) -> None:
+def _publish_stage_safe(
+    name: str,
+    attrs: dict[str, Any] | None = None,
+    *,
+    duration_ms: float | None = None,
+) -> None:
     """orchestrator 内用的 stage 事件发布器：失败吞掉，不影响分析主流程。"""
     try:
-        _publish_stage(name, attrs)
+        _publish_stage(name, attrs, duration_ms=duration_ms)
     except Exception:  # noqa: BLE001
         _logger.info("publish_stage failed", exc_info=True)
 
@@ -128,8 +133,8 @@ class Orchestrator:
         self._registry: Any = None
         self._lock = threading.RLock()
         self._init_components()
-        from core.memory.short_term import ShortTermMemory
-        self._short_term = ShortTermMemory(settings=self._settings)
+        from core.memory.manager import MemoryManager
+        self._memory = MemoryManager(settings=self._settings)
 
     def _init_components(self) -> None:
         """初始化轻量级组件。"""
@@ -137,26 +142,25 @@ class Orchestrator:
         self._timing_middleware: TimingMiddleware = TimingMiddleware(
             agent_name="p2p_agent"
         )
-        from core.orchestrator.param_extractor import ParamExtractor
-        self._param_extractor: ParamExtractor = ParamExtractor(self._settings)
+        # ParamExtractor 已合并到统一 LLM 路由（UnifiedRouter），不再需要
 
-    # ── 短期记忆（委托 core/memory/short_term.py）─────────────────
+    # ── 记忆管理（委托 core/memory/manager.py）─────────────────
 
     def _get_checkpointer(self) -> Any:
-        """延迟构建 checkpointer（委托到 ShortTermMemory）。"""
-        return self._short_term.get_checkpointer()
+        """延迟构建 checkpointer（委托到 MemoryManager）。"""
+        return self._memory.get_checkpointer()
 
     def _close_checkpointer(self) -> None:
-        """关闭 checkpointer（委托到 ShortTermMemory）。"""
-        self._short_term.close()
+        """关闭 checkpointer（委托到 MemoryManager）。"""
+        self._memory.close()
 
     def _ensure_checkpointer(self) -> Any | None:
-        """获取 checkpointer，失败返回 None（委托到 ShortTermMemory）。"""
-        return self._short_term.ensure_checkpointer()
+        """获取 checkpointer，失败返回 None（委托到 MemoryManager）。"""
+        return self._memory.ensure_checkpointer()
 
     def clear_short_term_memory(self, session_id: str | None = None) -> int:
-        """清理短期记忆（委托到 ShortTermMemory）。"""
-        return self._short_term.clear(session_id)
+        """清理短期记忆（委托到 MemoryManager）。"""
+        return self._memory.clear_short_term_memory(session_id)
 
     def _persist_report(self, result: AnalysisResult) -> None:
         """将成功的分析结果写入长期记忆。"""
@@ -210,7 +214,7 @@ class Orchestrator:
 
         if session_entities:
             await asyncio.to_thread(
-                self._short_term.save_entity_context,
+                self._memory.save_session_entities,
                 session_id, session_entities,
             )
 
@@ -291,7 +295,7 @@ class Orchestrator:
 
     def _load_session_context(self, session_id: str) -> dict[str, Any]:
         """从 checkpointer 读取上下文（委托到 ShortTermMemory）。"""
-        return self._short_term.load_session_context(session_id)
+        return self._memory.load_session(session_id)
 
     # ── 核心编排 ─────────────────────────────────────────────────────
 
@@ -458,43 +462,20 @@ class Orchestrator:
                         list(relevant_entities.keys()),
                     )
 
-            # 1.5 前置 LLM 参数拆解（bypass 类查询跳过）
-            llm_extracted_params: dict[str, Any] = {}
-            if not is_recall:
-                llm_extracted_params = await asyncio.to_thread(
-                    self._param_extractor.extract, enhanced_query
-                )
-                if llm_extracted_params:
-                    _logger.info(
-                        "llm param extraction: %s", llm_extracted_params,
-                    )
-
-            # 2. 意图解析（用增强后的 query 路由，传入角色偏好）
-            signal = self._intent_router.route(
-                enhanced_query, analyst_role=request.analyst_role
+            # 2. 统一 LLM 路由（意图分类 + 参数提取 + 指代消解 + 跨实体判断一次完成）
+            signal = await asyncio.to_thread(
+                self._intent_router.route,
+                enhanced_query,
+                analyst_role=request.analyst_role,
+                session_entities=session_ctx.get("entities", {}),
             )
 
-            # 2.5 按 intent_kind 早退路由：META / CHITCHAT 由模板生成响应即可。
-            # CLARIFICATION / OUT_OF_SCOPE 需二次确认后才早退（见下方降级逻辑）。
+            # 2.5 按 intent_kind 早退路由：META / CHITCHAT / OUT_OF_SCOPE 由模板生成响应即可。
             # ANALYSIS / DATA_LOOKUP / RECALL 继续走完整执行路径。
             # 用户显式指定 analysis_type 时跳过早退（视为强制走分析路径）。
+            # 注：CLARIFICATION 已废弃——意图模糊时 unified_router 归入
+            # analysis/comprehensive，由 ReAct 尝试执行，遵循"尽量回复"原则。
             from core.orchestrator.signal import IntentKind as _IntentKind
-
-            # CLARIFICATION 降级：若 L3 同时给出了有效 analysis_type 提示，
-            # 说明意图其实可识别，只是参数不全——系统有默认参数，降级为 ANALYSIS。
-            if signal.intent_kind == _IntentKind.CLARIFICATION and request.analysis_type is None:
-                _hint_type = signal.keywords[0] if signal.keywords else ""
-                try:
-                    from api.schemas.domain import AnalysisType as _AT
-                    _AT(_hint_type)
-                    _logger.info(
-                        "CLARIFICATION with valid analysis_type hint '%s' → "
-                        "downgrade to ANALYSIS (system has default params)",
-                        _hint_type,
-                    )
-                    signal.intent_kind = _IntentKind.ANALYSIS
-                except ValueError:
-                    pass  # hint 无效，保持 CLARIFICATION 早退
 
             # OUT_OF_SCOPE 降级：若 query 中包含分析关键词，说明与 P2P 有关联，
             # 降级为 COMPREHENSIVE ANALYSIS 让 ReAct 尝试回答。
@@ -509,7 +490,6 @@ class Orchestrator:
                     signal.keywords = [AnalysisType.COMPREHENSIVE.value]
 
             if request.analysis_type is None and signal.intent_kind in (
-                _IntentKind.CLARIFICATION,
                 _IntentKind.META,
                 _IntentKind.CHITCHAT,
                 _IntentKind.OUT_OF_SCOPE,
@@ -528,6 +508,7 @@ class Orchestrator:
                         "route_level": signal.route_level,
                         "confidence": signal.confidence,
                     },
+                    duration_ms=duration_ms,
                 )
                 return AnalysisResult(
                     report_id=report_id,
@@ -572,6 +553,7 @@ class Orchestrator:
                 signal.keywords,
             )
             # SSE 阶段事件：意图已解析
+            intent_duration_ms = (time.monotonic() - start_time) * 1000.0
             _publish_stage_safe(
                 "intent_resolved",
                 {
@@ -579,26 +561,47 @@ class Orchestrator:
                     "route_level": signal.route_level,
                     "confidence": signal.confidence,
                 },
+                duration_ms=intent_duration_ms,
             )
 
-            # 3. 合并参数
-            # 优先级：regex/路由提取 > LLM 前置提取 > 默认值
-            # LLM 提取作为底层，路由提取的非空值覆盖
-            parsed_params = {**llm_extracted_params, **signal.entities}
-            # 移除 LLM-only 字段中被路由层意外清空的情况
-            for key in ("limit", "order_by"):
-                if key not in signal.entities and key in llm_extracted_params:
-                    parsed_params[key] = llm_extracted_params[key]
-            # time_range 优先级: time_range > time_range_days > query 提取 > config 默认
+            # 3. 合并参数（统一 LLM 已提取所有参数到 signal.entities）
+            parsed_params = signal.entities.copy()
+            # time_range 优先级: time_range > time_range_days > signal 提取 > config 默认
             resolved_days = _resolve_time_range(request.time_range)
             time_range_days: int = (
                 resolved_days
                 or request.time_range_days
                 or signal.time_range_days
-                or llm_extracted_params.get("days")
                 or self._settings.analysis.default_time_range_days
             )
             parsed_params["days"] = time_range_days
+
+            # 如果统一 LLM 完成了指代消解，用 resolved_query 替换 enhanced_query
+            if signal.resolved_query and signal.resolved_query != request.query:
+                enhanced_query = signal.resolved_query
+                _logger.info("unified LLM resolved query: '%s'", enhanced_query)
+
+            # 检测未消解的指代词：如果 query 中有指代但没有对应的实体参数，
+            # 在 enhanced_query 末尾注入警告，防止 agent 猜测实体。
+            import re
+            _REF_WORDS = re.compile(
+                r"这个|这条|这笔|该|那个|那条|上述|上面的|前面的",
+            )
+            if _REF_WORDS.search(request.query):
+                entity_keys = {"po_number", "supplier_id", "invoice_number",
+                               "payment_number", "receipt_number"}
+                has_entity = any(
+                    parsed_params.get(k) for k in entity_keys
+                )
+                if not has_entity:
+                    enhanced_query += (
+                        "\n\n[系统警告] 用户使用了指代词但系统无法确定具体实体。"
+                        "请直接告知用户'无法确定您指的是哪个实体, 请提供具体编号', "
+                        "不要猜测或自行选择实体。"
+                    )
+                    _logger.warning(
+                        "unresolved reference detected, injecting anti-hallucination warning"
+                    )
 
             # 4. 选择性补充上下文实体（非分析意图时跳过）
             if not is_recall:
@@ -610,8 +613,52 @@ class Orchestrator:
                         )
 
             # 4.5 实体关联补充：有 po_number 但缺 supplier_id 时从 DB 反查
+            # 记录验证前的用户指定实体（用于检测验证后是否被删除）
+            _entity_keys_check = {"po_number", "supplier_id", "invoice_number",
+                                  "payment_number", "receipt_number"}
+            _user_entities_before = {
+                k: v for k, v in parsed_params.items()
+                if k in _entity_keys_check and v
+            }
+
             if not is_recall:
                 await self._enrich_entities(parsed_params)
+
+            # 4.6 实体不存在短路：用户明确指定的实体被验证删除 → 直接返回"实体不存在"
+            if _user_entities_before and not is_recall:
+                _discarded = {
+                    k: v for k, v in _user_entities_before.items()
+                    if not parsed_params.get(k)
+                }
+                if _discarded:
+                    # 所有用户指定的实体都被删除了 → 短路返回
+                    remaining = {
+                        k: v for k, v in parsed_params.items()
+                        if k in _entity_keys_check and v
+                    }
+                    if not remaining:
+                        discarded_str = ", ".join(
+                            f"{k}={v}" for k, v in _discarded.items()
+                        )
+                        _logger.warning(
+                            "all user-specified entities discarded by validation: %s",
+                            discarded_str,
+                        )
+                        return AnalysisResult(
+                            report_id=report_id,
+                            trace_id=trace_id,
+                            status=AnalysisStatus.SUCCESS,
+                            analysis_type=analysis_type,
+                            query=request.query,
+                            user_id=request.user_id,
+                            session_id=session_id,
+                            time_range=f"最近 {time_range_days} 天",
+                            report_markdown=(
+                                f"在系统中未找到以下实体：{discarded_str}。"
+                                f"请核实编号是否正确，或联系管理员确认数据是否已导入系统。"
+                            ),
+                            duration_ms=(time.monotonic() - start_time) * 1000.0,
+                        )
 
             # 5. 路由决策
             # - RECALL / 低置信度 ANALYSIS → 强制 ReAct
@@ -631,8 +678,11 @@ class Orchestrator:
 
             generic_template_key: str | None = None  # 通用模板键（批 5）
 
-            # DATA_LOOKUP 快捷路径：开关开启时尝试直调工具
-            if is_data_lookup and self._settings.intent_routing.lookup_shortcut_enabled:
+            # DATA_LOOKUP 快捷路径：开关开启 + 非跨实体查询时尝试直调工具
+            # 跨实体查询（is_cross_entity=true）需多步推理，降级到 ReAct
+            if (is_data_lookup
+                    and self._settings.intent_routing.lookup_shortcut_enabled
+                    and not signal.is_cross_entity):
                 lookup_result = await self._try_lookup_shortcut(
                     query=request.query,
                     params=parsed_params,
@@ -647,6 +697,19 @@ class Orchestrator:
                 if lookup_result is not None:
                     if not is_recall:
                         await asyncio.to_thread(self._persist_report, lookup_result)
+                        # 从 lookup 结果中提取实体回写 parsed_params
+                        # （确保 PAY-xxx / PO-xxx 等出现在结果中的实体被保存）
+                        self._extract_entities_from_lookup(
+                            lookup_result, parsed_params,
+                        )
+                        # 保存实体到 session_entities（确保下轮指代消解可用）
+                        await self._save_session_entities(
+                            session_id, parsed_params, lookup_result,
+                        )
+                        # 触发记忆提取 + 整合检查
+                        self._memory.on_analysis_complete(
+                            lookup_result, session_id, parsed_params,
+                        )
                     return lookup_result
                 # 快捷路径未命中，降级到 ReAct
                 _logger.info("lookup shortcut miss, fallback to ReAct")
@@ -738,7 +801,7 @@ class Orchestrator:
             result = await self._execute_dag(
                 analysis_type=analysis_type,
                 params=parsed_params,
-                query=request.query,
+                query=enhanced_query,
                 report_id=report_id,
                 trace_id=trace_id,
                 user_id=request.user_id,
@@ -762,10 +825,41 @@ class Orchestrator:
                 )
                 # 5b. 报告持久化
                 await asyncio.to_thread(self._persist_report, result)
+                # 5c. 记忆提取 + 整合检查（fire-and-forget）
+                self._memory.on_analysis_complete(
+                    result, session_id, parsed_params,
+                )
             return result
 
         except Exception:
             raise
+
+    @staticmethod
+    def _extract_entities_from_lookup(
+        result: AnalysisResult, params: dict[str, Any],
+    ) -> None:
+        """从 lookup 结果的 report_markdown 中提取实体回写到 params。
+
+        lookup 快捷路径返回的表格中包含 PO-xxx / PAY-xxx / INV-xxx 等实体，
+        需要提取并写入 params，以便 _save_session_entities 保存到 session_entities，
+        确保下轮指代消解可用。
+        """
+        md = result.report_markdown or ""
+        if not md:
+            return
+
+        import re
+
+        entity_patterns = {
+            "po_number": r"(PO-[\w-]+\d+)",
+            "payment_number": r"(PAY-[\w-]+\d+)",
+            "invoice_number": r"(INV-[\w-]+\d+)",
+        }
+        for key, pattern in entity_patterns.items():
+            if key not in params or not params[key]:
+                m = re.search(pattern, md)
+                if m:
+                    params[key] = m.group(1)
 
     # ── Lookup 快捷路径 ─────────────────────────────────────────────
 
@@ -913,6 +1007,17 @@ class Orchestrator:
 
         # agent 路径：构造单节点 agent DAG
         if is_agent_path:
+            # 将解析出的实体参数注入 query，确保 agent 看到正确的实体编号
+            agent_query = query
+            entity_hints = []
+            for ek in ("po_number", "supplier_id", "invoice_number",
+                        "payment_number", "receipt_number"):
+                ev = params.get(ek)
+                if ev and ev not in query:
+                    entity_hints.append(f"{ek}={ev}")
+            if entity_hints:
+                agent_query += f"\n[已解析实体] {', '.join(entity_hints)}"
+
             dag_tasks = [
                 {
                     "task_id": "react",
@@ -920,7 +1025,7 @@ class Orchestrator:
                     "tool_name": "agent",
                     "inputs": {
                         "analysis_type": analysis_type,
-                        "query": query,
+                        "query": agent_query,
                         "session_id": session_id,
                         "user_id": user_id,
                         "time_range_days": time_range_days,
@@ -1188,7 +1293,7 @@ class Orchestrator:
         time_range_days: int,
     ) -> None:
         """将 DAG 结果写入短期记忆（委托到 ShortTermMemory）。"""
-        await self._short_term.save_dag_result(
+        await self._memory.save_dag_result(
             query=query,
             response=response,
             session_id=session_id,

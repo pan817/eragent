@@ -19,10 +19,12 @@ class IntentKind(str, Enum):
     再决定是否给出 AnalysisType。各 kind 的下游处理：
 
     - ANALYSIS：落入 10 类采购分析场景之一，走 DAG / ReAct 分析流程。
+      意图模糊时也归此类（type=comprehensive），由 ReAct 尝试执行。
     - DATA_LOOKUP：纯事实查询/单据检索（如"查最新的 PO"），走 ReAct
       让 Agent 自由调用 query_* 工具，不强制做异常分析。
-    - CLARIFICATION：采购意图明确但关键参数缺失，由 orchestrator 返回
-      结构化追问而不是触发分析。``missing_params`` 列出缺失字段。
+    - CLARIFICATION：**已废弃**。保留枚举值以兼容历史 trace 数据的反序列化，
+      新流程中不再由路由器主动产出。意图模糊时归入 ANALYSIS/comprehensive，
+      遵循"尽量回复"原则。
     - META：系统能力/数据元信息询问（"你能做什么"/"支持哪些场景"），
       由模板答复，零 LLM 调用。
     - RECALL：明确回溯历史会话内容（"上次的结果呢"），走 ReAct 但跳过
@@ -52,9 +54,8 @@ class QuerySignal:
         keywords: 提取的业务关键词列表（intent_kind=ANALYSIS 时为
             AnalysisType 的字符串值；其他 kind 时为对应 sentinel）。
         entities: 识别的业务实体（supplier_id / po_number 等）。
-        missing_params: intent_kind=CLARIFICATION 时填，列出缺失的关键
-            参数名（``supplier_id`` / ``time_range`` / ``analysis_scope`` 等），
-            供 orchestrator 渲染追问语句。
+        missing_params: 历史字段，CLARIFICATION 废弃后不再主动填充。
+            保留以兼容旧 trace 数据反序列化。
         time_range_days: 提取的时间范围（天），None 表示未识别。
         route_level: 命中的路由层级（1 / 2 / 3）。
         confidence: 路由置信度（0.0~1.0）。
@@ -73,3 +74,10 @@ class QuerySignal:
     confidence: float = 0.0
     dag_hint: list[dict[str, Any]] | None = None
     reasoning: str = ""
+
+    # 统一 LLM 路由新增字段
+    is_cross_entity: bool = False
+    """是否为跨实体关联查询（如"这个付款单对应的PO"）。"""
+
+    resolved_query: str = ""
+    """指代消解后的查询文本。空字符串表示未消解（与 raw_query 相同）。"""

@@ -125,10 +125,17 @@ class ShortTermMemory:
             span_attrs["session_id"] = session_id
 
             try:
+                # 始终加载 session_entities（独立于 checkpointer）
+                # Lookup 快捷路径只写 session_entities 不写 checkpointer，
+                # 必须在 checkpointer 检查前先加载实体上下文。
+                entities = self._load_entity_context(session_id)
+
                 checkpointer = self.ensure_checkpointer()
                 if checkpointer is None:
                     span_attrs["status"] = "skipped"
                     span_attrs["reason"] = "checkpointer not available"
+                    if entities:
+                        return {"has_history": True, "context_summary": "", "entities": entities}
                     return empty
 
                 config = {"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}
@@ -136,14 +143,18 @@ class ShortTermMemory:
 
                 if not existing or not existing.checkpoint:
                     span_attrs["status"] = "ok"
-                    span_attrs["has_history"] = False
+                    span_attrs["has_history"] = bool(entities)
+                    if entities:
+                        return {"has_history": True, "context_summary": "", "entities": entities}
                     return empty
 
                 channel_values = existing.checkpoint.get("channel_values", {})
                 messages = channel_values.get("messages", [])
                 if not messages:
                     span_attrs["status"] = "ok"
-                    span_attrs["has_history"] = False
+                    span_attrs["has_history"] = bool(entities)
+                    if entities:
+                        return {"has_history": True, "context_summary": "", "entities": entities}
                     return empty
 
                 # 提取最近一轮的 HumanMessage + AIMessage
@@ -159,8 +170,7 @@ class ShortTermMemory:
                     if last_human and last_ai:
                         break
 
-                # 从 session_entities 表读取结构化实体上下文
-                entities = self._load_entity_context(session_id)
+                # entities 已在方法入口加载（_load_entity_context）
 
                 # 集中裁剪：所有路径的短期记忆都经过此产出点
                 context_summary = last_ai if last_ai else ""
@@ -344,3 +354,106 @@ class ShortTermMemory:
             )
         except Exception as exc:
             _logger.warning("save entity context failed (non-blocking): %s", exc)
+
+    # ── LLM 异步摘要压缩 ────────────────────────────────────
+
+    SUMMARY_SYSTEM_PROMPT = (
+        "你是 ERP 采购分析结果的摘要生成器。"
+        "将分析结果压缩为结构化摘要，保留所有关键信息，丢弃原始明细数据。\n\n"
+        "输出格式（严格遵循）：\n"
+        "## 分析摘要\n"
+        "- **分析类型**：{type}\n"
+        "- **覆盖范围**：时间范围、涉及实体数量\n"
+        "- **关键发现**：列出 Top-5 异常/发现，每条一行\n"
+        "- **风险评级**：高/中/低\n"
+        "- **结论建议**：1-2 句话\n\n"
+        "要求：\n"
+        "1. 不超过 500 tokens\n"
+        "2. 保留所有实体 ID（PO 号、供应商 ID、发票号等）\n"
+        "3. 保留所有数值指标（匹配率、偏差率等）\n"
+        "4. 丢弃原始数据表的逐行明细\n"
+        "5. 不要添加分析结果中没有的信息"
+    )
+
+    async def summarize_and_replace(
+        self,
+        session_id: str,
+        ai_content: str,
+        llm_fast: Any,
+    ) -> None:
+        """异步生成摘要并替换 checkpointer 中的 AIMessage。
+
+        fire-and-forget 调用，所有异常内部捕获。
+        失败时保留截断版本，不影响对话连续性。
+        """
+        from core.observability.tracing import record_span
+
+        with record_span("memory", "summary") as span_attrs:
+            span_attrs["session_id"] = session_id
+            span_attrs["input_chars"] = len(ai_content)
+
+            try:
+                from langchain_core.messages import HumanMessage
+
+                prompt = (
+                    f"{self.SUMMARY_SYSTEM_PROMPT}\n\n"
+                    f"--- 以下是需要压缩的分析结果 ---\n\n{ai_content}"
+                )
+                response = await llm_fast.ainvoke([HumanMessage(content=prompt)])
+                summary = getattr(response, "content", "")
+
+                if not summary or len(summary) < 50:
+                    span_attrs["status"] = "skipped"
+                    span_attrs["reason"] = "summary too short"
+                    return
+
+                # 替换 checkpointer 中的最后一条 AIMessage
+                checkpointer = self.ensure_checkpointer()
+                if checkpointer is None:
+                    span_attrs["status"] = "skipped"
+                    span_attrs["reason"] = "checkpointer not available"
+                    return
+
+                config = {"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}
+                existing = checkpointer.get_tuple(config)
+                if not existing or not existing.checkpoint:
+                    span_attrs["status"] = "skipped"
+                    span_attrs["reason"] = "no checkpoint"
+                    return
+
+                channel_values = existing.checkpoint.get("channel_values", {})
+                messages = channel_values.get("messages", [])
+
+                # 找到最后一条 AIMessage 并替换内容
+                replaced = False
+                for msg in reversed(messages):
+                    if getattr(msg, "type", "") == "ai":
+                        msg.content = summary
+                        replaced = True
+                        break
+
+                if replaced:
+                    # 通过 put 更新 checkpoint
+                    checkpointer.put(
+                        config=existing.config,
+                        checkpoint=existing.checkpoint,
+                        metadata=existing.metadata or {},
+                        new_versions={},
+                    )
+                    span_attrs["status"] = "ok"
+                    span_attrs["output_tokens"] = len(summary)
+                    _logger.info(
+                        "summary replaced in checkpointer: session=%s "
+                        "input_chars=%d output_chars=%d",
+                        session_id, len(ai_content), len(summary),
+                    )
+                else:
+                    span_attrs["status"] = "skipped"
+                    span_attrs["reason"] = "no AI message found"
+
+            except Exception as exc:
+                span_attrs["status"] = "error"
+                span_attrs["error"] = str(exc)
+                _logger.warning(
+                    "summary generation failed (fallback to truncation): %s", exc,
+                )

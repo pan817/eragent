@@ -6,7 +6,7 @@ memories：通用记忆存储；reports：分析报告存储。
 from __future__ import annotations
 
 import sqlalchemy as sa
-from sqlalchemy import Column, DateTime, Index, Integer, MetaData, String, Table, Text
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text
 from sqlalchemy.dialects.postgresql import JSON
 
 
@@ -22,12 +22,48 @@ memories_table = Table(
     Column("content", Text, nullable=False),
     Column("content_hash", String(16), nullable=True, index=False),
     Column("attrs", JSON, nullable=True),
+    Column("entity_id", String(128), nullable=True),
+    Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("consolidated_at", DateTime(timezone=True), nullable=True),
+    Column(
+        "is_consolidated",
+        Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+    ),
+    Column("source_ids", JSON, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
         nullable=False,
         server_default=sa.func.now(),
     ),
+)
+
+# memories: type + user composite index (type-aware queries)
+Index("memories_type_user", memories_table.c.memory_type, memories_table.c.user_id)
+
+# memories: entity_id partial index (entity_profile exact lookup)
+Index(
+    "memories_entity",
+    memories_table.c.user_id,
+    memories_table.c.entity_id,
+    postgresql_where=memories_table.c.entity_id.isnot(None),
+)
+
+# memories: expires_at partial index (TTL purge scan)
+Index(
+    "memories_expires",
+    memories_table.c.expires_at,
+    postgresql_where=memories_table.c.expires_at.isnot(None),
+)
+
+# memories: consolidation candidate query
+Index(
+    "memories_consolidation",
+    memories_table.c.user_id,
+    memories_table.c.is_consolidated,
+    memories_table.c.memory_type,
 )
 
 reports_table = Table(
@@ -63,6 +99,42 @@ Index("reports_user_created", reports_table.c.user_id, reports_table.c.created_a
 # UNIQUE 语义表达"一个 trace 最多一份报告"的业务约束；PG 允许多个 NULL 共存，
 # 不影响历史行（trace_id=NULL）的存在。
 Index("reports_trace_id", reports_table.c.trace_id, unique=True)
+
+
+# ── 记忆整合日志 ─────────────────────────────────────────────────────
+# 记录每次整合的执行状态，用于触发条件判定 + 审计追溯 + per-user 锁。
+
+memory_consolidation_log_table = Table(
+    "memory_consolidation_log",
+    metadata_obj,
+    Column("id", String(36), primary_key=True),
+    Column("user_id", String(128), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("status", String(16), nullable=False),  # running / completed / failed
+    Column("input_count", Integer, nullable=False, server_default=sa.text("0")),
+    Column("merged_count", Integer, nullable=False, server_default=sa.text("0")),
+    Column("pruned_count", Integer, nullable=False, server_default=sa.text("0")),
+    Column(
+        "llm_used",
+        Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+    ),
+    Column("error_message", Text, nullable=True),
+    Column("details", JSON, nullable=True),
+)
+
+Index(
+    "consolidation_user_status",
+    memory_consolidation_log_table.c.user_id,
+    memory_consolidation_log_table.c.status,
+)
+Index(
+    "consolidation_completed",
+    memory_consolidation_log_table.c.user_id,
+    memory_consolidation_log_table.c.completed_at.desc(),
+)
 
 
 # ── 会话实体上下文 ───────────────────────────────────────────────────

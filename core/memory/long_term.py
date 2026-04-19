@@ -350,6 +350,15 @@ class MemoryRepository:
     生命周期策略（TTL / cap / dedup）全部集中在此类。
     """
 
+    # 默认 TTL 映射（天数），可通过 Settings 覆盖
+    _DEFAULT_TTL: dict[str, int] = {
+        "entity_profile": 90,
+        "analysis_insight": 60,
+        "correction": 180,
+        "user_preference": 0,
+        "domain_fact": 0,
+    }
+
     def __init__(
         self,
         engine: sa.engine.Engine,
@@ -359,6 +368,7 @@ class MemoryRepository:
         min_content_len: int = 0,
         dedupe_window_seconds: int = 0,
         skip_empty_conclusions: bool = False,
+        ttl_config: dict[str, int] | None = None,
     ) -> None:
         self._engine = engine
         self._vector_store = _VectorStoreProxy(instance=vector_store)
@@ -367,12 +377,38 @@ class MemoryRepository:
         self._min_content_len = min_content_len
         self._dedupe_window_seconds = dedupe_window_seconds
         self._skip_empty_conclusions = skip_empty_conclusions
+        self._ttl_config = ttl_config or self._DEFAULT_TTL
+
+    def compute_expires_at(self, memory_type: str) -> datetime | None:
+        """根据 memory_type 计算 expires_at。返回 None 表示不过期。"""
+        ttl_days = self._ttl_config.get(memory_type, 0)
+        if ttl_days <= 0:
+            return None
+        return now_cn() + timedelta(days=ttl_days)
 
     def init_tables(self) -> None:
-        """创建 memories 表及相关索引（幂等）。"""
+        """创建 memories 表及相关索引（幂等）。
+
+        包含保底列检查：如果 Alembic 迁移未成功添加新列，
+        这里用 ALTER TABLE ADD COLUMN IF NOT EXISTS 补救。
+        """
         metadata_obj.create_all(self._engine, checkfirst=True)
         if self._engine.dialect.name == "postgresql":
             with self._engine.connect() as conn:
+                # 保底：确保记忆类型体系的新列存在
+                _new_columns = [
+                    ("entity_id", "VARCHAR(128)"),
+                    ("expires_at", "TIMESTAMPTZ"),
+                    ("consolidated_at", "TIMESTAMPTZ"),
+                    ("is_consolidated", "BOOLEAN DEFAULT false NOT NULL"),
+                    ("source_ids", "JSON"),
+                ]
+                for col_name, col_type in _new_columns:
+                    conn.execute(sa.text(
+                        f"ALTER TABLE memories ADD COLUMN IF NOT EXISTS "
+                        f"{col_name} {col_type}"
+                    ))
+
                 conn.execute(
                     sa.text(
                         "CREATE INDEX IF NOT EXISTS memories_content_fts "
@@ -385,6 +421,23 @@ class MemoryRepository:
                         "ON memories (user_id, created_at DESC)"
                     )
                 )
+                # 记忆类型体系索引
+                conn.execute(sa.text(
+                    "CREATE INDEX IF NOT EXISTS memories_type_user "
+                    "ON memories (memory_type, user_id)"
+                ))
+                conn.execute(sa.text(
+                    "CREATE INDEX IF NOT EXISTS memories_entity "
+                    "ON memories (user_id, entity_id) WHERE entity_id IS NOT NULL"
+                ))
+                conn.execute(sa.text(
+                    "CREATE INDEX IF NOT EXISTS memories_expires "
+                    "ON memories (expires_at) WHERE expires_at IS NOT NULL"
+                ))
+                conn.execute(sa.text(
+                    "CREATE INDEX IF NOT EXISTS memories_consolidation "
+                    "ON memories (user_id, is_consolidated, memory_type)"
+                ))
                 conn.commit()
 
     def save(
@@ -394,8 +447,15 @@ class MemoryRepository:
         memory_type: str,
         content: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        entity_id: str | None = None,
+        expires_at: datetime | None = None,
     ) -> str | None:
         """写入一条记忆，经三层过滤后决定是否实际写入。
+
+        Args:
+            entity_id: 关联的业务实体 ID（entity_profile / correction 等专用）。
+            expires_at: TTL 到期时间。None 表示不过期。
 
         Returns:
             写入成功时返回 memory_id；被过滤跳过时返回 None。
@@ -489,6 +549,8 @@ class MemoryRepository:
             content=content,
             content_hash=chash or None,
             attrs=metadata,
+            entity_id=entity_id,
+            expires_at=expires_at,
             created_at=now_cn(),
         )
 
@@ -690,6 +752,231 @@ class MemoryRepository:
         )
         with self._engine.connect() as conn:
             return {dict(row._mapping)["id"]: dict(row._mapping) for row in conn.execute(stmt)}
+
+    # ------------------------------------------------------------------
+    # 类型感知检索（双通道：精确优先 + 语义补充）
+    # ------------------------------------------------------------------
+
+    def search_by_type(
+        self,
+        user_id: str,
+        query: str,
+        entity_ids: list[str] | None = None,
+        analysis_type: str | None = None,
+        type_limits: dict[str, int] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """按类型分桶检索，精确优先 + 语义补充。
+
+        Args:
+            user_id: 用户 ID
+            query: 检索查询（语义通道用）
+            entity_ids: 精确匹配的实体 ID
+            analysis_type: 精确匹配的分析类型
+            type_limits: 各类型的最大返回条数
+        """
+        limits = type_limits or {
+            "entity_profile": 3, "correction": 2,
+            "domain_fact": 3, "user_preference": 2, "analysis_insight": 2,
+        }
+        results: dict[str, list[dict[str, Any]]] = {}
+
+        # entity_profile: 精确 entity_id → 语义补充
+        results["entity_profile"] = self._dual_channel_search(
+            user_id, query, "entity_profile", limits.get("entity_profile", 3),
+            exact_entity_ids=entity_ids,
+        )
+
+        # correction: 精确 entity_id + analysis_type → 语义补充
+        results["correction"] = self._dual_channel_search(
+            user_id, query, "correction", limits.get("correction", 2),
+            exact_entity_ids=entity_ids,
+            exact_analysis_type=analysis_type,
+        )
+
+        # domain_fact: 精确 analysis_type + entity_id → 语义补充
+        results["domain_fact"] = self._dual_channel_search(
+            user_id, query, "domain_fact", limits.get("domain_fact", 3),
+            exact_entity_ids=entity_ids,
+            exact_analysis_type=analysis_type,
+        )
+
+        # user_preference: 全量加载最新 N 条
+        results["user_preference"] = self._fetch_latest_by_type(
+            user_id, "user_preference", limits.get("user_preference", 2),
+        )
+
+        # analysis_insight: 纯语义
+        results["analysis_insight"] = self._search_by_type_hybrid(
+            user_id, query, "analysis_insight", limits.get("analysis_insight", 2),
+        )
+
+        return results
+
+    def _dual_channel_search(
+        self,
+        user_id: str,
+        query: str,
+        memory_type: str,
+        limit: int,
+        exact_entity_ids: list[str] | None = None,
+        exact_analysis_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """双通道检索：精确优先，语义补充去重。"""
+        exact_results: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        # 通道 A：按 entity_id 精确匹配
+        if exact_entity_ids:
+            for r in self._fetch_by_entity_and_type(user_id, exact_entity_ids, memory_type):
+                if r["id"] not in seen_ids:
+                    exact_results.append(r)
+                    seen_ids.add(r["id"])
+
+        # 通道 A'：按 analysis_type 精确匹配（correction/domain_fact）
+        if exact_analysis_type and memory_type in ("correction", "domain_fact"):
+            for r in self._fetch_by_analysis_type(user_id, exact_analysis_type, memory_type):
+                if r["id"] not in seen_ids:
+                    exact_results.append(r)
+                    seen_ids.add(r["id"])
+
+        # 精确结果已达上限 → 不走语义通道
+        if len(exact_results) >= limit:
+            return exact_results[:limit]
+
+        # 通道 B：语义补充
+        remaining = limit - len(exact_results)
+        semantic = self._search_by_type_hybrid(
+            user_id, query, memory_type, remaining * 2,
+        )
+        for r in semantic:
+            if r["id"] not in seen_ids and len(exact_results) < limit:
+                exact_results.append(r)
+                seen_ids.add(r["id"])
+
+        return exact_results
+
+    def _fetch_by_entity_and_type(
+        self, user_id: str, entity_ids: list[str], memory_type: str,
+    ) -> list[dict[str, Any]]:
+        """按 entity_id + memory_type 精确查询。"""
+        stmt = (
+            sa.select(memories_table)
+            .where(sa.and_(
+                memories_table.c.user_id == user_id,
+                memories_table.c.memory_type == memory_type,
+                memories_table.c.entity_id.in_(entity_ids),
+            ))
+            .order_by(memories_table.c.created_at.desc())
+            .limit(10)
+        )
+        try:
+            with self._engine.connect() as conn:
+                return [dict(row._mapping) for row in conn.execute(stmt)]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("fetch_by_entity_and_type error: %s", exc)
+            return []
+
+    def _fetch_by_analysis_type(
+        self, user_id: str, analysis_type: str, memory_type: str,
+    ) -> list[dict[str, Any]]:
+        """按 attrs->>'corrected_analysis_type' 或 attrs->'source_analysis_type' 精确查询。"""
+        # correction 用 corrected_analysis_type，domain_fact 用 rules 中的 target
+        attr_key = "corrected_analysis_type" if memory_type == "correction" else "source_analysis_type"
+        stmt = (
+            sa.select(memories_table)
+            .where(sa.and_(
+                memories_table.c.user_id == user_id,
+                memories_table.c.memory_type == memory_type,
+                memories_table.c.attrs[attr_key].as_string() == analysis_type,
+            ))
+            .order_by(memories_table.c.created_at.desc())
+            .limit(10)
+        )
+        try:
+            with self._engine.connect() as conn:
+                return [dict(row._mapping) for row in conn.execute(stmt)]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("fetch_by_analysis_type error: %s", exc)
+            return []
+
+    def _fetch_latest_by_type(
+        self, user_id: str, memory_type: str, limit: int,
+    ) -> list[dict[str, Any]]:
+        """按 user_id + memory_type 取最新 N 条。"""
+        stmt = (
+            sa.select(memories_table)
+            .where(sa.and_(
+                memories_table.c.user_id == user_id,
+                memories_table.c.memory_type == memory_type,
+            ))
+            .order_by(memories_table.c.created_at.desc())
+            .limit(limit)
+        )
+        try:
+            with self._engine.connect() as conn:
+                return [dict(row._mapping) for row in conn.execute(stmt)]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("fetch_latest_by_type error: %s", exc)
+            return []
+
+    def _search_by_type_hybrid(
+        self, user_id: str, query: str, memory_type: str, limit: int,
+    ) -> list[dict[str, Any]]:
+        """按 memory_type 过滤的 hybrid 检索。"""
+        # 稀疏检索
+        sparse_ids = self._sparse_search_ids_typed(user_id, query, memory_type, limit * 2)
+        # 稠密检索
+        dense_ids = self._dense_search_ids(user_id, query, limit * 2)
+
+        if not sparse_ids and not dense_ids:
+            return []
+
+        fused = _rrf_fuse([sparse_ids, dense_ids], k=self._fusion_k)
+        top_ids = [doc_id for doc_id, _ in fused[:limit]]
+        if not top_ids:
+            return []
+        rows = self._fetch_by_ids(user_id, top_ids)
+        return [rows[mid] for mid in top_ids if mid in rows]
+
+    def _sparse_search_ids_typed(
+        self, user_id: str, query: str, memory_type: str, limit: int,
+    ) -> list[str]:
+        """带 memory_type 过滤的稀疏检索。"""
+        if not query or not query.strip():
+            return []
+        if self._engine.dialect.name == "postgresql":
+            ts_query = _to_tsquery_or(query)
+            if not ts_query:
+                return []
+            ts_vec = sa.func.to_tsvector("simple", memories_table.c.content)
+            ts_q = sa.func.to_tsquery("simple", ts_query)
+            stmt = (
+                sa.select(memories_table.c.id)
+                .where(sa.and_(
+                    memories_table.c.user_id == user_id,
+                    memories_table.c.memory_type == memory_type,
+                    ts_vec.op("@@")(ts_q),
+                ))
+                .order_by(sa.func.ts_rank(ts_vec, ts_q).desc())
+                .limit(limit)
+            )
+        else:
+            stmt = (
+                sa.select(memories_table.c.id)
+                .where(sa.and_(
+                    memories_table.c.user_id == user_id,
+                    memories_table.c.memory_type == memory_type,
+                    memories_table.c.content.like(f"%{query}%"),
+                ))
+                .order_by(memories_table.c.created_at.desc())
+                .limit(limit)
+            )
+        try:
+            with self._engine.connect() as conn:
+                return [row[0] for row in conn.execute(stmt)]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("sparse_search_typed error: %s", exc)
+            return []
 
     def delete_user(self, user_id: str) -> int:
         """删除指定用户的全部记忆，返回删除行数。"""
@@ -937,6 +1224,13 @@ def get_memory_repository() -> MemoryRepository:
         repo._min_content_len = settings.memory.long_term_min_content_len
         repo._dedupe_window_seconds = settings.memory.long_term_dedupe_window_seconds
         repo._skip_empty_conclusions = settings.memory.long_term_skip_empty_conclusions
+        repo._ttl_config = {
+            "entity_profile": settings.memory.ttl.entity_profile_days,
+            "analysis_insight": settings.memory.ttl.analysis_insight_days,
+            "correction": settings.memory.ttl.correction_days,
+            "user_preference": settings.memory.ttl.user_preference_days,
+            "domain_fact": settings.memory.ttl.domain_fact_days,
+        }
         repo.init_tables()
         _memory_repository_singleton = repo
     return _memory_repository_singleton

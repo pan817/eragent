@@ -214,20 +214,53 @@ memory:
     summary_threshold: 15       # 超过N条消息触发摘要压缩
     context_trim_enabled: true  # 注入 LLM 前的 token 裁剪兜底开关
     context_max_tokens_pct: 15  # 短期记忆最大占 context_window 的百分比
+    summary_enabled: true       # LLM 异步摘要总开关
+    summary_max_input_chars: 5000   # 超过此长度才触发摘要
+    summary_max_output_tokens: 500  # 摘要输出 token 上限
+    summary_timeout_seconds: 30     # LLM 摘要调用超时
   long_term:
     enabled: true               # 长期记忆主路径总开关（SQL 读写）
     max_retrieved: 5            # Hybrid 检索最多返回N条历史记忆
     context_trim_enabled: true  # 注入 LLM 前的 token 裁剪兜底开关
-    context_max_tokens_pct: 10  # 长期记忆最大占 context_window 的百分比
+    context_max_tokens_pct: 12  # 长期记忆最大占 context_window 的百分比
     fusion_k: 60                # RRF 融合的平滑常数
     max_per_user: 200           # 每个用户保留的最大记忆条数（0 表示不限制）
     min_content_len: 50         # 短于该长度的内容直接 skip（0 关闭）
     dedupe_window_seconds: 900  # 同 user + 同 content_hash 的去重时间窗口（0 关闭）
     skip_empty_conclusions: false  # 跳过 anomaly_count=0 且 summary 空的结论
+    search_timeout_seconds: 0.2 # 检索注入整体超时（秒），超时返回空记忆
+    type_budget_pct:            # 各类型 token 子预算（占 long_term 总预算百分比）
+      entity_profile: 40
+      user_preference: 20
+      analysis_insight: 15
+      correction: 15
+      domain_fact: 10
+    type_max_retrieved:         # 各类型检索最大条数
+      entity_profile: 3
+      user_preference: 2
+      analysis_insight: 2
+      correction: 2
+      domain_fact: 3
   react:
     trim_enabled: true              # ReAct 循环内 LLM 输入裁剪总开关
     keep_recent_rounds: 2           # 保留最近几轮完整对话（含工具结果）
     tool_content_max_chars: 500     # 早期 ToolMessage 截断字符数（0=清空内容）
+  ttl:                              # 各类型 TTL（天数，0=不过期）
+    entity_profile_days: 90
+    analysis_insight_days: 60
+    correction_days: 180
+    user_preference_days: 0
+    domain_fact_days: 0
+  consolidation:                    # 记忆整合配置
+    enabled: true                   # 整合总开关
+    min_new_memories: 20            # 触发条件：新增记忆数阈值
+    max_interval_hours: 72          # 触发条件：最大时间间隔（小时）
+    lock_timeout_seconds: 600       # 整合锁超时（秒）
+    llm_enabled: true               # LLM 语义合并开关
+    llm_timeout_seconds: 60         # 单次 LLM 调用超时
+  feedback:                         # 用户反馈检测配置
+    enabled: true                   # 反馈检测总开关
+    min_confidence: 0.6             # LLM 提取最低置信度
 
 intent_routing:
   # L1 keyword hit-rate thresholds

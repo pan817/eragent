@@ -176,7 +176,7 @@ class TestOrchestratorIntentKindBranches:
             _IK.CHITCHAT: ["chitchat"],
             _IK.META: ["meta"],
             _IK.OUT_OF_SCOPE: ["out_of_scope"],
-            _IK.CLARIFICATION: [analysis_type_kw or "clarification"],
+            _IK.CLARIFICATION: [analysis_type_kw or AnalysisType.COMPREHENSIVE.value],
             _IK.DATA_LOOKUP: ["data_lookup"],
             _IK.RECALL: ["recall"],
             _IK.ANALYSIS: [analysis_type_kw or AnalysisType.COMPREHENSIVE.value],
@@ -274,49 +274,35 @@ class TestOrchestratorIntentKindBranches:
         assert result.status == AnalysisStatus.SUCCESS
 
     @pytest.mark.asyncio
-    async def test_clarification_with_valid_type_downgrades_to_analysis(
+    async def test_clarification_downgrades_to_analysis_not_early_return(
         self, settings: Settings
     ) -> None:
-        """CLARIFICATION + 有效 analysis_type 提示 → 降级为 ANALYSIS，不早退。
+        """CLARIFICATION 已废弃 — 无论有无有效 type 提示，都不早退，走 analysis 路径。
 
-        系统有默认参数（时间范围等），不需要追问用户。
+        遵循"尽量回复"原则，意图模糊时归入 analysis/comprehensive 由 ReAct 执行。
         """
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
         mock_agent = _make_mock_agent(return_value={
             "anomalies": [], "supplier_kpis": [], "summary": {},
-            "report_markdown": "# Price Variance Report",
+            "report_markdown": "# Comprehensive Analysis",
             "completed_tasks": ["analysis"], "failed_tasks": [],
         })
         orch._agent = mock_agent
 
+        # 即使 intent_kind 被设为 CLARIFICATION（兼容旧路由），也应走分析路径
         signal = self._make_signal(
             IntentKind.CLARIFICATION,
-            missing_params=["time_range", "supplier_id"],
-            analysis_type_kw=AnalysisType.PRICE_VARIANCE.value,
-            confidence=0.7,
+            missing_params=[],
+            analysis_type_kw=AnalysisType.COMPREHENSIVE.value,
+            confidence=0.5,
         )
         with patch.object(orch._intent_router, "route", return_value=signal):
-            result = await orch.analyze(AnalysisRequest(query="价格差异"))
+            result = await orch.analyze(AnalysisRequest(query="帮我看看"))
 
         # 不应早退，agent 应被调用执行分析
         mock_agent.run.assert_called_once()
         assert result.status == AnalysisStatus.SUCCESS
-
-    @pytest.mark.asyncio
-    async def test_clarification_without_valid_type_still_early_returns(
-        self, settings: Settings
-    ) -> None:
-        """CLARIFICATION + 无有效 type 提示 → 仍然早退追问。"""
-        from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
-        orch._agent = _make_mock_agent(return_value={})
-
-        signal = self._make_signal(IntentKind.CLARIFICATION, missing_params=[])
-        with patch.object(orch._intent_router, "route", return_value=signal):
-            result = await orch.analyze(AnalysisRequest(query="帮我看看"))
-
-        assert "缺少关键参数" in result.report_markdown
 
     @pytest.mark.asyncio
     async def test_data_lookup_runs_react_not_dag(
@@ -556,7 +542,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.return_value = None
-        orch._short_term._checkpointer = mock_checkpointer
+        orch._memory._short_term._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -583,7 +569,7 @@ class TestOrchestratorSessionContext:
             }
         }
         mock_checkpointer.get_tuple.return_value = mock_tuple
-        orch._short_term._checkpointer = mock_checkpointer
+        orch._memory._short_term._checkpointer = mock_checkpointer
 
         # 预置 session_entities 表数据
         entity_engine = create_engine(
@@ -597,7 +583,7 @@ class TestOrchestratorSessionContext:
                 session_id="s1",
                 entities={"po_number": "PO-2024-0035", "supplier_id": "SUP-001"},
             ))
-        orch._short_term._entity_engine = entity_engine
+        orch._memory._short_term._entity_engine = entity_engine
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is True
@@ -609,7 +595,7 @@ class TestOrchestratorSessionContext:
         orch = Orchestrator(settings=settings)
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.side_effect = RuntimeError("db error")
-        orch._short_term._checkpointer = mock_checkpointer
+        orch._memory._short_term._checkpointer = mock_checkpointer
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is False
@@ -1126,7 +1112,7 @@ class TestSessionContextTrim:
             }
         }
         mock_cp.get_tuple.return_value = mock_tuple
-        orch._short_term._checkpointer = mock_cp
+        orch._memory._short_term._checkpointer = mock_cp
 
         ctx = orch._load_session_context("s1")
         assert ctx["context_summary"] == "SUP-001 准时率 95%"
@@ -1150,7 +1136,7 @@ class TestSessionContextTrim:
             }
         }
         mock_cp.get_tuple.return_value = mock_tuple
-        orch._short_term._checkpointer = mock_cp
+        orch._memory._short_term._checkpointer = mock_cp
 
         ctx = orch._load_session_context("s1")
         summary = ctx["context_summary"]
@@ -1258,12 +1244,12 @@ class TestCheckpointerLifecycle:
         orch = Orchestrator(settings=settings)
         mock_cm = MagicMock()
         mock_cm.__exit__ = MagicMock(side_effect=RuntimeError("close error"))
-        orch._short_term._checkpointer_cm = mock_cm
-        orch._short_term._checkpointer = MagicMock()
+        orch._memory._short_term._checkpointer_cm = mock_cm
+        orch._memory._short_term._checkpointer = MagicMock()
 
         orch._close_checkpointer()
-        assert orch._short_term._checkpointer is None
-        assert orch._short_term._checkpointer_cm is None
+        assert orch._memory._short_term._checkpointer is None
+        assert orch._memory._short_term._checkpointer_cm is None
 
     def test_close_checkpointer_idempotent(self, settings: Settings) -> None:
         """重复关闭不应报错。"""

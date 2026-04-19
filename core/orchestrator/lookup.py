@@ -18,6 +18,45 @@ from core.logging_utils import get_logger
 
 _logger = get_logger(__name__)
 
+# ── 从 query 中解析数量/排序意图 ────────────────────────────────
+
+import re
+
+# "最新的一个" / "最近3条" / "前5个" 等
+_LIMIT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # "最新/最近的N个/条/笔"
+    (re.compile(r"(?:最新|最近|最后)\s*(?:的\s*)?(\d+)\s*(?:个|条|笔|张)", re.I), "date_desc"),
+    # "前N个/条"
+    (re.compile(r"前\s*(\d+)\s*(?:个|条|笔|张)", re.I), "date_desc"),
+    # "最新/最近的一个" (无数字，隐含 1)
+    (re.compile(r"(?:最新|最近|最后)\s*(?:的\s*)?(?:一\s*)?(?:个|条|笔|张)", re.I), "date_desc"),
+    # "最早的N个"
+    (re.compile(r"最早\s*(?:的\s*)?(\d+)\s*(?:个|条|笔|张)", re.I), "date_asc"),
+    (re.compile(r"最早\s*(?:的\s*)?(?:一\s*)?(?:个|条|笔|张)", re.I), "date_asc"),
+    # "金额最大/最高的N个"
+    (re.compile(r"(?:金额|总额)\s*(?:最大|最高)\s*(?:的\s*)?(\d+)\s*(?:个|条|笔)", re.I), "amount_desc"),
+    (re.compile(r"(?:金额|总额)\s*(?:最大|最高)\s*(?:的\s*)?(?:一\s*)?(?:个|条|笔)", re.I), "amount_desc"),
+]
+
+
+def _parse_query_constraints(query: str) -> tuple[int, str]:
+    """从 query 中解析 limit 和 order_by。
+
+    Returns:
+        (limit, order_by)。未匹配时返回 (0, "")。
+    """
+    for pattern, default_order in _LIMIT_PATTERNS:
+        m = pattern.search(query)
+        if m:
+            # 有数字捕获组则取值，否则默认 1
+            try:
+                limit = int(m.group(1))
+            except (IndexError, TypeError):
+                limit = 1
+            return limit, default_order
+    return 0, ""
+
+
 # 路径 A：实体编号 → (工具名, 参数映射)
 # 优先级按列表顺序，首个命中即返回
 _ENTITY_TOOL_MAP: list[tuple[str, str, dict[str, str]]] = [
@@ -44,6 +83,22 @@ def resolve_lookup_tool(
     limit = params.get("limit", 0)
     order_by = params.get("order_by", "")
 
+    # 从 params 中取 limit/order_by（统一 LLM 已提取）
+    # _parse_query_constraints 作为兜底（LLM 未提取时）
+    if not limit and not order_by:
+        q_limit, q_order = _parse_query_constraints(query)
+        if q_limit:
+            limit = q_limit
+        if q_order:
+            order_by = q_order
+
+    # 有 limit 意图时放宽 days
+    if limit and days <= 30:
+        days = 365
+
+    # 注意：跨实体检测已由统一 LLM 的 is_cross_entity 判断，
+    # 在 orchestrator 层拦截（不进入此函数）。
+
     def _with_constraints(base: dict[str, Any]) -> dict[str, Any]:
         """为 tool kwargs 注入 limit/order_by。"""
         if limit:
@@ -52,21 +107,21 @@ def resolve_lookup_tool(
             base["order_by"] = order_by
         return base
 
-    # 路径 A：有实体编号
+    # 路径 A：有实体编号 → 不限时间（用户明确指定的实体可能创建于任何时间）
     for entity_field, tool_name, param_map in _ENTITY_TOOL_MAP:
         entity_val = params.get(entity_field)
         if entity_val:
-            kwargs: dict[str, Any] = {"days": days}
+            kwargs: dict[str, Any] = {"days": 0}
             for tool_param, source_field in param_map.items():
                 kwargs[tool_param] = params[source_field]
             return tool_name, _with_constraints(kwargs)
 
-    # 路径 A 特殊分支：supplier_id（双工具调用）
+    # 路径 A 特殊分支：supplier_id（双工具调用）→ 不限时间
     supplier_id = params.get("supplier_id")
     if supplier_id:
         return "__supplier_combo__", _with_constraints({
             "supplier_id": supplier_id,
-            "days": days,
+            "days": 0,
         })
 
     # 路径 B：关键词推断

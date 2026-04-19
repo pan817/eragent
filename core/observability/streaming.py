@@ -42,9 +42,19 @@ def _publish_span_start(span_type: str, name: str) -> None:
     ctx = _current_trace.get()
     if ctx is None:
         return
-    from core.observability.display_labels import resolve_tool_label
+    from core.observability.display_labels import resolve_model_label, resolve_tool_label
 
-    if span_type == "tool":
+    if span_type == "model":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {
+                "type": "model",
+                "action": "start",
+                "name": name,
+                "label": resolve_model_label(name),
+            },
+        )
+    elif span_type == "tool":
         _publish_to_event_bus(
             ctx.trace_id,
             {
@@ -80,9 +90,21 @@ def _publish_span_end(
     ctx = _current_trace.get()
     if ctx is None:
         return
-    from core.observability.display_labels import resolve_tool_label
+    from core.observability.display_labels import resolve_model_label, resolve_tool_label
 
-    if span_type == "tool":
+    if span_type == "model":
+        _publish_to_event_bus(
+            ctx.trace_id,
+            {
+                "type": "model",
+                "action": "end",
+                "name": name,
+                "label": resolve_model_label(name),
+                "duration_ms": duration_ms,
+                "status": status,
+            },
+        )
+    elif span_type == "tool":
         _publish_to_event_bus(
             ctx.trace_id,
             {
@@ -109,7 +131,12 @@ def _publish_span_end(
         )
 
 
-def publish_stage(name: str, attrs: dict[str, Any] | None = None) -> None:
+def publish_stage(
+    name: str,
+    attrs: dict[str, Any] | None = None,
+    *,
+    duration_ms: float | None = None,
+) -> None:
     """供编排层调用：发布阶段事件（intent_resolved / dag_planned / react_started 等）。
 
     在当前无活跃 trace 时 no-op。
@@ -126,6 +153,8 @@ def publish_stage(name: str, attrs: dict[str, Any] | None = None) -> None:
         "name": name,
         "label": resolve_stage_label(name),
     }
+    if duration_ms is not None:
+        payload["duration_ms"] = round(duration_ms, 3)
     if attrs:
         payload["attrs"] = attrs
     _publish_to_event_bus(ctx.trace_id, payload)

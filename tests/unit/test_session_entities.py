@@ -301,7 +301,11 @@ class TestOrchestratorSaveSessionEntities:
 
         orch = Orchestrator.__new__(Orchestrator)
         orch._settings = settings
-        orch._short_term = stm
+        from core.memory.manager import MemoryManager
+        orch._memory = MemoryManager.__new__(MemoryManager)
+        orch._memory._short_term = stm
+        orch._memory._settings = settings
+        orch._memory._feedback_detector = None
         return orch
 
     @pytest.mark.asyncio

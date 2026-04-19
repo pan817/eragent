@@ -478,6 +478,40 @@ class IntentRoutingSettings(BaseSettings):
     model_config = {"env_prefix": "INTENT_ROUTING_"}
 
 
+class TTLSettings(BaseSettings):
+    """各记忆类型的 TTL 配置（天数，0=不过期）。"""
+
+    entity_profile_days: int = 90
+    analysis_insight_days: int = 60
+    correction_days: int = 180
+    user_preference_days: int = 0
+    domain_fact_days: int = 0
+
+    model_config = {"env_prefix": "MEMORY_TTL_"}
+
+
+class ConsolidationSettings(BaseSettings):
+    """记忆整合配置。"""
+
+    enabled: bool = True                  # 整合总开关
+    min_new_memories: int = 20            # 触发条件：新增记忆数阈值
+    max_interval_hours: int = 72          # 触发条件：最大时间间隔（小时）
+    lock_timeout_seconds: int = 600       # 整合锁超时（秒）
+    llm_enabled: bool = True              # LLM 语义合并开关
+    llm_timeout_seconds: int = 60         # 单次 LLM 调用超时
+
+    model_config = {"env_prefix": "MEMORY_CONSOLIDATION_"}
+
+
+class FeedbackSettings(BaseSettings):
+    """用户反馈检测配置。"""
+
+    enabled: bool = True                  # 反馈检测总开关
+    min_confidence: float = 0.6           # LLM 提取最低置信度
+
+    model_config = {"env_prefix": "MEMORY_FEEDBACK_"}
+
+
 class MemorySettings(BaseSettings):
     """记忆管理配置。"""
 
@@ -485,6 +519,12 @@ class MemorySettings(BaseSettings):
     short_term_summary_threshold: int = 15
     short_term_context_trim_enabled: bool = True   # 注入 LLM 前裁剪兜底开关
     short_term_context_max_tokens_pct: int = 15    # 短期记忆最大占 context_window 的百分比
+    # 短期记忆 LLM 异步摘要
+    short_term_summary_enabled: bool = True        # LLM 摘要总开关
+    short_term_summary_max_input_chars: int = 5000  # 超过此长度才触发摘要
+    short_term_summary_max_output_tokens: int = 500  # 摘要输出 token 上限
+    short_term_summary_timeout_seconds: int = 30   # LLM 摘要调用超时
+
     long_term_enabled: bool = True
     long_term_max_retrieved: int = 5
     long_term_fusion_k: int = 60
@@ -493,12 +533,30 @@ class MemorySettings(BaseSettings):
     long_term_dedupe_window_seconds: int = 900    # 内容指纹去重窗口（0 关闭）
     long_term_skip_empty_conclusions: bool = False  # 跳过 anomaly_count=0 且 summary 空的结论
     long_term_context_trim_enabled: bool = True    # 注入 LLM 前裁剪兜底开关
-    long_term_context_max_tokens_pct: int = 10     # 长期记忆最大占 context_window 的百分比
+    long_term_context_max_tokens_pct: int = 12     # 长期记忆最大占 context_window 的百分比（10→12）
+    long_term_search_timeout_seconds: float = 0.2  # 检索注入整体超时（秒）
+    # 各类型 token 子预算（占 long_term 总预算百分比）
+    long_term_type_budget_pct_entity_profile: int = 40
+    long_term_type_budget_pct_user_preference: int = 20
+    long_term_type_budget_pct_analysis_insight: int = 15
+    long_term_type_budget_pct_correction: int = 15
+    long_term_type_budget_pct_domain_fact: int = 10
+    # 各类型检索最大条数
+    long_term_type_max_entity_profile: int = 3
+    long_term_type_max_user_preference: int = 2
+    long_term_type_max_analysis_insight: int = 2
+    long_term_type_max_correction: int = 2
+    long_term_type_max_domain_fact: int = 3
 
     # ReAct 循环内 LLM 输入裁剪（MemoryMiddleware）
     react_trim_enabled: bool = True          # 总开关
     react_keep_recent_rounds: int = 2        # 保留最近几轮完整对话
     react_tool_content_max_chars: int = 500  # 早期 ToolMessage 截断字符数（0=清空）
+
+    # 子配置
+    ttl: TTLSettings = Field(default_factory=TTLSettings)
+    consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)
+    feedback: FeedbackSettings = Field(default_factory=FeedbackSettings)
 
     model_config = {"env_prefix": "MEMORY_"}
 

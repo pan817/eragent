@@ -157,7 +157,7 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
 - **ModuleProvider 解耦**：Orchestrator 通过 `ModuleProvider` Protocol 与业务模块交互（路由规则、DAG 模板、工具集、实体模式、记忆构建），不直接 import 模块代码。新增模块只需实现 Protocol 并在启动时注册。
 - **记忆模块**：长期记忆按 `user_id` 隔离（PostgreSQL），短期记忆由 LangGraph PostgresSaver checkpointer 承担（按 `session_id` 隔离）。
-- **编排粒度（DAG + ReAct 共存）**：L1/L2 命中 → DAG 并行执行 + ReportAgent 汇总；L3/低置信度 → ReAct 自主调用工具；早退路由（META/CHITCHAT/CLARIFICATION/OUT_OF_SCOPE）→ 直接模板响应。
+- **编排粒度（DAG + ReAct 共存）**：L1/L2 命中 → DAG 并行执行 + ReportAgent 汇总；L3/低置信度 → ReAct 自主调用工具；早退路由（META/CHITCHAT/OUT_OF_SCOPE）→ 直接模板响应。意图模糊时不前置拦截（不走 clarification 早退），而是归入 analysis/comprehensive 让 ReAct 尝试执行，遵循"尽量回复"原则。
 - **异步分析（SSE）**：`POST /analyze/async` + SSE 流式事件。`EventBus` 支持 memory（单进程）/ Redis（多 worker）双后端，多 worker 部署时 memory 后端 fail-fast。
 - **会话历史**：`core/chat/` 独立持久化用户消息/助手回复（与 LangGraph checkpointer 短期记忆解耦），通过 `/sessions/*` API 暴露。
 - **本体与规则分工**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体，KPI 计算用 Python；上下文注入混合结构化 JSON + 自然语言。当前版本纯分析只读，写操作接口预留。

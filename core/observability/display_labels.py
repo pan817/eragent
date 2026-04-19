@@ -53,6 +53,8 @@ _TOOL_LABELS: dict[str, str] = {
     # 报告 / 图表
     "generate_summary_report": "生成分析报告",
     "generate_chart": "生成图表",
+    # Agent 自身
+    "agent": "智能体推理",
 }
 
 
@@ -61,6 +63,7 @@ _STAGE_LABELS: dict[str, str] = {
     "intent_resolved": "意图识别完成",
     "dag_planned": "分析计划生成",
     "react_started": "开始智能分析",
+    "lookup_shortcut": "快速查询",
 }
 
 
@@ -84,6 +87,15 @@ def resolve_tool_label(name: str) -> str:
     if label is not None:
         return label
     return _fallback_label("tool", name)
+
+
+def resolve_model_label(name: str) -> str:
+    """解析 model span 的展示文案。
+
+    model span 的 name 是动态模型名（如 ``qwen3-max``），
+    无需静态映射，直接拼接通用前缀。
+    """
+    return f"LLM 推理 · {name}"
 
 
 def resolve_stage_label(name: str) -> str:

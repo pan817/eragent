@@ -10,7 +10,7 @@ from __future__ import annotations
 ANALYSIS_TYPE_DESCRIPTIONS: list[tuple[str, str]] = [
     ("three_way_match", "采购订单、收货单、发票的三单匹配异常检查"),
     ("price_variance", "实际采购价格与合同价/标准价的偏差分析"),
-    ("payment_compliance", "付款逾期、提前付款、折扣滥用等合规检查"),
+    ("payment_compliance", "付款逾期、提前付款、折扣滥用等合规检查；也覆盖\"应付未付/该付没付/欠款/到期未付\"类查询"),
     ("supplier_performance", "供应商交期、质量、KPI 综合绩效评估"),
     ("spend_analysis", "按品类/供应商维度的采购支出分布分析"),
     ("receipt_anomaly", "超量收货、拒收、延迟收货等收货异常分析"),

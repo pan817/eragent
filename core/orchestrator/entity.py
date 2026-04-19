@@ -141,12 +141,12 @@ async def validate_entities(
         discarded: list[str] = []
         errors: list[str] = []
 
-        # PO 号验证
+        # PO 号验证（days=0 不限时间——用户明确指定的 PO 可能创建于任何时间）
         po = params.get("po_number", "")
         if po:
             try:
                 orders = await asyncio.to_thread(
-                    repo.query_purchase_orders, po_number=po
+                    repo.query_purchase_orders, po_number=po, days=0
                 )
                 if not orders:
                     _logger.info("entity validation: po_number=%s not found in DB, discarded", po)
@@ -156,12 +156,12 @@ async def validate_entities(
                 _logger.warning("entity validation (po_number) failed: %s", exc)
                 errors.append(f"po_number: {type(exc).__name__}: {exc}")
 
-        # 供应商验证
+        # 供应商验证（days=0 不限时间）
         sid = params.get("supplier_id", "")
         if sid:
             try:
                 orders = await asyncio.to_thread(
-                    repo.query_purchase_orders, supplier_id=sid
+                    repo.query_purchase_orders, supplier_id=sid, days=0
                 )
                 if not orders:
                     _logger.info("entity validation: supplier_id=%s not found in DB, discarded", sid)
@@ -171,12 +171,12 @@ async def validate_entities(
                 _logger.warning("entity validation (supplier_id) failed: %s", exc)
                 errors.append(f"supplier_id: {type(exc).__name__}: {exc}")
 
-        # 发票号验证
+        # 发票号验证（days=0 不限时间）
         inv = params.get("invoice_number", "")
         if inv:
             try:
                 invoices = await asyncio.to_thread(
-                    repo.query_invoices, supplier_id="", status=""
+                    repo.query_invoices, supplier_id="", status="", days=0
                 )
                 if not any(i.get("invoice_number") == inv for i in invoices):
                     _logger.info("entity validation: invoice_number=%s not found in DB, discarded", inv)
@@ -186,12 +186,12 @@ async def validate_entities(
                 _logger.warning("entity validation (invoice_number) failed: %s", exc)
                 errors.append(f"invoice_number: {type(exc).__name__}: {exc}")
 
-        # 付款号验证
+        # 付款号验证（days=0 不限时间）
         pay = params.get("payment_number", "")
         if pay:
             try:
                 payments = await asyncio.to_thread(
-                    repo.query_payments, payment_number=pay
+                    repo.query_payments, payment_number=pay, days=0
                 )
                 if not payments:
                     _logger.info("entity validation: payment_number=%s not found in DB, discarded", pay)
@@ -201,12 +201,12 @@ async def validate_entities(
                 _logger.warning("entity validation (payment_number) failed: %s", exc)
                 errors.append(f"payment_number: {type(exc).__name__}: {exc}")
 
-        # 收货号验证
+        # 收货号验证（days=0 不限时间）
         rcv = params.get("receipt_number", "")
         if rcv:
             try:
                 receipts = await asyncio.to_thread(
-                    repo.query_receipts, po_number="", supplier_id=""
+                    repo.query_receipts, po_number="", supplier_id="", days=0
                 )
                 if not any(
                     r.get("receipt_id") == rcv or r.get("gr_number") == rcv
@@ -275,12 +275,14 @@ async def enrich_entities(
             _logger.info("entity enriched: %s=%s → %s=%s", src, src_val, tgt, tgt_val)
             enriched_pairs.append(f"{src}={src_val}→{tgt}={tgt_val}")
 
+        # 所有级联查询统一使用 days=0（不限时间）——用户指定的实体可能创建于任何时间
+
         # 1. payment_number → invoice_number
         pay = params.get("payment_number", "")
         if pay and not params.get("invoice_number"):
             try:
                 payments = await asyncio.to_thread(
-                    repo.query_payments, payment_number=pay
+                    repo.query_payments, payment_number=pay, days=0
                 )
                 if payments:
                     inv_num = payments[0].get("invoice_number", "")
@@ -296,7 +298,7 @@ async def enrich_entities(
         if rcv:
             try:
                 receipts = await asyncio.to_thread(
-                    repo.query_receipts, po_number="", supplier_id=""
+                    repo.query_receipts, po_number="", supplier_id="", days=0
                 )
                 matched = [r for r in receipts if r.get("receipt_id") == rcv or r.get("gr_number") == rcv]
                 if matched:
@@ -319,7 +321,7 @@ async def enrich_entities(
         if inv:
             try:
                 invoices = await asyncio.to_thread(
-                    repo.query_invoices, supplier_id="", status=""
+                    repo.query_invoices, supplier_id="", status="", days=0
                 )
                 matched = [i for i in invoices if i.get("invoice_number") == inv]
                 if matched:
@@ -342,7 +344,7 @@ async def enrich_entities(
         if po and not params.get("supplier_id"):
             try:
                 orders = await asyncio.to_thread(
-                    repo.query_purchase_orders, po_number=po
+                    repo.query_purchase_orders, po_number=po, days=0
                 )
                 if orders:
                     sid = orders[0].get("supplier_id", "")

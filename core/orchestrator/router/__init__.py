@@ -383,10 +383,11 @@ class IntentRouter:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings: Settings = settings or get_settings()
-        self._seeds_store: Any = None  # 延迟初始化的 VectorStore
+        self._seeds_store: Any = None  # 延迟初始化的 VectorStore（L2，保留供兼容）
         self._seeds_loaded: bool = False
-        self._llm: Any = None  # 延迟初始化的 ChatOpenAI
+        self._llm: Any = None  # 延迟初始化的 ChatOpenAI（L3，保留供兼容）
         self._case_store: Any = None  # 延迟注入的 DAGCaseStore
+        self._unified_router: Any = None  # 统一 LLM 路由器（延迟初始化）
         _ir = self._settings.intent_routing
         _logger.info(
             "intent_routing settings: l1=%.2f/%.2f l2_sim=%.2f l2_topk=%d "
@@ -403,9 +404,14 @@ class IntentRouter:
 
     # ── 公开接口 ───────────────────────────────────────────────────
 
-    def route(self, query: str, analyst_role: str = "general") -> QuerySignal:
+    def route(
+        self,
+        query: str,
+        analyst_role: str = "general",
+        session_entities: dict[str, Any] | None = None,
+    ) -> QuerySignal:
         """路由查询，返回完整的 QuerySignal（供 Orchestrator DAG 分支使用）。"""
-        signal = self._route(query, analyst_role=analyst_role)
+        signal = self._route(query, analyst_role=analyst_role, session_entities=session_entities)
         _logger.info(
             "intent routed: level=%d type=%s confidence=%.3f reason=%s",
             signal.route_level,
@@ -434,8 +440,13 @@ class IntentRouter:
 
     # ── 核心路由 ─────────────────────────────────────────────────────
 
-    def _route(self, query: str, analyst_role: str = "general") -> QuerySignal:
-        """三级路由主逻辑，记录完整决策过程到 trace。"""
+    def _route(
+        self,
+        query: str,
+        analyst_role: str = "general",
+        session_entities: dict[str, Any] | None = None,
+    ) -> QuerySignal:
+        """路由主逻辑：L0 bypass + 统一 LLM 调用。"""
         from core.observability.tracing import record_span
 
         params = _extract_params(query, self._settings.analysis.entity_patterns)
@@ -445,13 +456,11 @@ class IntentRouter:
         }
 
         with record_span("intent", "route_decision") as attrs:
-            # 前置 bypass 分类：CHITCHAT / META / RECALL 跳过 L1/L2
+            # L0 bypass：CHITCHAT / META / RECALL 跳过 LLM
             bypass_kind = _classify_bypass(query)
-            trace_data["bypass_l1_l2"] = bypass_kind is not None
+            trace_data["bypass"] = bypass_kind is not None
             trace_data["bypass_kind"] = bypass_kind.value if bypass_kind else None
 
-            # CHITCHAT / META / RECALL 直接生成 sentinel signal，不跑 L1/L2/L3
-            # （这三类下游处理完全确定：模板答 / 拒答 / 回 ReAct 看短期记忆）
             if bypass_kind is not None:
                 signal = self._build_bypass_signal(
                     query=query,
@@ -465,80 +474,28 @@ class IntentRouter:
                 attrs.update(trace_data)
                 return signal
 
-            # Level 1：关键词命中率
-            with record_span("intent.l1", "keyword_match") as l1_attrs:
-                l1_scores = self._evaluate_all_rules(query)
-                trace_data["l1_scores"] = l1_scores
-                signal = self._try_level1(query, params)
-                l1_attrs["rule_count"] = len(l1_scores)
-                l1_attrs["matched_rules"] = [
-                    s["rule"] for s in l1_scores if s.get("matched")
-                ]
-                l1_attrs["hit"] = signal is not None
-                if signal is not None:
-                    l1_attrs["result_type"] = (
-                        signal.keywords[0] if signal.keywords else ""
-                    )
-                    l1_attrs["confidence"] = signal.confidence
-            if signal is not None:
-                trace_data["hit_level"] = 1
-                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                trace_data["confidence"] = signal.confidence
-                trace_data["reasoning"] = signal.reasoning
-                attrs.update(trace_data)
-                return signal
+            # 统一 LLM 调用（替代 L1/L2/L3 + ParamExtractor）
+            if self._unified_router is None:
+                from core.orchestrator.unified_router import UnifiedRouter
+                self._unified_router = UnifiedRouter(settings=self._settings)
 
-            # Level 2：Chroma 语义匹配
-            with record_span("intent.l2", "semantic_search") as l2_attrs:
-                l2_results = self._search_seeds_for_trace(query)
-                trace_data["l2_results"] = l2_results
-                signal = self._try_level2(query, params)
-                l2_attrs["top_k"] = len(l2_results)
-                l2_attrs["top_similarity"] = (
-                    l2_results[0]["similarity"] if l2_results else None
-                )
-                l2_attrs["hit"] = signal is not None
-                if signal is not None:
-                    l2_attrs["result_type"] = (
-                        signal.keywords[0] if signal.keywords else ""
-                    )
-                    l2_attrs["confidence"] = signal.confidence
-            if signal is not None:
-                trace_data["hit_level"] = 2
-                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                trace_data["confidence"] = signal.confidence
-                trace_data["reasoning"] = signal.reasoning
-                attrs.update(trace_data)
-                return signal
+            signal = self._unified_router.route(
+                query=query,
+                session_entities=session_entities,
+                analyst_role=analyst_role,
+            )
 
-            # Level 2.5：案例库检索（L2 未命中时尝试）
-            with record_span("intent.l25", "case_search") as l25_attrs:
-                signal = self._try_level25(query, params)
-                l25_attrs["enabled"] = self._settings.intent_routing.l25_enabled
-                l25_attrs["hit"] = signal is not None
-                if signal is not None:
-                    l25_attrs["result_type"] = (
-                        signal.keywords[0] if signal.keywords else ""
-                    )
-                    l25_attrs["confidence"] = signal.confidence
-            if signal is not None:
-                trace_data["hit_level"] = 25
-                trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
-                trace_data["confidence"] = signal.confidence
-                trace_data["reasoning"] = signal.reasoning
-                attrs.update(trace_data)
-                return signal
+            # 合并 regex 提取的实体（LLM 未提取到时用 regex 兜底）
+            for k, v in params.items():
+                if k != "days" and v and k not in signal.entities:
+                    signal.entities[k] = v
 
-            # Level 3：LLM 分类（注入角色偏好）
-            with record_span("intent.l3", "llm_classify") as l3_attrs:
-                signal = self._try_level3(query, params, analyst_role=analyst_role)
-                l3_attrs["result_type"] = signal.keywords[0] if signal.keywords else ""
-                l3_attrs["confidence"] = signal.confidence
-                l3_attrs["params_merged"] = signal.entities.copy()
-            trace_data["hit_level"] = 3
+            trace_data["hit_level"] = signal.route_level
             trace_data["result_type"] = signal.keywords[0] if signal.keywords else ""
             trace_data["confidence"] = signal.confidence
             trace_data["reasoning"] = signal.reasoning
+            trace_data["is_cross_entity"] = signal.is_cross_entity
+            trace_data["resolved_query"] = signal.resolved_query
             trace_data["params_merged"] = signal.entities.copy()
             attrs.update(trace_data)
             return signal
@@ -986,7 +943,6 @@ class IntentRouter:
 ## intent_kind 枚举（先选这个，再决定其他字段）
 - analysis: 用户要做某种异常检测/合规检查/绩效评估等"分析"工作（必须能落入下面 11 类 analysis_type 之一）。**即使用户未指定时间范围、供应商、PO 编号等参数，只要分析意图明确就判 analysis**，系统会自动使用默认参数执行。
 - data_lookup: 纯事实查询/单据检索（"查最新 PO"/"列出 SUP-001 的发票"/"看看这单的金额"），不涉及异常或评估
-- clarification: 用户意图本身不明确，无法判定属于哪种 analysis_type 或 data_lookup（如"帮我看看采购"过于笼统，无法确定要做什么类型的分析）。**注意：仅当意图本身模糊时才判 clarification；如果能识别出具体 analysis_type，即使缺少时间/实体参数也应判 analysis**
 - meta: 系统能力或数据元信息询问（"你支持哪些分析"/"数据更新到什么时候"）
 - chitchat: 闲聊/问候/与采购无关的常识/情感问答（"今天天气"/"hi"）
 - out_of_scope: 明确指向非 P2P 业务模块的场景（如"销售订单分析"/"HR 数据"/"生产排程"）。**若查询与采购流程有任何关联（即使间接），应优先判 analysis 并选最相关的 analysis_type**
@@ -998,15 +954,14 @@ class IntentRouter:
 1. 先判 intent_kind，再决定其他字段。**核心原则：尽量判为 analysis 让系统执行，而不是拒绝用户**。
 2. 用户在"查/查询/查看/列出/最新/最近"等动词配合业务实体（PO/发票/供应商/订单等）时，优先判 data_lookup，而不是强行归入某个 analysis 类型。
 3. 只有"明确无业务关联"的才判 chitchat（如问候/天气/闲聊）；只有"明确指向非 P2P 模块"才判 out_of_scope（如销售/HR/生产）。
-4. **禁止因缺少时间范围、供应商、PO 编号等可选参数就判 clarification**。系统有默认时间范围和全量分析能力，只有当分析意图本身无法判断时才用 clarification。
+4. 缺少时间范围、供应商、PO 编号等参数不影响判定，系统有默认参数可执行。意图模糊时归 analysis + comprehensive，**禁止返回 clarification**。
 5. analysis 类型选最具体的；只有明确需要跨多个维度时才选 comprehensive，"模糊但相关"不要强行归为 comprehensive。
-6. clarification 时在 missing_params 中列出缺失字段（取值：``time_range`` / ``supplier_id`` / ``po_number`` / ``analysis_scope`` 中的一个或多个）。
 
 ## confidence 判定锚点（严格按区间给分，不要一律给 0.8/0.9）
 - >0.9: 查询直接命中某 intent_kind+type 的核心名词（如"三路匹配"/"重复发票"），语义无歧义
 - 0.7-0.9: 语义强相关需要推断（如"发票和收货对不上"→analysis/three_way_match）
 - 0.5-0.7: 多类共存或表述模糊
-- <0.5: 表述极度模糊且无法推断出任何 analysis_type；优先尝试 analysis + comprehensive，实在无法关联才考虑 clarification
+- <0.5: 表述极度模糊且无法推断出任何 analysis_type；归入 analysis + comprehensive 让系统尝试执行
 
 ## 参数抽取规则
 - 只抽取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null。
@@ -1022,7 +977,7 @@ class IntentRouter:
 - "今天天气怎么样" → {{"intent_kind":"chitchat","type":"","confidence":0.95,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "帮我看看销售订单的回款情况" → {{"intent_kind":"out_of_scope","type":"","confidence":0.9,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 - "分析最近 30 天供应商 SUP-001 的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"missing_params":[],"supplier_id":"SUP-001","po_number":null,"days":30}}
-- "帮我看看采购" → {{"intent_kind":"clarification","type":"","confidence":0.4,"missing_params":["analysis_scope"],"supplier_id":null,"po_number":null,"days":null}}
+- "帮我看看采购" → {{"intent_kind":"analysis","type":"comprehensive","confidence":0.5,"missing_params":[],"supplier_id":null,"po_number":null,"days":null}}
 
 用户查询：{query}"""
 
@@ -1128,10 +1083,7 @@ class IntentRouter:
 
             # 兼容老 prompt 输出（仅有 type，没有 intent_kind）
             if not intent_kind_str:
-                if analysis_type_str == "unknown" or not analysis_type_str:
-                    intent_kind_str = IntentKind.CLARIFICATION.value
-                else:
-                    intent_kind_str = IntentKind.ANALYSIS.value
+                intent_kind_str = IntentKind.ANALYSIS.value
 
             try:
                 intent_kind = IntentKind(intent_kind_str)
@@ -1222,24 +1174,25 @@ class IntentRouter:
             )
 
         if intent_kind == IntentKind.CLARIFICATION:
-            # 若 LLM 同时给了 analysis_type 提示，保留下来供追问语句使用
-            kw = _KW_CLARIFICATION
+            # CLARIFICATION 已废弃——降级为 ANALYSIS/comprehensive，
+            # 遵循"尽量回复"原则，让 ReAct 尝试执行。
+            kw = AnalysisType.COMPREHENSIVE.value
             try:
-                AnalysisType(analysis_type_str)  # 仅校验
-                kw = analysis_type_str  # 借用 analysis_type 字符串作为 hint
+                AnalysisType(analysis_type_str)
+                kw = analysis_type_str
             except ValueError:
                 pass
             _logger.info(
-                "L3 classified: kind=clarification missing=%s confidence=%.3f",
-                cleaned_missing, confidence,
+                "L3 returned clarification → downgrade to analysis/%s "
+                "confidence=%.3f",
+                kw, confidence,
             )
             return QuerySignal(
                 **common,
-                intent_kind=IntentKind.CLARIFICATION,
+                intent_kind=IntentKind.ANALYSIS,
                 keywords=[kw],
-                missing_params=cleaned_missing,
                 reasoning=(
-                    f"L3 判定为信息不足，缺失参数 {cleaned_missing}，"
+                    f"L3 原判 clarification，降级为 analysis/{kw}，"
                     f"置信度 {confidence:.1%}"
                 ),
             )

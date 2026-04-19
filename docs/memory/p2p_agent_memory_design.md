@@ -2163,6 +2163,130 @@ memory:
 
 ---
 
+## I. 路由架构重构：统一 LLM 调用
+
+### I1. 重构动机
+
+现有三级路由（L1 关键词 → L2 向量 → L3 LLM）+ 独立 ParamExtractor 存在根本缺陷：
+
+1. **跨实体查询无法处理**："查询这个支付单对应的 PO"被 L1 关键词"po"匹配到 query_purchase_orders，但不理解"对应的"是跨实体关联
+2. **两次 LLM 调用**：L3 分类 (~800ms) + ParamExtractor (~800ms) = ~1600ms，但 ParamExtractor 已不可省略
+3. **L1/L2 命中率有限**：L1 分析类型命中约 60%~70%，未命中仍要走 L3；L2 向量匹配命中率更低
+4. **补丁式修复不可持续**：每发现一种新的跨实体/复杂查询模式就要加正则/规则
+
+### I2. 重构方案
+
+**保留 L0 bypass + 统一 LLM 调用，删除 L1 分析类型匹配和 L2 向量查询。**
+
+```
+用户 query
+  │
+  ├─ L0 bypass（保留，零成本，~1ms）
+  │    ├─ CHITCHAT（严格正则匹配）→ 模板响应
+  │    ├─ META（子串匹配）→ 模板响应
+  │    └─ RECALL（回溯词匹配，无强分析意图）→ 回溯历史
+  │
+  └─ 统一 LLM 调用（一次完成分类 + 参数提取，~1000ms）
+       │
+       输入：query + 当前日期 + session_entities（指代消解用）
+       │
+       输出 JSON：
+       {
+         "intent_kind": "analysis|data_lookup|clarification|out_of_scope",
+         "analysis_type": "three_way_match|price_variance|...|",
+         "confidence": 0.0~1.0,
+         "is_cross_entity": false,
+         "entities": {
+           "po_number": null,
+           "supplier_id": "SUP-003",
+           "payment_number": "PAY-2024-0054",
+           "invoice_number": null,
+           "days": 30,
+           "limit": 1,
+           "order_by": "date_desc"
+         },
+         "resolved_query": "查询支付单 PAY-2024-0054 对应的采购订单",
+         "missing_params": []
+       }
+       │
+       ├─ DATA_LOOKUP + !is_cross_entity → Lookup 快捷路径
+       ├─ DATA_LOOKUP + is_cross_entity  → ReAct（多步推理）
+       ├─ ANALYSIS → DAG 或 ReAct（按 confidence 决策）
+       ├─ CLARIFICATION → 追问模板
+       └─ OUT_OF_SCOPE → 拒绝模板
+```
+
+### I3. 统一 LLM Prompt 设计
+
+```
+你是 ERP 采购分析系统的意图解析器。一次性完成以下任务：
+1. 判定用户意图类型（intent_kind）
+2. 识别分析类型（analysis_type）
+3. 提取所有实体和参数
+4. 判断是否为跨实体关联查询
+5. 完成指代消解（结合 session_entities 上下文）
+
+## 输入
+- 用户查询：{query}
+- 当前日期：{date}
+- 会话实体上下文：{session_entities}（上一轮查询涉及的实体）
+
+## 输出（严格 JSON）
+{schema}
+
+## 关键规则
+1. is_cross_entity=true 当查询涉及从一种实体跳转到另一种（如"这个付款单的PO"/"这个供应商的发票"）
+2. 指代消解：结合 session_entities，将"这个/该/上次"替换为具体实体 ID，写入 resolved_query
+3. entities 中只填能确定的具体值，不确定的填 null
+4. limit/order_by：从"最新的一个""前 N 条"等表述中提取
+5. days：从"最近 N 天""本月"等时间表述中计算
+```
+
+### I4. 变更影响
+
+| 组件 | 变更 | 说明 |
+|------|------|------|
+| `core/orchestrator/router/__init__.py` | **大幅简化** | 删除 L1 分析类型匹配 + L2 向量查询，保留 L0 bypass + 统一 LLM 调用 |
+| `core/orchestrator/param_extractor.py` | **删除** | 合并进统一 LLM 调用 |
+| `config/intent_seeds.yaml` | **删除** | L2 向量查询不再需要 |
+| `core/orchestrator/signal.py` | **扩展** | QuerySignal 新增 is_cross_entity / resolved_query / limit / order_by |
+| `core/orchestrator/lookup.py` | **简化** | 删除 `_parse_query_constraints`（LLM 直接输出 limit/order_by），删除跨实体正则检测（LLM 直接判断 is_cross_entity） |
+| `core/orchestrator/orchestrator.py` | **简化** | 删除 `_param_extractor` 调用，统一从 LLM 结果取参数 |
+| `core/orchestrator/entity.py` | **简化** | 指代消解由统一 LLM 完成（session_entities 作为 prompt 输入），正则消解可保留作为 LLM 失败的兜底 |
+
+### I5. 性能对比
+
+| 维度 | 重构前 | 重构后 |
+|------|--------|--------|
+| LLM 调用次数 | 2（L3 + ParamExtractor） | **1** |
+| 总延迟 | L1/L2(~5ms) + L3(~800ms) + Param(~800ms) = **~1600ms** | bypass(~1ms) + 统一 LLM(~1000ms) = **~1000ms** |
+| Token 消耗 | L3 prompt ~200 + Param prompt ~300 = **~500 tok** | 统一 prompt **~400 tok**（合并后更紧凑） |
+| 准确性 | L1 误匹配 + L3/Param 信息割裂 | **更高**（LLM 同时看到意图和实体） |
+| 代码复杂度 | L1 + L2 + L3 + ParamExtractor = **4 个模块** | bypass + 统一 LLM = **1 个模块** |
+
+### I6. 实施计划
+
+#### Phase R1：统一 LLM 调用实现（2 天）
+- 新增 `core/orchestrator/unified_router.py`（统一 LLM prompt + 解析）
+- 扩展 `QuerySignal`（新增 is_cross_entity / resolved_query / limit / order_by）
+- 改造 `IntentRouter.route()`：L0 bypass → 统一 LLM（删除 L1/L2/L3/ParamExtractor 调用链）
+
+#### Phase R2：Orchestrator 适配（1 天）
+- 删除 `self._param_extractor`
+- `analyze()` 中使用统一 LLM 结果的 entities / is_cross_entity / resolved_query
+- lookup 快捷路径用 `signal.is_cross_entity` 判断是否降级 ReAct
+
+#### Phase R3：清理 + 测试（1 天）
+- 删除 `core/orchestrator/param_extractor.py`
+- 删除 `config/intent_seeds.yaml`
+- 清理 `router/__init__.py` 中 L1 分析类型匹配 + L2 向量查询代码
+- 更新所有相关测试
+- 端到端验证：普通查询 / 跨实体查询 / 指代消解 / bypass
+
+**总工期**：4 天
+
+---
+
 ### H19. 改造后代码结构变化
 
 #### 改造前 core/memory/ 目录

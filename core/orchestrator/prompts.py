@@ -75,44 +75,20 @@ _SUPPORTED_SCENARIO_TEXT = (
     "重复发票、早付折扣、采购周期、供应商集中度，以及综合跨域分析"
 )
 
-# clarification 时按缺失参数生成具体追问句
-_MISSING_PARAM_HINTS: dict[str, str] = {
-    "time_range": "时间范围（如\"最近 30 天\"/\"本月\"）",
-    "supplier_id": "供应商 ID（如 SUP-001）",
-    "po_number": "采购订单号（如 PO-2024-0001）",
-    "invoice_number": "发票号（如 INV-2024-0001）",
-    "analysis_scope": "分析范围（具体单据/品类/部门）",
-}
-
-
 def render_intent_kind_template(signal: Any) -> str:
     """根据 ``signal.intent_kind`` 渲染早退响应文本（Markdown）。
 
     设计目标：
-    - CLARIFICATION：按 ``missing_params`` 给出具体追问，而非泛泛"信息不足"。
     - META：列出系统支持范围，附使用提示。
     - CHITCHAT：简短礼貌回应 + 引导回到业务话题。
     - OUT_OF_SCOPE：明确告知本系统仅覆盖采购，建议另寻渠道。
+
+    注：CLARIFICATION 已废弃——意图模糊时归入 analysis/comprehensive
+    由 ReAct 执行，不再前置拦截。
     """
     from core.orchestrator.signal import IntentKind
 
     kind = signal.intent_kind
-
-    if kind == IntentKind.CLARIFICATION:
-        missing = signal.missing_params or []
-        if missing:
-            hints = "\n".join(
-                f"- {_MISSING_PARAM_HINTS.get(p, p)}" for p in missing
-            )
-            return (
-                "需要您补充以下信息以便启动分析：\n\n"
-                f"{hints}\n\n"
-                "示例：`分析 SUP-001 最近 30 天的价格差异`。"
-            )
-        return (
-            "您的分析意图已识别，但缺少关键参数。请补充时间范围、供应商或单据号后重试。\n\n"
-            "示例：`分析 SUP-001 最近 30 天的价格差异`。"
-        )
 
     if kind == IntentKind.META:
         return (

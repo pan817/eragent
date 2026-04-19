@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.orchestrator.lookup import (
+    _parse_query_constraints,
     execute_lookup,
     format_lookup_result,
     resolve_lookup_tool,
@@ -28,7 +29,7 @@ class TestResolveLookupTool:
     """resolve_lookup_tool 路由逻辑测试。"""
 
     def test_path_a_po_number(self) -> None:
-        """路径 A：有 po_number → query_purchase_orders。"""
+        """路径 A：有 po_number → query_purchase_orders，days=0（不限时间）。"""
         result = resolve_lookup_tool(
             {"po_number": "PO-2024-001", "days": 30}, "查看PO-2024-001"
         )
@@ -36,10 +37,10 @@ class TestResolveLookupTool:
         tool_name, kwargs = result
         assert tool_name == "query_purchase_orders"
         assert kwargs["po_number"] == "PO-2024-001"
-        assert kwargs["days"] == 30
+        assert kwargs["days"] == 0  # 有实体编号时不限时间
 
     def test_path_a_invoice_number(self) -> None:
-        """路径 A：有 invoice_number → query_invoices。"""
+        """路径 A：有 invoice_number → query_invoices，days=0（不限时间）。"""
         result = resolve_lookup_tool(
             {"invoice_number": "INV-001", "days": 7}, "查看发票INV-001"
         )
@@ -47,7 +48,7 @@ class TestResolveLookupTool:
         tool_name, kwargs = result
         assert tool_name == "query_invoices"
         assert kwargs["invoice_number"] == "INV-001"
-        assert kwargs["days"] == 7
+        assert kwargs["days"] == 0  # 有实体编号时不限时间
 
     def test_path_a_payment_number(self) -> None:
         """路径 A：有 payment_number → query_payments。"""
@@ -162,6 +163,61 @@ class TestResolveLookupTool:
         tool_name, _ = result
         # 路径 A 不识别 receipt_number，路径 B 命中"收货单"关键词
         assert tool_name == "query_receipts"
+
+
+# ── _parse_query_constraints 测试 ─────────────────────────────────────
+
+
+class TestParseQueryConstraints:
+    """从 query 中解析 limit 和 order_by。"""
+
+    def test_latest_one(self) -> None:
+        limit, order = _parse_query_constraints("查询最新的一个PO")
+        assert limit == 1
+        assert order == "date_desc"
+
+    def test_latest_n(self) -> None:
+        limit, order = _parse_query_constraints("查最新的3条发票")
+        assert limit == 3
+        assert order == "date_desc"
+
+    def test_recent_5(self) -> None:
+        limit, order = _parse_query_constraints("最近5笔付款")
+        assert limit == 5
+        assert order == "date_desc"
+
+    def test_first_n(self) -> None:
+        limit, order = _parse_query_constraints("前10个采购订单")
+        assert limit == 10
+        assert order == "date_desc"
+
+    def test_earliest_one(self) -> None:
+        limit, order = _parse_query_constraints("最早的一个PO")
+        assert limit == 1
+        assert order == "date_asc"
+
+    def test_amount_largest(self) -> None:
+        limit, order = _parse_query_constraints("金额最大的3笔订单")
+        assert limit == 3
+        assert order == "amount_desc"
+
+    def test_no_constraint(self) -> None:
+        limit, order = _parse_query_constraints("查所有采购订单")
+        assert limit == 0
+        assert order == ""
+
+    def test_resolve_uses_constraints(self) -> None:
+        """resolve_lookup_tool should use parsed constraints."""
+        tool_name, kwargs = resolve_lookup_tool({}, "查询最新的一个PO")  # type: ignore
+        assert tool_name == "query_purchase_orders"
+        assert kwargs.get("limit") == 1
+        assert kwargs.get("order_by") == "date_desc"
+        assert kwargs.get("days") == 365  # relaxed from 30
+
+    def test_resolve_relaxes_days_with_limit(self) -> None:
+        """When limit is set, days should be relaxed to 365."""
+        _, kwargs = resolve_lookup_tool({"days": 30}, "最新的一条发票")  # type: ignore
+        assert kwargs["days"] == 365
 
 
 # ── format_lookup_result 测试 ─────────────────────────────────────────

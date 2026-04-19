@@ -197,6 +197,10 @@ class P2PAgent:
                 thread_id,
             )
 
+            # 截断前实体保全：从即将丢弃的消息中提取实体到 session_entities
+            to_discard = messages[:len(messages) - max_messages]
+            self._preserve_entities_before_truncation(thread_id, to_discard)
+
             # 保留最近 N 条
             channel_values["messages"] = messages[-max_messages:]
             existing.checkpoint["channel_values"] = channel_values
@@ -211,6 +215,38 @@ class P2PAgent:
 
         except Exception as exc:  # noqa: BLE001
             _logger.warning("checkpointer truncation failed (non-blocking): %s", exc)
+
+    def _preserve_entities_before_truncation(
+        self, thread_id: str, to_discard: list,
+    ) -> None:
+        """从即将丢弃的消息中提取实体，保全到 session_entities。"""
+        try:
+            from core.orchestrator.router import _extract_params
+
+            extracted: dict[str, str] = {}
+            for msg in to_discard:
+                content = getattr(msg, "content", "")
+                if content and isinstance(content, str):
+                    params = _extract_params(
+                        content, self._settings.analysis.entity_patterns,
+                    )
+                    for k, v in params.items():
+                        if k != "days" and v and k not in extracted:
+                            extracted[k] = v
+
+            if extracted:
+                from core.memory.short_term import ShortTermMemory
+
+                stm = ShortTermMemory(settings=self._settings)
+                stm.save_entity_context(thread_id, extracted)
+                _logger.info(
+                    "entities preserved before truncation: thread=%s entities=%s",
+                    thread_id, list(extracted.keys()),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "entity preservation before truncation failed (non-blocking): %s", exc,
+            )
 
     def _estimate_tool_definitions_tokens(self) -> int:
         """估算工具定义（function schema）的 token 数量。
@@ -709,6 +745,13 @@ class P2PAgent:
             f"[分析参数] 时间范围: 最近 {time_range_days} 天"
             f"{output_hint}"
         )
+
+        # 注入 orchestrator 解析出的实体参数（确保 agent 看到正确的实体编号）
+        entity_keys = ("po_number", "supplier_id", "invoice_number",
+                       "payment_number", "receipt_number")
+        # 从 DAG inputs 传入的 kwargs 中获取实体参数
+        # (agent.analyze 不直接接收 parsed_params，通过 query 中的实体信息传递)
+        # 如果 query 中已包含实体编号（如 enhanced_query），则无需额外注入
 
         invoke_messages: list[tuple[str, str]] = []
 
