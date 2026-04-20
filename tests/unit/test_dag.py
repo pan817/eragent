@@ -65,8 +65,8 @@ class TestToolRegistry:
 
     def test_build_default_registry(self) -> None:
         reg = build_default_registry()
-        # 19 canonical + 5 aliases = 24
-        assert len(reg.tool_names) == 24
+        # 25 canonical + 5 aliases = 30
+        assert len(reg.tool_names) == 30
         # aliases resolve correctly
         assert reg.get("query_goods_receipts") is reg.get("query_receipts")
         assert reg.get("calculate_ppv") is reg.get("run_price_variance_analysis")
@@ -181,12 +181,12 @@ class TestDAGValidator:
 class TestDAGTemplates:
 
     def test_load_three_way_match(self) -> None:
-        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {"days": 60, "supplier_id": "SUP-001"})
+        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {"days": 60, "vendor_id": "SUP-001"})
         assert dag is not None
         assert len(dag) == 5
         # 参数应被替换
         assert dag[0]["inputs"]["days"] == 60
-        assert dag[0]["inputs"]["supplier_id"] == "SUP-001"
+        assert dag[0]["inputs"]["vendor_id"] == "SUP-001"
 
     def test_load_price_variance(self) -> None:
         dag = load_dag_template(AnalysisType.PRICE_VARIANCE, {})
@@ -199,7 +199,7 @@ class TestDAGTemplates:
         assert len(dag) == 4
 
     def test_load_supplier_performance(self) -> None:
-        dag = load_dag_template(AnalysisType.SUPPLIER_PERFORMANCE, {"supplier_id": "SUP-001"})
+        dag = load_dag_template(AnalysisType.SUPPLIER_PERFORMANCE, {"vendor_id": "SUP-001"})
         assert dag is not None
         assert len(dag) == 3
 
@@ -225,7 +225,7 @@ class TestDAGTemplates:
         """COMPREHENSIVE + supplier_id → 供应商综合分析 DAG。"""
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
-            {"supplier_id": "SUP-001", "days": 30},
+            {"vendor_id": "SUP-001", "days": 30},
         )
         assert dag is not None
         assert len(dag) == 5
@@ -237,7 +237,7 @@ class TestDAGTemplates:
         """COMPREHENSIVE + payment_number → 单笔付款单合规 DAG。"""
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
-            {"payment_number": "PAY-001", "days": 30},
+            {"check_number": "PAY-001", "days": 30},
         )
         assert dag is not None
         assert len(dag) == 4
@@ -249,7 +249,7 @@ class TestDAGTemplates:
         """COMPREHENSIVE + invoice_number → 单笔发票分析 DAG。"""
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
-            {"invoice_number": "INV-001", "days": 30},
+            {"invoice_num": "INV-001", "days": 30},
         )
         assert dag is not None
         assert len(dag) == 5
@@ -261,7 +261,7 @@ class TestDAGTemplates:
         """同时有 payment_number 和 po_number 时，付款单优先。"""
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
-            {"payment_number": "PAY-001", "po_number": "PO-001"},
+            {"check_number": "PAY-001", "po_number": "PO-001"},
         )
         assert dag is not None
         assert len(dag) == 4  # payment_single DAG
@@ -270,7 +270,7 @@ class TestDAGTemplates:
         """同时有 po_number 和 supplier_id 时，PO 维度优先。"""
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
-            {"po_number": "PO-001", "supplier_id": "SUP-001"},
+            {"po_number": "PO-001", "vendor_id": "SUP-001"},
         )
         assert dag is not None
         assert len(dag) == 7  # PO 风险 DAG
@@ -278,7 +278,7 @@ class TestDAGTemplates:
     def test_default_params(self) -> None:
         dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {})
         assert dag[0]["inputs"]["days"] == 30
-        assert dag[0]["inputs"]["supplier_id"] == ""
+        assert dag[0]["inputs"]["vendor_id"] == ""
 
 
 # ============================================================

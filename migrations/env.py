@@ -87,6 +87,7 @@ def run_migrations_online() -> None:
         if use_advisory_lock:
             connection.execute(text("SELECT pg_advisory_lock(:id)"), {"id": _MIGRATION_LOCK_ID})
 
+        migration_ok = False
         try:
             context.configure(
                 connection=connection,
@@ -94,10 +95,12 @@ def run_migrations_online() -> None:
             )
             with context.begin_transaction():
                 context.run_migrations()
+            migration_ok = True
         finally:
             if use_advisory_lock:
-                # rollback any failed transaction before releasing advisory lock
-                connection.rollback()
+                if not migration_ok:
+                    # rollback failed transaction before releasing advisory lock
+                    connection.rollback()
                 connection.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _MIGRATION_LOCK_ID})
                 connection.commit()
 

@@ -109,7 +109,7 @@ def test_middleware_tool_and_model_spans(store):
         return "tool-result"
 
     result = mw.wrap_tool_call(
-        _FakeToolCallRequest("query_purchase_orders", {"supplier_id": "SUP-001"}),
+        _FakeToolCallRequest("query_purchase_orders", {"vendor_id": "SUP-001"}),
         tool_handler,
     )
     assert result == "tool-result"
@@ -138,7 +138,7 @@ def test_middleware_tool_and_model_spans(store):
     assert types == ["agent", "model", "tool"]
     tool_span = next(s for s in spans if s.span_type == "tool")
     assert tool_span.name == "query_purchase_orders"
-    assert tool_span.attributes["args"] == {"supplier_id": "SUP-001"}
+    assert tool_span.attributes["args"] == {"vendor_id": "SUP-001"}
 
 
 def test_middleware_records_tool_error(store):

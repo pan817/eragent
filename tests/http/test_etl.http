@@ -1,0 +1,65 @@
+### ============================================================
+### Graphiti ETL Admin API - HTTP test file
+### Usage: VS Code REST Client plugin -> click "Send Request"
+### Prerequisite: uvicorn api.main:app --reload
+###              NEO4J_ENABLED=true in .env
+### ============================================================
+
+### Variable
+@host = http://127.0.0.1:8080
+@prefix = {{host}}/api/v1/ptp-agent/admin/etl
+
+
+### ----- 1. ETL Table Status (watermarks) -----
+
+GET {{prefix}}/status
+Accept: application/json
+
+
+### ----- 2. ETL Metrics -----
+
+GET {{prefix}}/metrics
+Accept: application/json
+
+
+### ----- 3. Trigger Full Sync (async, returns immediately) -----
+
+POST {{prefix}}/trigger
+Content-Type: application/json
+
+{
+    "sync_type": "full"
+}
+
+
+### ----- 4. Trigger Incremental Sync (async) -----
+
+POST {{prefix}}/trigger
+Content-Type: application/json
+
+{
+    "sync_type": "incremental"
+}
+
+
+### ----- 5. Check Sync Task Status -----
+### Poll this after triggering to see running/completed/failed
+
+GET {{prefix}}/sync-status
+Accept: application/json
+
+
+### ----- 6. ETL Traces (recent sync timing trees) -----
+
+GET {{prefix}}/traces
+Accept: application/json
+
+
+### ----- 7. Init Mock Data (seed 20 tables before ETL) -----
+
+POST {{host}}/api/v1/ptp-agent/init-data
+
+
+### ----- 8. Health Check -----
+
+GET {{host}}/health

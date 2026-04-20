@@ -79,7 +79,7 @@ class P2PRepository:
 
     def query_purchase_orders(
         self,
-        supplier_id: str = "",
+        vendor_id: str = "",
         status: str = "",
         days: int = 30,
         po_number: str = "",
@@ -91,9 +91,9 @@ class P2PRepository:
             stmt = (
                 select(
                     PoHeader.po_number,
-                    PoHeader.supplier_id,
-                    PoHeader.supplier_name,
-                    PoLine.category.label("material_category"),
+                    PoHeader.vendor_id,
+                    PoHeader.vendor_name,
+                    PoLine.category_id.label("material_category"),
                     PoHeader.total_amount.label("po_amount"),
                     PoLine.quantity.label("po_quantity"),
                     PoLine.unit_price,
@@ -101,7 +101,7 @@ class P2PRepository:
                     PoHeader.status,
                     PoHeader.creation_date,
                     PoLineLocation.promised_date.label("required_date"),
-                    PoLine.item_code.label("material_code"),
+                    PoLine.item_id.label("material_code"),
                     PoLine.item_description.label("material_name"),
                     PoLine.line_num.label("line_number"),
                 )
@@ -109,8 +109,8 @@ class P2PRepository:
                 .join(PoLineLocation, PoLine.po_line_id == PoLineLocation.po_line_id)
             )
 
-            if supplier_id:
-                stmt = stmt.where(PoHeader.supplier_id == supplier_id)
+            if vendor_id:
+                stmt = stmt.where(PoHeader.vendor_id == vendor_id)
             if status:
                 stmt = stmt.where(PoHeader.status == status.upper())
             if po_number:
@@ -130,8 +130,8 @@ class P2PRepository:
             return [
                 {
                     "po_number": r.po_number,
-                    "supplier_id": r.supplier_id,
-                    "supplier_name": r.supplier_name,
+                    "vendor_id": r.vendor_id,
+                    "vendor_name": r.vendor_name,
                     "material_category": r.material_category,
                     "po_amount": float(r.po_amount),
                     "po_quantity": float(r.po_quantity),
@@ -150,7 +150,7 @@ class P2PRepository:
     def query_receipts(
         self,
         po_number: str = "",
-        supplier_id: str = "",
+        vendor_id: str = "",
         days: int = 30,
         limit: int = 0,
         order_by: str = "",
@@ -161,8 +161,8 @@ class P2PRepository:
 
             if po_number:
                 stmt = stmt.where(RcvTransaction.po_number == po_number)
-            if supplier_id:
-                stmt = stmt.where(RcvTransaction.supplier_id == supplier_id)
+            if vendor_id:
+                stmt = stmt.where(RcvTransaction.vendor_id == vendor_id)
             if days > 0:
                 stmt = stmt.where(
                     RcvTransaction.transaction_date >= date.today() - timedelta(days=days)
@@ -180,7 +180,7 @@ class P2PRepository:
                     "receipt_id": f"GR-{r.transaction_id:04d}",
                     "gr_number": f"GR-{r.transaction_id:04d}",
                     "po_number": r.po_number,
-                    "supplier_id": r.supplier_id,
+                    "vendor_id": r.vendor_id,
                     "gr_quantity": float(r.quantity),
                     "receipt_date": r.transaction_date.isoformat(),
                     "quality_passed": r.rejected_quantity == 0,
@@ -191,9 +191,9 @@ class P2PRepository:
     def query_invoices(
         self,
         po_number: str = "",
-        supplier_id: str = "",
+        vendor_id: str = "",
         status: str = "",
-        invoice_number: str = "",
+        invoice_num: str = "",
         days: int = 30,
         limit: int = 0,
         order_by: str = "",
@@ -202,14 +202,14 @@ class P2PRepository:
         with self._session_factory() as session:
             stmt = select(ApInvoice)
 
-            if invoice_number:
-                stmt = stmt.where(ApInvoice.invoice_number == invoice_number)
+            if invoice_num:
+                stmt = stmt.where(ApInvoice.invoice_num == invoice_num)
             if po_number:
                 stmt = stmt.where(ApInvoice.po_number == po_number)
-            if supplier_id:
-                stmt = stmt.where(ApInvoice.supplier_id == supplier_id)
+            if vendor_id:
+                stmt = stmt.where(ApInvoice.vendor_id == vendor_id)
             if status:
-                stmt = stmt.where(ApInvoice.status == status.upper())
+                stmt = stmt.where(ApInvoice.approval_status == status.upper())
             if days > 0:
                 stmt = stmt.where(
                     ApInvoice.invoice_date >= date.today() - timedelta(days=days)
@@ -224,15 +224,15 @@ class P2PRepository:
             rows = session.scalars(stmt).all()
             return [
                 {
-                    "invoice_number": r.invoice_number,
+                    "invoice_num": r.invoice_num,
                     "po_number": r.po_number,
-                    "supplier_id": r.supplier_id,
-                    "supplier_name": r.supplier_name,
+                    "vendor_id": r.vendor_id,
+                    "vendor_name": r.vendor_name,
                     "invoice_amount": float(r.invoice_amount),
                     "due_date": r.due_date.isoformat(),
                     "discount_due_date": r.discount_due_date.isoformat() if r.discount_due_date else "",
                     "discount_amount": float(r.invoice_amount) * 0.98,
-                    "status": r.status.lower(),
+                    "approval_status": r.approval_status.lower(),
                     "creation_date": r.invoice_date.isoformat(),
                 }
                 for r in rows
@@ -240,9 +240,9 @@ class P2PRepository:
 
     def query_payments(
         self,
-        invoice_number: str = "",
-        supplier_id: str = "",
-        payment_number: str = "",
+        invoice_num: str = "",
+        vendor_id: str = "",
+        check_number: str = "",
         days: int = 30,
         limit: int = 0,
         order_by: str = "",
@@ -251,33 +251,33 @@ class P2PRepository:
         with self._session_factory() as session:
             stmt = select(ApPayment)
 
-            if payment_number:
-                stmt = stmt.where(ApPayment.payment_number == payment_number)
-            if invoice_number:
-                stmt = stmt.where(ApPayment.invoice_number == invoice_number)
-            if supplier_id:
-                stmt = stmt.where(ApPayment.supplier_id == supplier_id)
+            if check_number:
+                stmt = stmt.where(ApPayment.check_number == check_number)
+            if invoice_num:
+                stmt = stmt.where(ApPayment.invoice_num == invoice_num)
+            if vendor_id:
+                stmt = stmt.where(ApPayment.vendor_id == vendor_id)
             if days > 0:
                 stmt = stmt.where(
-                    ApPayment.payment_date >= date.today() - timedelta(days=days)
+                    ApPayment.check_date >= date.today() - timedelta(days=days)
                 )
 
             stmt = _apply_order_and_limit(
                 stmt, order_by, limit,
-                date_col=ApPayment.payment_date,
-                amount_col=ApPayment.payment_amount,
+                date_col=ApPayment.check_date,
+                amount_col=ApPayment.amount,
             )
 
             rows = session.scalars(stmt).all()
             return [
                 {
-                    "payment_id": r.payment_number,
-                    "payment_number": r.payment_number,
-                    "invoice_number": r.invoice_number,
-                    "supplier_id": r.supplier_id,
-                    "payment_amount": float(r.payment_amount),
-                    "payment_date": r.payment_date.isoformat(),
-                    "payment_method": r.payment_method.lower(),
+                    "check_id": r.check_id,
+                    "check_number": r.check_number,
+                    "invoice_num": r.invoice_num,
+                    "vendor_id": r.vendor_id,
+                    "amount": float(r.amount),
+                    "check_date": r.check_date.isoformat(),
+                    "payment_method_code": r.payment_method_code.lower(),
                 }
                 for r in rows
             ]
@@ -288,7 +288,7 @@ class P2PRepository:
 
     def get_flattened_purchase_orders(
         self,
-        supplier_id: str = "",
+        vendor_id: str = "",
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的采购订单数据（供规则引擎使用）。
@@ -297,28 +297,28 @@ class P2PRepository:
         ``po_number`` 已下推到 SQL WHERE，避免全表加载后内存过滤。
         """
         return self.query_purchase_orders(
-            supplier_id=supplier_id, po_number=po_number, days=0
+            vendor_id=vendor_id, po_number=po_number, days=0
         )
 
     def get_flattened_receipts(
         self,
-        supplier_id: str = "",
+        vendor_id: str = "",
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的收货数据（供规则引擎使用）。"""
-        return self.query_receipts(po_number=po_number, supplier_id=supplier_id, days=0)
+        return self.query_receipts(po_number=po_number, vendor_id=vendor_id, days=0)
 
     def get_flattened_invoices(
         self,
-        supplier_id: str = "",
+        vendor_id: str = "",
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的发票数据（供规则引擎使用）。"""
-        return self.query_invoices(po_number=po_number, supplier_id=supplier_id, days=0)
+        return self.query_invoices(po_number=po_number, vendor_id=vendor_id, days=0)
 
     def get_flattened_payments(
         self,
-        supplier_id: str = "",
+        vendor_id: str = "",
         po_number: str = "",
     ) -> list[dict[str, Any]]:
         """获取扁平化的付款数据（供规则引擎使用）。
@@ -327,32 +327,32 @@ class P2PRepository:
         避免「先查全部付款 + 再查发票号 + 内存过滤」的多轮 IO。
         """
         if not po_number:
-            return self.query_payments(supplier_id=supplier_id, days=0)
+            return self.query_payments(vendor_id=vendor_id, days=0)
 
         with self._session_factory() as session:
             stmt = (
                 select(ApPayment)
-                .join(ApInvoice, ApPayment.invoice_number == ApInvoice.invoice_number)
+                .join(ApInvoice, ApPayment.invoice_num == ApInvoice.invoice_num)
                 .where(ApInvoice.po_number == po_number)
             )
-            if supplier_id:
-                stmt = stmt.where(ApPayment.supplier_id == supplier_id)
+            if vendor_id:
+                stmt = stmt.where(ApPayment.vendor_id == vendor_id)
             rows = session.scalars(stmt).all()
             return [
                 {
-                    "payment_id": r.payment_number,
-                    "payment_number": r.payment_number,
-                    "invoice_number": r.invoice_number,
-                    "supplier_id": r.supplier_id,
-                    "payment_amount": float(r.payment_amount),
-                    "payment_date": r.payment_date.isoformat(),
-                    "payment_method": r.payment_method.lower(),
+                    "check_id": r.check_id,
+                    "check_number": r.check_number,
+                    "invoice_num": r.invoice_num,
+                    "vendor_id": r.vendor_id,
+                    "amount": float(r.amount),
+                    "check_date": r.check_date.isoformat(),
+                    "payment_method_code": r.payment_method_code.lower(),
                 }
                 for r in rows
             ]
 
     def get_contract_prices(self) -> dict[str, float]:
-        """获取物料合同价格映射（item_code -> standard_price）。
+        """获取物料合同价格映射（item_id -> standard_price）。
 
         进程内带 TTL 缓存（``_CONTRACT_PRICE_TTL_SECONDS``），
         避免每次规则调用都全表 DISTINCT。
@@ -373,9 +373,9 @@ class P2PRepository:
                 return self._contract_price_cache
             with self._session_factory() as session:
                 rows = session.execute(
-                    select(PoLine.item_code, PoLine.standard_price).distinct()
+                    select(PoLine.item_id, PoLine.standard_price).distinct()
                 ).all()
-                prices = {r.item_code: float(r.standard_price) for r in rows}
+                prices = {r.item_id: float(r.standard_price) for r in rows}
             self._contract_price_cache = prices
             self._contract_price_cache_at = now
             return prices

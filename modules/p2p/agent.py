@@ -88,7 +88,7 @@ def _build_memory_metadata(
     seen_po: set[str] = set()
     for anomaly in anomalies or []:
         docs = anomaly.get("documents") or {}
-        sup = docs.get("supplier_name") or ""
+        sup = docs.get("vendor_name") or ""
         po = docs.get("po_number") or ""
         if sup and sup not in seen_sup and len(suppliers) < _MAX_ENTITIES_PER_TYPE:
             suppliers.append(sup)
@@ -666,7 +666,7 @@ class P2PAgent:
         Args:
             analysis_type: 分析类型。
             query: 自然语言查询。
-            params: 意图解析提取的额外参数（supplier_id, po_number 等）。
+            params: 意图解析提取的额外参数（vendor_id, po_number 等）。
             time_range_days: 分析时间范围（天）。
             user_id: 用户 ID。
             session_id: 会话 ID。
@@ -747,8 +747,8 @@ class P2PAgent:
         )
 
         # 注入 orchestrator 解析出的实体参数（确保 agent 看到正确的实体编号）
-        entity_keys = ("po_number", "supplier_id", "invoice_number",
-                       "payment_number", "receipt_number")
+        entity_keys = ("po_number", "vendor_id", "invoice_num",
+                       "check_number", "receipt_number")
         # 从 DAG inputs 传入的 kwargs 中获取实体参数
         # (agent.analyze 不直接接收 parsed_params，通过 query 中的实体信息传递)
         # 如果 query 中已包含实体编号（如 enhanced_query），则无需额外注入

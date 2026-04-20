@@ -54,14 +54,14 @@ async def run_three_way_match(po_number: str = "") -> str:
 # ── 价格差异 ────────────────────────────────────────────────────────
 
 
-def _run_price_variance_analysis_sync(supplier_id: str, days: int) -> str:
+def _run_price_variance_analysis_sync(vendor_id: str, days: int) -> str:
     """同步执行价格差异分析的真实实现。"""
     from modules.p2p.settings import get_p2p_settings
     from modules.p2p.rules import PriceVarianceAnalyzer
 
     repo = _get_repository()
 
-    po_lines = repo.get_flattened_purchase_orders(supplier_id=supplier_id)
+    po_lines = repo.get_flattened_purchase_orders(vendor_id=vendor_id)
     contract_prices = repo.get_contract_prices()
 
     analyzer = PriceVarianceAnalyzer(get_p2p_settings())
@@ -75,7 +75,7 @@ def _run_price_variance_analysis_sync(supplier_id: str, days: int) -> str:
 
 @tool
 async def run_price_variance_analysis(
-    supplier_id: str = "",
+    vendor_id: str = "",
     days: int = 30,
 ) -> str:
     """执行价格差异分析，比对实际采购单价与合同价/标准价。
@@ -83,29 +83,29 @@ async def run_price_variance_analysis(
     偏差超出容差阈值时返回异常记录。
 
     Args:
-        supplier_id: 供应商 ID，为空则分析所有供应商。
+        vendor_id: 供应商 ID，为空则分析所有供应商。
         days: 分析最近 N 天内的采购订单，默认 30 天。
 
     Returns:
         JSON 格式的价格差异异常列表字符串。
     """
     return await asyncio.to_thread(
-        _run_price_variance_analysis_sync, supplier_id, days
+        _run_price_variance_analysis_sync, vendor_id, days
     )
 
 
 # ── 付款合规 ────────────────────────────────────────────────────────
 
 
-def _run_payment_compliance_check_sync(supplier_id: str, days: int) -> str:
+def _run_payment_compliance_check_sync(vendor_id: str, days: int) -> str:
     """同步执行付款合规检查的真实实现。"""
     from modules.p2p.settings import get_p2p_settings
     from modules.p2p.rules import PaymentComplianceChecker
 
     repo = _get_repository()
 
-    payments = repo.get_flattened_payments(supplier_id=supplier_id)
-    invoices = repo.get_flattened_invoices(supplier_id=supplier_id)
+    payments = repo.get_flattened_payments(vendor_id=vendor_id)
+    invoices = repo.get_flattened_invoices(vendor_id=vendor_id)
 
     checker = PaymentComplianceChecker(get_p2p_settings())
     anomalies = checker.check(payments, invoices)
@@ -118,31 +118,31 @@ def _run_payment_compliance_check_sync(supplier_id: str, days: int) -> str:
 
 @tool
 async def run_payment_compliance_check(
-    supplier_id: str = "",
+    vendor_id: str = "",
     days: int = 30,
 ) -> str:
     """执行付款合规检查，检测超期付款、提前付款和折扣滥用。
 
     Args:
-        supplier_id: 供应商 ID，为空则检查所有供应商。
+        vendor_id: 供应商 ID，为空则检查所有供应商。
         days: 分析最近 N 天内的付款，默认 30 天。
 
     Returns:
         JSON 格式的付款合规异常列表字符串。
     """
     return await asyncio.to_thread(
-        _run_payment_compliance_check_sync, supplier_id, days
+        _run_payment_compliance_check_sync, vendor_id, days
     )
 
 
 # ── 供应商绩效 ──────────────────────────────────────────────────────
 
 
-def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
+def _calculate_supplier_kpis_sync(vendor_id: str, period: str) -> str:
     """同步执行供应商 KPI 计算的真实实现。
 
-    当 ``supplier_id`` 为空时，自动遍历所有供应商逐个计算 KPI，
-    返回列表；指定 ``supplier_id`` 时返回单份报告。
+    当 ``vendor_id`` 为空时，自动遍历所有供应商逐个计算 KPI，
+    返回列表；指定 ``vendor_id`` 时返回单份报告。
     """
     from modules.p2p.settings import get_p2p_settings
     from modules.p2p.rules import SupplierPerformanceCalculator
@@ -154,26 +154,26 @@ def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
 
     calculator = SupplierPerformanceCalculator(get_p2p_settings())
 
-    if supplier_id:
+    if vendor_id:
         report = _calc_single_supplier_kpis(
-            repo, calculator, supplier_id, period,
+            repo, calculator, vendor_id, period,
         )
         return _clip_and_dump(report.model_dump(mode="json"))
 
-    # supplier_id 为空 → 遍历所有供应商
+    # vendor_id 为空 → 遍历所有供应商
     all_po = repo.get_flattened_purchase_orders()
-    supplier_map: dict[str, str] = {}
+    vendor_map: dict[str, str] = {}
     for po in all_po:
-        sid = po.get("supplier_id", "")
-        if sid and sid not in supplier_map:
-            supplier_map[sid] = po.get("supplier_name", sid)
+        sid = po.get("vendor_id", "")
+        if sid and sid not in vendor_map:
+            vendor_map[sid] = po.get("vendor_name", sid)
 
-    if not supplier_map:
+    if not vendor_map:
         return _clip_and_dump([])
 
     reports = [
         _calc_single_supplier_kpis(repo, calculator, sid, period).model_dump(mode="json")
-        for sid in supplier_map
+        for sid in vendor_map
     ]
     return _clip_and_dump(reports)
 
@@ -181,23 +181,23 @@ def _calculate_supplier_kpis_sync(supplier_id: str, period: str) -> str:
 def _calc_single_supplier_kpis(
     repo: P2PRepository,
     calculator: "SupplierPerformanceCalculator",  # type: ignore[name-defined]
-    supplier_id: str,
+    vendor_id: str,
     period: str,
 ) -> "SupplierKPIReport":  # type: ignore[name-defined]
     """计算单个供应商的 KPI 报告。"""
     from api.schemas.domain import SupplierKPIReport  # noqa: F811
 
-    po_lines = repo.get_flattened_purchase_orders(supplier_id=supplier_id)
-    gr_lines = repo.get_flattened_receipts(supplier_id=supplier_id)
-    invoices = repo.get_flattened_invoices(supplier_id=supplier_id)
+    po_lines = repo.get_flattened_purchase_orders(vendor_id=vendor_id)
+    gr_lines = repo.get_flattened_receipts(vendor_id=vendor_id)
+    invoices = repo.get_flattened_invoices(vendor_id=vendor_id)
 
-    supplier_name = ""
+    vendor_name = ""
     if po_lines:
-        supplier_name = po_lines[0].get("supplier_name", supplier_id)
+        vendor_name = po_lines[0].get("vendor_name", vendor_id)
 
     return calculator.calculate(
-        supplier_id=supplier_id,
-        supplier_name=supplier_name,
+        vendor_id=vendor_id,
+        vendor_name=vendor_name,
         po_lines=po_lines,
         gr_lines=gr_lines,
         invoices=invoices,
@@ -207,20 +207,20 @@ def _calc_single_supplier_kpis(
 
 @tool
 async def calculate_supplier_kpis(
-    supplier_id: str = "",
+    vendor_id: str = "",
     period: str = "",
 ) -> str:
     """计算供应商绩效 KPI：按时交付率、发票准确率、质量合格率、价格合规率。
 
     Args:
-        supplier_id: 供应商 ID，为空则逐个计算所有供应商并返回列表。
+        vendor_id: 供应商 ID，为空则逐个计算所有供应商并返回列表。
         period: 分析周期描述，默认"近30天"。
 
     Returns:
         JSON 格式的供应商 KPI 报告（单个对象或列表）。
     """
     return await asyncio.to_thread(
-        _calculate_supplier_kpis_sync, supplier_id, period
+        _calculate_supplier_kpis_sync, vendor_id, period
     )
 
 
@@ -234,23 +234,23 @@ def _query_vendor_master_sync(repo: P2PRepository, vendor_ids: list[str]) -> lis
 
     with repo._session_factory() as session:
         stmt = select(
-            ApSupplier.supplier_id,
-            ApSupplier.supplier_name,
+            ApSupplier.vendor_id,
+            ApSupplier.vendor_name,
             ApSupplier.supplier_site_id,
-            ApSupplier.payment_terms,
-            ApSupplier.status,
+            ApSupplier.terms_id,
+            ApSupplier.enabled_flag,
         )
         if vendor_ids:
-            stmt = stmt.where(ApSupplier.supplier_id.in_(vendor_ids))
+            stmt = stmt.where(ApSupplier.vendor_id.in_(vendor_ids))
 
         rows = session.execute(stmt).all()
         return [
             {
-                "supplier_id": r.supplier_id,
-                "supplier_name": r.supplier_name,
+                "vendor_id": r.vendor_id,
+                "vendor_name": r.vendor_name,
                 "supplier_site_id": r.supplier_site_id,
-                "payment_terms": r.payment_terms,
-                "status": r.status,
+                "terms_id": r.terms_id,
+                "enabled_flag": r.enabled_flag,
             }
             for r in rows
         ]
@@ -289,9 +289,9 @@ def _calculate_spend_analysis_sync(
 
     with repo._session_factory() as session:
         if group_by == "supplier":
-            group_col = PoHeader.supplier_name
+            group_col = PoHeader.vendor_name
         else:
-            group_col = PoLine.category
+            group_col = PoLine.category_id
 
         stmt = (
             select(

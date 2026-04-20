@@ -85,7 +85,7 @@ class MemoryManager:
         """内部方法：检索 + 格式化。"""
         entity_ids = [
             v for k, v in parsed_params.items()
-            if k in ("supplier_id", "po_number", "invoice_number") and v
+            if k in ("vendor_id", "po_number", "invoice_num") and v
         ]
 
         from core.memory.injection import format_memory_injection
@@ -286,7 +286,7 @@ class MemoryManager:
             repo = get_memory_repository()
             entities = fb.get("related_entities", {})
             entity_id = (
-                entities.get("supplier_id")
+                entities.get("vendor_id")
                 or entities.get("po_number")
                 or None
             )

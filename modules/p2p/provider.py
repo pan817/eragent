@@ -39,9 +39,9 @@ class P2PModuleProvider:
     def get_entity_types(self) -> list[str]:
         return [
             "po_number",
-            "supplier_id",
-            "invoice_number",
-            "payment_number",
+            "vendor_id",
+            "invoice_num",
+            "check_number",
             "receipt_number",
         ]
 
@@ -55,17 +55,23 @@ class P2PModuleProvider:
             calculate_supplier_kpis,
             check_approval_limits,
             check_blacklist,
+            compare_entities,
             detect_duplicate_invoices,
+            detect_graph_anomalies,
+            query_entity_relationships,
+            query_entity_timeline,
             query_invoices,
             query_material_master,
             query_payments,
             query_purchase_orders,
             query_receipts,
+            query_supplier_profile,
             query_vendor_master,
             run_payment_compliance_check,
             run_price_variance_analysis,
             run_three_way_match,
             run_vendor_risk_scoring,
+            search_knowledge_graph,
         )
 
         return [
@@ -88,6 +94,13 @@ class P2PModuleProvider:
             run_vendor_risk_scoring,
             check_approval_limits,
             check_blacklist,
+            # graph (6)
+            search_knowledge_graph,
+            query_entity_timeline,
+            query_entity_relationships,
+            query_supplier_profile,
+            compare_entities,
+            detect_graph_anomalies,
         ]
 
     def get_dag_templates(self) -> dict[str, list[dict[str, Any]]]:

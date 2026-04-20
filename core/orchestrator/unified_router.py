@@ -20,8 +20,8 @@ _VALID_ORDER_BY = frozenset({"date_desc", "date_asc", "amount_desc", "amount_asc
 
 # 实体字段白名单
 _ENTITY_FIELDS = frozenset({
-    "po_number", "supplier_id", "invoice_number",
-    "payment_number", "receipt_number",
+    "po_number", "vendor_id", "invoice_num",
+    "check_number", "receipt_number",
 })
 
 # intent_kind 合法枚举值（clarification 已废弃，不再作为 LLM 输出选项）
@@ -64,11 +64,11 @@ _UNIFIED_PROMPT = """\
 
 ## 指代消解
 结合"会话实体上下文"，将"这个/该/上次的"替换为具体实体ID，写入 resolved_query。
-- 上下文有 payment_number=PAY-001，用户说"这个支付单的PO" → resolved_query="支付单 PAY-001 对应的采购订单"
+- 上下文有 check_number=PAY-001，用户说"这个支付单的PO" → resolved_query="支付单 PAY-001 对应的采购订单"
 - 无法消解时 resolved_query 与原 query 相同。
 
 ## 参数提取
-- 实体编号：PO-xxxx / SUP-xxxx / INV-xxxx / PAY-xxxx / RCV-xxxx，明确出现才填，代词填 null
+- 实体编号：PO-xxxx / SUP-xxxx(vendor_id) / INV-xxxx / PAY-xxxx / RCV-xxxx，明确出现才填，代词填 null
 - days: 时间范围天数（"最近7天"→7，"本月"→当月天数），未指定填 null
 - limit: 数量限制（"一个"→1，"前5条"→5），未指定填 null
 - order_by: date_desc / date_asc / amount_desc / amount_asc，未指定填 null
@@ -80,14 +80,14 @@ _UNIFIED_PROMPT = """\
 - <0.5: 极度模糊
 
 ## 输出格式（纯 JSON，不要 markdown 代码块，第一个字符必须是 {{）
-{{"intent_kind":"<枚举值>","type":"<analysis_type或空串>","confidence":0.0,"is_cross_entity":false,"resolved_query":"<消解后查询>","missing_params":[],"po_number":null,"supplier_id":null,"invoice_number":null,"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+{{"intent_kind":"<枚举值>","type":"<analysis_type或空串>","confidence":0.0,"is_cross_entity":false,"resolved_query":"<消解后查询>","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
 
 ## 示例
-- "查询最新的一个PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"查询最新的一个PO","missing_params":[],"po_number":null,"supplier_id":null,"invoice_number":null,"payment_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}}
-- "这个支付单对应的PO"（上下文: payment_number=PAY-001）→ {{"intent_kind":"data_lookup","type":"","confidence":0.85,"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的采购订单","missing_params":[],"po_number":null,"supplier_id":null,"invoice_number":null,"payment_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}}
-- "分析最近30天SUP-001的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"is_cross_entity":false,"resolved_query":"分析最近30天SUP-001的价格差异","missing_params":[],"po_number":null,"supplier_id":"SUP-001","invoice_number":null,"payment_number":null,"receipt_number":null,"days":30,"limit":null,"order_by":null}}
-- "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"is_cross_entity":false,"resolved_query":"做一下三路匹配","missing_params":[],"po_number":null,"supplier_id":null,"invoice_number":null,"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
-- "有没有该付钱还没付的账单" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"is_cross_entity":false,"resolved_query":"有没有该付钱还没付的账单","missing_params":[],"po_number":null,"supplier_id":null,"invoice_number":null,"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+- "查询最新的一个PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"查询最新的一个PO","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}}
+- "这个支付单对应的PO"（上下文: check_number=PAY-001）→ {{"intent_kind":"data_lookup","type":"","confidence":0.85,"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的采购订单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}}
+- "分析最近30天SUP-001的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"is_cross_entity":false,"resolved_query":"分析最近30天SUP-001的价格差异","missing_params":[],"po_number":null,"vendor_id":"SUP-001","invoice_num":null,"check_number":null,"receipt_number":null,"days":30,"limit":null,"order_by":null}}
+- "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"is_cross_entity":false,"resolved_query":"做一下三路匹配","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+- "有没有该付钱还没付的账单" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"is_cross_entity":false,"resolved_query":"有没有该付钱还没付的账单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
 
 用户查询：{query}"""
 

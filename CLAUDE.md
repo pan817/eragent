@@ -32,9 +32,10 @@
 | Agent 框架 | LangChain 1.2.0（`create_agent` + 装饰器中间件） |
 | LLM | Qwen（阿里云 Dashscope，ChatOpenAI 兼容接口，默认 qwen3-max；可切换 zhipu/openai/deepseek） |
 | 本体推理 | Owlready2（OWL2 + SWRL 规则） |
-| 图数据库 | Neo4j |
+| 时序知识图谱 | Graphiti（graphiti-core by Zep AI） |
+| 图数据库 | Neo4j（默认启用，Graphiti ETL 同步 EBS 数据） |
 | 向量数据库 | Chroma |
-| 关系数据库 | PostgreSQL（长期记忆 + 报告 + 可观测性 trace 存储） |
+| 关系数据库 | PostgreSQL（EBS 镜像表 + 长期记忆 + 报告 + trace 存储） |
 | ORM | SQLAlchemy（统一 engine，多模块共用） |
 | Web 框架 | FastAPI |
 | 配置管理 | config.yaml + Pydantic Settings |
@@ -50,7 +51,8 @@ eragent/
 │   │   ├── analyze.py           # 同步分析路由（POST /analyze）
 │   │   ├── analyze_async.py     # 异步分析 + SSE 流式事件路由
 │   │   ├── sessions.py          # 会话历史 CRUD 路由
-│   │   └── traces.py            # 可观测性 trace 查询路由
+│   │   ├── traces.py            # 可观测性 trace 查询路由
+│   │   └── etl.py               # ETL Admin API（状态查询 + 手动触发同步）
 │   └── schemas/
 │       └── analysis / domain / session / trace
 ├── config/
@@ -79,6 +81,23 @@ eragent/
 │   │   ├── console.py           # 控制台输出
 │   │   ├── display_labels.py    # span 类型 → 中文展示名映射
 │   │   └── tables.py            # trace ORM 表
+│   ├── etl/                     # Graphiti ETL 模块（EBS → Neo4j 时序知识图谱）
+│   │   ├── client.py            # GraphitiClient（graphiti-core SDK 封装）
+│   │   ├── config.py            # GraphitiETLSettings
+│   │   ├── models.py            # ETL 数据模型（GraphitiNode/Edge/TransformResult 等）
+│   │   ├── pipeline.py          # ETLPipeline（全量/增量同步编排）
+│   │   ├── query_backend.py     # 双后端查询抽象（graphiti/postgresql/hybrid）
+│   │   ├── scheduler.py         # ETLScheduler（定时调度 + 手动触发）
+│   │   ├── state.py             # SyncStateManager（水位线管理）
+│   │   ├── tables.py            # ETLSyncState ORM 表
+│   │   ├── extractors/          # 数据抽取器（5 域 20 表）
+│   │   │   └── base / master_data / purchasing / receiving / payables / sourcing
+│   │   ├── transformers/        # 数据转换器
+│   │   │   ├── registry.py      # 20 张表声明式映射注册表
+│   │   │   ├── structured.py    # StructuredTransformer（EBS 行 → 节点/边）
+│   │   │   └── llm_extractor.py # LLMTextExtractor（自由文本 LLM 抽取，可选）
+│   │   └── loaders/
+│   │       └── graphiti_loader.py # GraphitiLoader（通过 episode API 写入）
 │   ├── ontology/                # OWL 本体加载和推理
 │   │   ├── loader.py
 │   │   └── reasoner.py          # 推理器 + SWRL 规则
@@ -117,8 +136,8 @@ eragent/
 │   ├── repository.py            # P2PRepository（数据查询）
 │   ├── rules/                   # 业务规则引擎（__init__.py 提供统一导出）
 │   │   └── three_way_match / price_variance / payment_compliance / supplier_performance / _utils
-│   ├── tools/                   # LangChain @tool 工具包（19 个工具）
-│   │   └── query / analysis / advanced / stub / _inject / _output
+│   ├── tools/                   # LangChain @tool 工具包（25 个工具）
+│   │   └── query / analysis / advanced / graph / stub / _inject / _output
 │   ├── ontology/p2p.owl         # P2P 领域 OWL 本体（非 Python 包）
 │   ├── prompts.py               # Agent 提示词模板
 │   ├── model_factory.py         # LLM 客户端工厂（qwen / zhipu / minimax / deepseek / openai）
@@ -135,7 +154,7 @@ eragent/
 │   ├── conftest.py              # 基础 fixture（最小化，P2P fixture 已拆出）
 │   ├── fixtures/                # 按模块拆分的测试 fixture
 │   │   └── p2p.py               # P2P 专属 fixture（p2p_settings, repository, mock_po_data）
-│   ├── unit/                    # 单元测试（36 个文件）
+│   ├── unit/                    # 单元测试（41 个文件）
 │   ├── integration/             # 集成测试（含 test_e2e.py / test_async_multi_worker.py）
 │   └── http/                    # .http 调试用例
 ├── alembic.ini                  # Alembic 配置（script_location=migrations）
@@ -164,12 +183,16 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **模型工厂**：`core/llm/model_factory.py` 提供通用 LLM 创建逻辑，`modules/p2p/model_factory.py` 封装 P2P 特定配置，便于切换模型 / 测试 mock。
 - **时区约定**：全链路统一业务时区（默认 `Asia/Shanghai`），由 `app.timezone` / `APP_TIMEZONE` 配置。
   - Python 侧**禁止** `datetime.utcnow()` / `datetime.now(timezone.utc)`，必须经 `core.time_utils.now_cn()` 产生时间戳。PG 引擎通过 `connect_args.options` 注入 `-c TimeZone=<tz>`。
+- **Graphiti ETL**：`core/etl/` 模块将 PostgreSQL（EBS 镜像表）数据同步到 Graphiti（Neo4j）时序知识图谱。全量初始化 + 每 10 分钟增量同步（`LAST_UPDATE_DATE` 水位线）。5 个域按依赖顺序执行：主数据 → 采购 → 收货 → 应付 → 寻源合同。20 张表声明式映射为 15 种节点 + 19 种边。
+- **双后端查询模式**：`graphiti_etl.query_backend` 控制查询路径 — `graphiti`（全部走图查询）/ `postgresql`（全部走 SQL）/ `hybrid`（图优先 SQL 降级）。通过 `QueryBackend` Protocol 实现透明切换，过渡期使用 `hybrid` 模式。
+- **图查询工具**：6 个 LangChain Tool（`search_knowledge_graph`、`query_entity_timeline`、`query_entity_relationships`、`query_supplier_profile`、`compare_entities`、`detect_graph_anomalies`），工具总数 25 个。
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`LLM_FAST_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
 - 双模型架构：`llm`（主模型，ReAct + tool-calling）+ `llm_fast`（轻量任务：报告生成、L3 意图分类）。`llm_fast` 未配置的字段自动从 `llm` 镜像
   - 不硬编码模型名，切换只改配置不改代码
-- Neo4j 默认禁用（`neo4j.enabled: false`），可按需开启
+- Neo4j 代码层默认启用（`Neo4jSettings.enabled=True`），但 `config.yaml` 中覆盖为 `false`，用户按需开启
+- Graphiti ETL 配置在 `graphiti_etl` 段，支持 `ETL_*` 环境变量覆盖
 - Embedding provider 可选：default / fake / openai / dashscope / zhipu
 
 ## 运行测试
@@ -201,7 +224,8 @@ alembic revision --autogenerate -m "描述"
 
 ## 当前进度
 - 所有功能模块及七阶段架构重构（Phase 1 → 7.3）已全部完成
-- Alembic 迁移体系已落地 9 个版本
-- 单元测试 36 个文件 + 集成测试 6 个文件，覆盖率 ≥ 90%（pytest 收集 1000+ 用例）
+- Graphiti ETL 全部 6 个 Phase（0-6）已完成：表结构改造（20 张 EBS 表）、ETL 基础设施、Extractor/Transformer/Loader（5 域）、Pipeline/Scheduler、6 个图查询工具、LLM 抽取、Admin API、双后端查询模式
+- Alembic 迁移体系已落地 13 个版本（0001 baseline → 0013 etl_sync_state）
+- 单元测试 41 个文件 + 集成测试 6 个文件（pytest 收集 1200+ 用例）
 - 端到端测试（真实 LLM）通过
 - 架构层技术债见 [docs/agent_issue.md](docs/agent_issue.md)

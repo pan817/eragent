@@ -25,15 +25,15 @@ _VALID_ORDER_BY = frozenset({"date_desc", "date_asc", "amount_desc", "amount_asc
 
 # 实体字段白名单（用于校验 LLM 输出）
 _ENTITY_FIELDS = frozenset({
-    "po_number", "supplier_id", "invoice_number",
-    "payment_number", "receipt_number",
+    "po_number", "vendor_id", "invoice_num",
+    "check_number", "receipt_number",
 })
 
 _EXTRACT_PROMPT = """你是 ERP 采购系统的参数提取器。从用户查询中提取结构化参数，输出纯 JSON。
 
 ## 规则
 - 只提取用户查询中明确出现的具体值；代词或模糊引用（"上次那家"/"昨天的"）一律填 null
-- 实体编号格式：PO-xxxx / SUP-xxxx / INV-xxxx / PAY-xxxx / RCV-xxxx（GR-xxxx 等同 RCV）
+- 实体编号格式：PO-xxxx / SUP-xxxx(vendor_id) / INV-xxxx / PAY-xxxx / RCV-xxxx（GR-xxxx 等同 RCV）
 - days: 时间范围天数（"最近7天"→7，"本月"→30，"上周"→7），未指定填 null
 - limit: 用户要求的数量限制（"一个"→1，"前5条"→5，"最新3个"→3），未指定填 null
 - order_by: 排序方式，仅限以下枚举值之一：date_desc / date_asc / amount_desc / amount_asc
@@ -45,13 +45,13 @@ _EXTRACT_PROMPT = """你是 ERP 采购系统的参数提取器。从用户查询
 - 当用户说"最新的N个"时，limit=N 且 order_by=date_desc
 
 ## 输出格式（纯 JSON，不要 markdown 代码块，第一个字符必须是 {{）
-{{"po_number": null, "supplier_id": null, "invoice_number": null, "payment_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}}
+{{"po_number": null, "vendor_id": null, "invoice_num": null, "check_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}}
 
 ## 示例
-- "查询最新的一个支付单" → {{"po_number": null, "supplier_id": null, "invoice_number": null, "payment_number": null, "receipt_number": null, "days": null, "limit": 1, "order_by": "date_desc"}}
-- "查看 PO-2024-0001 的发票" → {{"po_number": "PO-2024-0001", "supplier_id": null, "invoice_number": null, "payment_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}}
-- "SUP-001 最近30天金额最大的5笔付款" → {{"po_number": null, "supplier_id": "SUP-001", "invoice_number": null, "payment_number": null, "receipt_number": null, "days": 30, "limit": 5, "order_by": "amount_desc"}}
-- "最近7天的采购订单" → {{"po_number": null, "supplier_id": null, "invoice_number": null, "payment_number": null, "receipt_number": null, "days": 7, "limit": null, "order_by": null}}
+- "查询最新的一个支付单" → {{"po_number": null, "vendor_id": null, "invoice_num": null, "check_number": null, "receipt_number": null, "days": null, "limit": 1, "order_by": "date_desc"}}
+- "查看 PO-2024-0001 的发票" → {{"po_number": "PO-2024-0001", "vendor_id": null, "invoice_num": null, "check_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}}
+- "SUP-001 最近30天金额最大的5笔付款" → {{"po_number": null, "vendor_id": "SUP-001", "invoice_num": null, "check_number": null, "receipt_number": null, "days": 30, "limit": 5, "order_by": "amount_desc"}}
+- "最近7天的采购订单" → {{"po_number": null, "vendor_id": null, "invoice_num": null, "check_number": null, "receipt_number": null, "days": 7, "limit": null, "order_by": null}}
 
 用户查询：{query}"""
 

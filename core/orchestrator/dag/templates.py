@@ -50,10 +50,10 @@ def load_dag_template(
     从 P2P 模块获取模板映射。
 
     选择逻辑（优先级从高到低）：
-    1. COMPREHENSIVE + payment_number → 单笔付款单合规 DAG
-    2. COMPREHENSIVE + invoice_number → 单笔发票分析 DAG
+    1. COMPREHENSIVE + check_number → 单笔付款单合规 DAG
+    2. COMPREHENSIVE + invoice_num → 单笔发票分析 DAG
     3. COMPREHENSIVE + po_number → PO 综合风险 DAG
-    4. COMPREHENSIVE + supplier_id → 供应商综合分析 DAG
+    4. COMPREHENSIVE + vendor_id → 供应商综合分析 DAG
     5. 按 analysis_type 匹配分析类型维度模板
     6. 无匹配 → 返回 None（由调用方降级到 agent）
     """
@@ -64,20 +64,20 @@ def load_dag_template(
 
     effective_params = {
         "days": params.get("days", 30),
-        "supplier_id": params.get("supplier_id", ""),
+        "vendor_id": params.get("vendor_id", ""),
         "po_number": params.get("po_number", ""),
-        "invoice_number": params.get("invoice_number", ""),
-        "payment_number": params.get("payment_number", ""),
+        "invoice_num": params.get("invoice_num", ""),
+        "check_number": params.get("check_number", ""),
         "receipt_number": params.get("receipt_number", ""),
     }
 
     # 实体维度模板优先：有具体实体 + COMPREHENSIVE 意图
     if analysis_type == AnalysisType.COMPREHENSIVE:
-        if effective_params["payment_number"]:
+        if effective_params["check_number"]:
             template = entity_template_map.get("payment_single")
             if template:
                 return _replace_params(template, effective_params)
-        if effective_params["invoice_number"]:
+        if effective_params["invoice_num"]:
             template = entity_template_map.get("invoice_single")
             if template:
                 return _replace_params(template, effective_params)
@@ -85,7 +85,7 @@ def load_dag_template(
             template = entity_template_map.get("po_risk")
             if template:
                 return _replace_params(template, effective_params)
-        if effective_params["supplier_id"]:
+        if effective_params["vendor_id"]:
             template = entity_template_map.get("supplier_risk")
             if template:
                 return _replace_params(template, effective_params)
@@ -120,7 +120,7 @@ def load_generic_template(
 
     effective_params = {
         "days": params.get("days", 30),
-        "supplier_id": params.get("supplier_id", ""),
+        "vendor_id": params.get("vendor_id", ""),
         "po_number": params.get("po_number", ""),
     }
     return _replace_params(template, effective_params)

@@ -35,7 +35,7 @@ class ModuleProvider(Protocol):
         ...
 
     def get_entity_types(self) -> list[str]:
-        """返回模块支持的实体类型列表（如 po_number, supplier_id 等）。"""
+        """返回模块支持的实体类型列表（如 po_number, vendor_id 等）。"""
         ...
 
     def get_tools(self) -> list[Any]:

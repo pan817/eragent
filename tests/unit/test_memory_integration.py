@@ -168,8 +168,8 @@ class TestExtractorE2E:
         # Mock AnalysisResult
         doc = MagicMock()
         doc.po_number = "PO-100"
-        doc.supplier_name = "SUP-003"
-        doc.invoice_number = ""
+        doc.vendor_name = "SUP-003"
+        doc.invoice_num = ""
         anomaly = MagicMock(documents=doc)
 
         result = MagicMock()

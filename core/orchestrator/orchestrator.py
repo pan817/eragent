@@ -194,8 +194,8 @@ class Orchestrator:
         result: AnalysisResult,
     ) -> None:
         """合并路由阶段 + 执行结果中的实体，写入 session_entities。"""
-        entity_keys = {"po_number", "supplier_id", "invoice_number",
-                       "payment_number", "receipt_number"}
+        entity_keys = {"po_number", "vendor_id", "invoice_num",
+                       "check_number", "receipt_number"}
         # 来源 A：路由阶段已解析的实体（含继承 + 级联补充）
         session_entities = {
             k: v for k, v in parsed_params.items()
@@ -588,8 +588,8 @@ class Orchestrator:
                 r"这个|这条|这笔|该|那个|那条|上述|上面的|前面的",
             )
             if _REF_WORDS.search(request.query):
-                entity_keys = {"po_number", "supplier_id", "invoice_number",
-                               "payment_number", "receipt_number"}
+                entity_keys = {"po_number", "vendor_id", "invoice_num",
+                               "check_number", "receipt_number"}
                 has_entity = any(
                     parsed_params.get(k) for k in entity_keys
                 )
@@ -612,10 +612,10 @@ class Orchestrator:
                             "entity '%s'='%s' inherited from session context", key, val
                         )
 
-            # 4.5 实体关联补充：有 po_number 但缺 supplier_id 时从 DB 反查
+            # 4.5 实体关联补充：有 po_number 但缺 vendor_id 时从 DB 反查
             # 记录验证前的用户指定实体（用于检测验证后是否被删除）
-            _entity_keys_check = {"po_number", "supplier_id", "invoice_number",
-                                  "payment_number", "receipt_number"}
+            _entity_keys_check = {"po_number", "vendor_id", "invoice_num",
+                                  "check_number", "receipt_number"}
             _user_entities_before = {
                 k: v for k, v in parsed_params.items()
                 if k in _entity_keys_check and v
@@ -718,9 +718,9 @@ class Orchestrator:
             else:
                 has_entity = bool(
                     parsed_params.get("po_number")
-                    or parsed_params.get("supplier_id")
-                    or parsed_params.get("payment_number")
-                    or parsed_params.get("invoice_number")
+                    or parsed_params.get("vendor_id")
+                    or parsed_params.get("check_number")
+                    or parsed_params.get("invoice_num")
                     or parsed_params.get("receipt_number")
                 )
 
@@ -851,8 +851,8 @@ class Orchestrator:
 
         entity_patterns = {
             "po_number": r"(PO-[\w-]+\d+)",
-            "payment_number": r"(PAY-[\w-]+\d+)",
-            "invoice_number": r"(INV-[\w-]+\d+)",
+            "check_number": r"(PAY-[\w-]+\d+)",
+            "invoice_num": r"(INV-[\w-]+\d+)",
         }
         for key, pattern in entity_patterns.items():
             if key not in params or not params[key]:
@@ -891,8 +891,8 @@ class Orchestrator:
 
         with record_span("orchestrator", "lookup_shortcut") as span_attrs:
             lookup_path = "entity" if params.get("po_number") or params.get(
-                "invoice_number") or params.get("payment_number") or params.get(
-                "supplier_id") else "keyword"
+                "invoice_num") or params.get("check_number") or params.get(
+                "vendor_id") else "keyword"
             span_attrs["lookup_path"] = lookup_path
             span_attrs["tool_name"] = tool_name
             span_attrs["tool_kwargs"] = {
@@ -1009,8 +1009,8 @@ class Orchestrator:
             # 将解析出的实体参数注入 query，确保 agent 看到正确的实体编号
             agent_query = query
             entity_hints = []
-            for ek in ("po_number", "supplier_id", "invoice_number",
-                        "payment_number", "receipt_number"):
+            for ek in ("po_number", "vendor_id", "invoice_num",
+                        "check_number", "receipt_number"):
                 ev = params.get(ek)
                 if ev and ev not in query:
                     entity_hints.append(f"{ek}={ev}")
@@ -1052,6 +1052,18 @@ class Orchestrator:
         # 记录 context_budget span（DAG 路径）
         if not is_agent_path:
             self._record_dag_context_budget(query=query)
+
+        # 图谱上下文增强（仅 DAG 路径 + 开关开启时）
+        graph_context = ""
+        if not is_agent_path and self._settings.graphiti_etl.context_enrichment_enabled:
+            graph_context = await self._enrich_with_graph_context(signal, params)
+            if graph_context:
+                # 注入到 report 任务的 scenario 字段（追加背景信息）
+                for task in dag_tasks:
+                    if task.get("tool_name") == "generate_summary_report":
+                        inputs = task.get("inputs", {})
+                        scenario = inputs.get("scenario", "")
+                        inputs["scenario"] = f"{scenario}\n\n{graph_context}"
 
         dag_result = await executor.execute(
             dag_tasks,
@@ -1183,6 +1195,60 @@ class Orchestrator:
         )
 
     # ── DAG context_budget 记录 ────────────────────────────────────────
+
+    async def _enrich_with_graph_context(
+        self, signal: Any, params: dict[str, Any]
+    ) -> str:
+        """Enrich DAG execution with graph context from Graphiti.
+
+        Queries the knowledge graph for relevant background information based
+        on extracted entities. Only called on the DAG path when
+        ``context_enrichment_enabled`` is ``True``.
+        """
+        from modules.p2p.tools._inject import _get_graphiti_client
+
+        try:
+            client = _get_graphiti_client()
+        except RuntimeError:
+            return ""
+
+        context_parts: list[str] = []
+
+        if vendor_id := params.get("vendor_id"):
+            try:
+                profile = await client.search(
+                    f"supplier {vendor_id} profile summary", num_results=5
+                )
+                if profile:
+                    context_parts.append(f"【供应商画像】\n{profile}")
+            except Exception:
+                _logger.debug("graph context: supplier profile failed", exc_info=True)
+
+        if po_number := params.get("po_number"):
+            try:
+                timeline = await client.search(
+                    f"purchase order {po_number} timeline", num_results=5
+                )
+                if timeline:
+                    context_parts.append(f"【PO 关联信息】\n{timeline}")
+            except Exception:
+                _logger.debug("graph context: PO timeline failed", exc_info=True)
+
+        analysis_type_val = getattr(
+            getattr(signal, "analysis_type", None), "value",
+            getattr(signal, "analysis_type", ""),
+        )
+        if analysis_type_val == "comprehensive":
+            try:
+                overview = await client.search(
+                    "recent procurement highlights and anomalies", num_results=5
+                )
+                if overview:
+                    context_parts.append(f"【近期采购概览】\n{overview}")
+            except Exception:
+                _logger.debug("graph context: overview failed", exc_info=True)
+
+        return "\n\n".join(context_parts)
 
     def _record_dag_context_budget(
         self,

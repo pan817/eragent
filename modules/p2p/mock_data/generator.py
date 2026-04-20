@@ -60,18 +60,26 @@ class MockDataGenerator:
         return d.strftime("%Y-%m-%d")
 
     def generate_suppliers(self, count: int = 5) -> list[dict[str, Any]]:
-        """生成供应商主数据（AP_SUPPLIERS + AP_SUPPLIER_SITES_ALL）。"""
+        """生成供应商主数据（AP_SUPPLIERS）。"""
         names = ["华为科技", "中兴通讯", "比亚迪电子", "联想集团", "海尔智家",
                  "格力电器", "美的集团", "小米科技", "大疆创新", "宁德时代"]
         terms = ["NET30", "NET45", "NET60", "2/10NET30"]
+        industry_classes = ["3672", "3661", "3694", "3571", "3631"]
+        vendor_types = ["EMPLOYEE", "VENDOR", "CONTRACTOR"]
         suppliers = []
         for i in range(count):
+            start_active = date(2020, 1, 1) + timedelta(days=i * 60)
             suppliers.append({
-                "supplier_id": f"SUP-{i + 1:03d}",
-                "supplier_name": names[i % len(names)],
+                "vendor_id": f"SUP-{i + 1:03d}",
+                "vendor_name": names[i % len(names)],
                 "supplier_site_id": f"SITE-{i + 1:03d}",
-                "payment_terms": self._rng.choice(terms),
-                "status": "ACTIVE",
+                "terms_id": self._rng.choice(terms),
+                "enabled_flag": "Y",
+                "segment1": f"SUP-{i + 1:03d}",
+                "vendor_type_lookup_code": vendor_types[i % len(vendor_types)],
+                "start_date_active": self._fmt(start_active),
+                "standard_industry_class": industry_classes[i % len(industry_classes)],
+                "last_update_date": self._fmt(start_active),
             })
         return suppliers
 
@@ -115,12 +123,17 @@ class MockDataGenerator:
             headers.append({
                 "po_header_id": i + 1,
                 "po_number": po_num,
-                "supplier_id": sup["supplier_id"],
-                "supplier_name": sup["supplier_name"],
+                "vendor_id": sup["vendor_id"],
+                "vendor_name": sup["vendor_name"],
                 "status": "APPROVED",
                 "creation_date": self._fmt(creation),
                 "total_amount": amount,
                 "currency": "CNY",
+                "type_lookup_code": "STANDARD",
+                "authorization_status": "APPROVED",
+                "buyer_id": 1001,
+                "org_id": 1,
+                "last_update_date": self._fmt(creation),
                 "_creation_date_obj": creation,  # 内部用，不入库
             })
             lines.append({
@@ -128,13 +141,15 @@ class MockDataGenerator:
                 "po_header_id": i + 1,
                 "po_number": po_num,
                 "line_num": 1,
-                "item_code": item[0],
+                "item_id": item[0],
                 "item_description": item[1],
                 "quantity": qty,
                 "unit_price": unit_price,
                 "amount": amount,
-                "category": item[2],
+                "category_id": item[2],
                 "standard_price": standard_price,
+                "unit_meas_lookup_code": "EA",
+                "last_update_date": self._fmt(creation),
             })
             promised = self._offset_date(creation, 20, 45, self._rng)
             locations.append({
@@ -144,6 +159,7 @@ class MockDataGenerator:
                 "promised_date": self._fmt(promised),
                 "need_by_date": self._fmt(promised),
                 "quantity": qty,
+                "last_update_date": self._fmt(creation),
             })
         return headers, lines, locations
 
@@ -175,11 +191,16 @@ class MockDataGenerator:
             accepted = rcv_qty - rejected
             base_date = creation_map.get(pl["po_number"], self._today)
             rcv_date = self._offset_date(base_date, 25, 50, self._rng)
+            shipped_date = self._offset_date(base_date, 20, 40, self._rng)
+            expected_rcv = self._offset_date(base_date, 22, 45, self._rng)
             headers.append({
                 "shipment_header_id": idx + 1,
                 "receipt_num": f"RCV-2024-{idx + 1:04d}",
-                "supplier_id": pl.get("supplier_id", ""),
+                "vendor_id": pl.get("vendor_id", ""),
                 "creation_date": self._fmt(rcv_date),
+                "shipped_date": self._fmt(shipped_date),
+                "expected_receipt_date": self._fmt(expected_rcv),
+                "last_update_date": self._fmt(rcv_date),
             })
             transactions.append({
                 "transaction_id": idx + 1,
@@ -191,7 +212,9 @@ class MockDataGenerator:
                 "accepted_quantity": accepted,
                 "rejected_quantity": rejected,
                 "transaction_date": self._fmt(rcv_date),
-                "supplier_id": pl.get("supplier_id", ""),
+                "vendor_id": pl.get("vendor_id", ""),
+                "source_document_code": "PO",
+                "last_update_date": self._fmt(rcv_date),
             })
         return headers, transactions
 
@@ -222,25 +245,32 @@ class MockDataGenerator:
             inv_num = f"INV-2024-{idx + 1:04d}"
             invoices.append({
                 "invoice_id": idx + 1,
-                "invoice_number": inv_num,
+                "invoice_num": inv_num,
                 "po_number": ph["po_number"],
-                "supplier_id": ph["supplier_id"],
-                "supplier_name": ph["supplier_name"],
+                "vendor_id": ph["vendor_id"],
+                "vendor_name": ph["vendor_name"],
                 "invoice_amount": inv_amount,
                 "invoice_date": self._fmt(inv_date),
                 "due_date": self._fmt(due_date),
                 "discount_due_date": self._fmt(disc_due),
-                "status": "VALIDATED",
-                "payment_terms": "NET30",
+                "approval_status": "VALIDATED",
+                "terms_id": "NET30",
+                "invoice_type_lookup_code": "STANDARD",
+                "invoice_currency_code": "CNY",
+                "last_update_date": self._fmt(inv_date),
             })
             inv_lines.append({
                 "invoice_line_id": idx + 1,
                 "invoice_id": idx + 1,
-                "invoice_number": inv_num,
+                "invoice_num": inv_num,
                 "po_number": ph["po_number"],
                 "line_num": 1,
                 "amount": inv_amount,
                 "quantity": pl["quantity"],
+                "line_number": 1,
+                "line_type_lookup_code": "ITEM",
+                "accounting_date": self._fmt(inv_date),
+                "last_update_date": self._fmt(inv_date),
             })
         return invoices, inv_lines
 
@@ -283,15 +313,255 @@ class MockDataGenerator:
             pay_date = min(pay_date, self._today)
 
             payments.append({
-                "payment_id": idx + 1,
-                "payment_number": f"PAY-2024-{idx + 1:04d}",
-                "invoice_number": inv["invoice_number"],
-                "supplier_id": inv["supplier_id"],
-                "payment_amount": pay_amount,
-                "payment_date": self._fmt(pay_date),
-                "payment_method": self._rng.choice(["BANK_TRANSFER", "CHECK"]),
+                "check_id": idx + 1,
+                "check_number": f"PAY-2024-{idx + 1:04d}",
+                "invoice_num": inv["invoice_num"],
+                "vendor_id": inv["vendor_id"],
+                "amount": pay_amount,
+                "check_date": self._fmt(pay_date),
+                "payment_method_code": self._rng.choice(["BANK_TRANSFER", "CHECK"]),
+                "status_lookup_code": "NEGOTIABLE",
+                "currency_code": "CNY",
+                "last_update_date": self._fmt(pay_date),
             })
         return payments
+
+    def generate_supplier_sites(
+        self,
+        suppliers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成供应商地点数据（AP_SUPPLIER_SITES_ALL）。每个供应商一个地点。"""
+        cities = ["深圳", "北京", "上海", "广州", "杭州"]
+        sites: list[dict[str, Any]] = []
+        for i, sup in enumerate(suppliers):
+            sites.append({
+                "vendor_site_id": i + 1,
+                "vendor_id": sup["vendor_id"],
+                "vendor_site_code": f"SITE-{i + 1:03d}",
+                "address_line1": f"科技园路{i + 1}号",
+                "city": cities[i % len(cities)],
+                "country": "CN",
+                "phone": f"0755-{80000000 + i}",
+                "email_address": f"contact{i + 1}@supplier{i + 1}.com",
+                "purchasing_site_flag": "Y",
+                "pay_site_flag": "Y",
+                "org_id": 1,
+                "last_update_date": sup["last_update_date"],
+            })
+        return sites
+
+    def generate_materials(self) -> list[dict[str, Any]]:
+        """生成物料主数据（MTL_SYSTEM_ITEMS_B）。"""
+        items = [
+            ("MAT-001", "钢板", "RAW_MATERIAL", 150.0),
+            ("MAT-002", "铜线", "RAW_MATERIAL", 85.0),
+            ("CMP-001", "电路板", "COMPONENT", 320.0),
+            ("CMP-002", "电容器", "COMPONENT", 12.5),
+            ("PKG-001", "包装箱", "PACKAGING", 8.0),
+        ]
+        materials: list[dict[str, Any]] = []
+        for i, (seg, desc, item_type, price) in enumerate(items):
+            materials.append({
+                "inventory_item_id": i + 1,
+                "organization_id": 1,
+                "segment1": seg,
+                "description": desc,
+                "primary_uom_code": "EA",
+                "item_type": item_type,
+                "list_price_per_unit": price,
+                "purchasing_item_flag": "Y",
+                "purchasing_enabled_flag": "Y",
+                "inventory_item_status_code": "Active",
+            })
+        return materials
+
+    def generate_po_distributions(
+        self,
+        po_lines: list[dict[str, Any]],
+        po_locations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成 PO 分配数据（PO_DISTRIBUTIONS_ALL）。每行一条分配。"""
+        distributions: list[dict[str, Any]] = []
+        for idx, (pl, loc) in enumerate(zip(po_lines, po_locations)):
+            distributions.append({
+                "po_distribution_id": idx + 1,
+                "po_header_id": pl["po_header_id"],
+                "po_line_id": pl["po_line_id"],
+                "line_location_id": loc["line_location_id"],
+                "quantity_ordered": pl["quantity"],
+                "destination_type_code": "EXPENSE",
+                "org_id": 1,
+            })
+        return distributions
+
+    def generate_shipment_lines(
+        self,
+        rcv_headers: list[dict[str, Any]],
+        po_lines: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成收货单行数据（RCV_SHIPMENT_LINES）。每个收货单一行。"""
+        shipment_lines: list[dict[str, Any]] = []
+        for idx, (rh, pl) in enumerate(zip(rcv_headers, po_lines)):
+            shipment_lines.append({
+                "shipment_line_id": idx + 1,
+                "shipment_header_id": rh["shipment_header_id"],
+                "line_num": 1,
+                "po_header_id": pl["po_header_id"],
+                "po_line_id": pl["po_line_id"],
+                "item_id": idx + 1,
+                "quantity_shipped": pl["quantity"],
+                "quantity_received": pl["quantity"],
+                "unit_of_measure": "EA",
+            })
+        return shipment_lines
+
+    def generate_invoice_distributions(
+        self,
+        invoices: list[dict[str, Any]],
+        invoice_lines: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成发票分配数据（AP_INVOICE_DISTRIBUTIONS_ALL）。每张发票一条分配。"""
+        distributions: list[dict[str, Any]] = []
+        for idx, (inv, il) in enumerate(zip(invoices, invoice_lines)):
+            distributions.append({
+                "invoice_distribution_id": idx + 1,
+                "invoice_id": inv["invoice_id"],
+                "invoice_line_number": 1,
+                "distribution_line_number": 1,
+                "amount": il["amount"],
+                "accounting_date": inv["invoice_date"],
+                "match_status_flag": "A",
+                "posted_flag": "Y",
+            })
+        return distributions
+
+    def generate_invoice_payments(
+        self,
+        invoices: list[dict[str, Any]],
+        payments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成发票付款关联数据（AP_INVOICE_PAYMENTS_ALL）。每笔付款一条关联。"""
+        inv_payments: list[dict[str, Any]] = []
+        for idx, (inv, pay) in enumerate(zip(invoices, payments)):
+            inv_payments.append({
+                "invoice_payment_id": idx + 1,
+                "invoice_id": inv["invoice_id"],
+                "check_id": pay["check_id"],
+                "payment_num": 1,
+                "amount": pay["amount"],
+                "accounting_date": pay["check_date"],
+            })
+        return inv_payments
+
+    def generate_payment_schedules(
+        self,
+        invoices: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """生成付款计划数据（AP_PAYMENT_SCHEDULES_ALL）。每张发票一条计划。"""
+        schedules: list[dict[str, Any]] = []
+        for idx, inv in enumerate(invoices):
+            schedules.append({
+                "payment_schedule_id": idx + 1,
+                "invoice_id": inv["invoice_id"],
+                "payment_num": 1,
+                "due_date": inv["due_date"],
+                "discount_date": inv.get("discount_due_date", inv["due_date"]),
+                "gross_amount": inv["invoice_amount"],
+                "amount_remaining": 0,
+                "payment_status_flag": "Y",
+            })
+        return schedules
+
+    def generate_sourcing(
+        self,
+        suppliers: list[dict[str, Any]],
+        count: int = 5,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        """生成寻源/合同数据（PON_AUCTION_HEADERS, PON_BID_HEADERS, OKC_K_HEADERS, OKC_K_LINES）。"""
+        auctions: list[dict[str, Any]] = []
+        bids: list[dict[str, Any]] = []
+        contracts: list[dict[str, Any]] = []
+        contract_lines: list[dict[str, Any]] = []
+
+        bid_id = 1
+        auction_types = ["SEALED_BID", "REVERSE_AUCTION", "RFQ"]
+        for i in range(count):
+            open_dt = date(2025, 6, 1) + timedelta(days=i * 30)
+            close_dt = open_dt + timedelta(days=14)
+            auctions.append({
+                "auction_header_id": i + 1,
+                "document_number": f"AUC-{i + 1:03d}",
+                "auction_title": f"Sourcing Event {i + 1}",
+                "auction_type": auction_types[i % len(auction_types)],
+                "auction_status": "AUCTION_CLOSED",
+                "open_bidding_date": self._fmt(open_dt),
+                "close_bidding_date": self._fmt(close_dt),
+                "outcome": "AWARDED",
+                "org_id": 1,
+            })
+            # 2-3 bids per auction
+            num_bids = 2 if i % 2 == 0 else 3
+            for b in range(num_bids):
+                sup = suppliers[b % len(suppliers)]
+                bids.append({
+                    "bid_number": bid_id,
+                    "auction_header_id": i + 1,
+                    "bid_status": "ACTIVE",
+                    "vendor_id": b + 1,
+                    "bid_total": round(self._rng.uniform(50000, 200000), 2),
+                    "bid_currency_code": "CNY",
+                    "publish_date": self._fmt(open_dt + timedelta(days=1)),
+                    "award_status": "AWARDED" if b == 0 else "REJECTED",
+                    "award_date": self._fmt(close_dt) if b == 0 else None,
+                })
+                bid_id += 1
+
+        # 3 contracts with 2 lines each
+        contract_line_id = 1
+        items_for_contract = [
+            (1, "钢板", 145.0),
+            (2, "铜线", 82.0),
+            (3, "电路板", 310.0),
+        ]
+        for i in range(3):
+            start = date(2025, 1, 1) + timedelta(days=i * 120)
+            end = start + timedelta(days=365)
+            contracts.append({
+                "id": i + 1,
+                "contract_number": f"CNT-{i + 1:03d}",
+                "sts_code": "ACTIVE",
+                "start_date": self._fmt(start),
+                "end_date": self._fmt(end),
+                "estimated_amount": round(self._rng.uniform(500000, 2000000), 2),
+                "currency_code": "CNY",
+                "authoring_org_id": 1,
+                "buy_or_sell": "B",
+                "description": f"Purchase Contract {i + 1}",
+            })
+            item_id, item_desc, price = items_for_contract[i]
+            for ln in range(1, 3):
+                contract_lines.append({
+                    "id": contract_line_id,
+                    "chr_id": i + 1,
+                    "line_number": str(ln),
+                    "sts_code": "ACTIVE",
+                    "start_date": self._fmt(start),
+                    "end_date": self._fmt(end),
+                    "item_id": item_id,
+                    "item_description": item_desc,
+                    "price_unit": price,
+                    "price_negotiated": round(price * 0.95, 2),
+                    "quantity": self._rng.randint(1000, 5000),
+                    "uom_code": "EA",
+                })
+                contract_line_id += 1
+
+        return auctions, bids, contracts, contract_lines
 
     def generate_all(self, count: int = 50) -> dict[str, list[dict[str, Any]]]:
         """
@@ -304,14 +574,22 @@ class MockDataGenerator:
             包含所有表数据的字典。
         """
         suppliers = self.generate_suppliers()
+        supplier_sites = self.generate_supplier_sites(suppliers)
+        materials = self.generate_materials()
         po_headers, po_lines, po_locations = self.generate_purchase_orders(suppliers, count=count)
-        # 补充 supplier_id 到 po_lines（收货生成需要）
-        line_sup_map = {h["po_number"]: h["supplier_id"] for h in po_headers}
+        # 补充 vendor_id 到 po_lines（收货生成需要）
+        line_sup_map = {h["po_number"]: h["vendor_id"] for h in po_headers}
         for pl in po_lines:
-            pl["supplier_id"] = line_sup_map.get(pl["po_number"], "")
+            pl["vendor_id"] = line_sup_map.get(pl["po_number"], "")
+        po_distributions = self.generate_po_distributions(po_lines, po_locations)
         rcv_headers, rcv_transactions = self.generate_receipts(po_lines, po_headers)
+        shipment_lines = self.generate_shipment_lines(rcv_headers, po_lines)
         invoices, invoice_lines = self.generate_invoices(po_headers, po_lines)
+        invoice_distributions = self.generate_invoice_distributions(invoices, invoice_lines)
         payments = self.generate_payments(invoices)
+        invoice_payments = self.generate_invoice_payments(invoices, payments)
+        payment_schedules = self.generate_payment_schedules(invoices)
+        auctions, auction_bids, contracts, contract_lines = self.generate_sourcing(suppliers)
 
         # 清理内部字段
         for h in po_headers:
@@ -319,12 +597,23 @@ class MockDataGenerator:
 
         return {
             "suppliers": suppliers,
+            "supplier_sites": supplier_sites,
+            "materials": materials,
             "po_headers": po_headers,
             "po_lines": po_lines,
             "po_line_locations": po_locations,
+            "po_distributions": po_distributions,
             "rcv_headers": rcv_headers,
             "rcv_transactions": rcv_transactions,
+            "shipment_lines": shipment_lines,
             "invoices": invoices,
             "invoice_lines": invoice_lines,
+            "invoice_distributions": invoice_distributions,
             "payments": payments,
+            "invoice_payments": invoice_payments,
+            "payment_schedules": payment_schedules,
+            "auctions": auctions,
+            "bids": auction_bids,
+            "contracts": contracts,
+            "contract_lines": contract_lines,
         }

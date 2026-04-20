@@ -16,7 +16,7 @@ from modules.p2p.tools._output import _clip_and_dump
 
 
 def _analyze_receipt_anomalies_sync(
-    repo: P2PRepository, supplier_id: str, po_number: str, days: int
+    repo: P2PRepository, vendor_id: str, po_number: str, days: int
 ) -> list[dict[str, Any]]:
     """同步执行收货异常分析。"""
     from datetime import date, timedelta
@@ -28,8 +28,8 @@ def _analyze_receipt_anomalies_sync(
 
     with repo._session_factory() as session:
         stmt = select(RcvTransaction)
-        if supplier_id:
-            stmt = stmt.where(RcvTransaction.supplier_id == supplier_id)
+        if vendor_id:
+            stmt = stmt.where(RcvTransaction.vendor_id == vendor_id)
         if po_number:
             stmt = stmt.where(RcvTransaction.po_number == po_number)
         stmt = stmt.where(RcvTransaction.transaction_date >= cutoff)
@@ -66,7 +66,7 @@ def _analyze_receipt_anomalies_sync(
                 anomalies.append({
                     "receipt_id": f"GR-{rcv.transaction_id:04d}",
                     "po_number": rcv.po_number,
-                    "supplier_id": rcv.supplier_id,
+                    "vendor_id": rcv.vendor_id,
                     "po_quantity": float(po_line.quantity),
                     "received_quantity": float(rcv.quantity),
                     "rejected_quantity": float(rcv.rejected_quantity),
@@ -79,7 +79,7 @@ def _analyze_receipt_anomalies_sync(
 
 @tool
 async def analyze_receipt_anomalies(
-    supplier_id: str = "",
+    vendor_id: str = "",
     po_number: str = "",
     days: int = 30,
 ) -> str:
@@ -89,7 +89,7 @@ async def analyze_receipt_anomalies(
     拒收（rejected_quantity > 0）、延迟收货（收货日期 > 承诺日期）。
 
     Args:
-        supplier_id: 供应商 ID，空则分析全部。
+        vendor_id: 供应商 ID，空则分析全部。
         po_number: 采购订单号，空则分析全部。
         days: 分析最近 N 天。
 
@@ -98,7 +98,7 @@ async def analyze_receipt_anomalies(
     """
     repo = _get_repository()
     result = await asyncio.to_thread(
-        _analyze_receipt_anomalies_sync, repo, supplier_id, po_number, days
+        _analyze_receipt_anomalies_sync, repo, vendor_id, po_number, days
     )
     return _clip_and_dump(result)
 
@@ -107,7 +107,7 @@ async def analyze_receipt_anomalies(
 
 
 def _detect_duplicate_invoices_sync(
-    repo: P2PRepository, supplier_id: str, days: int
+    repo: P2PRepository, vendor_id: str, days: int
 ) -> list[dict[str, Any]]:
     """同步执行发票重复检测。"""
     from datetime import date, timedelta
@@ -119,14 +119,14 @@ def _detect_duplicate_invoices_sync(
 
     with repo._session_factory() as session:
         stmt = select(ApInvoice).where(ApInvoice.invoice_date >= cutoff)
-        if supplier_id:
-            stmt = stmt.where(ApInvoice.supplier_id == supplier_id)
+        if vendor_id:
+            stmt = stmt.where(ApInvoice.vendor_id == vendor_id)
         invoices = session.scalars(stmt).all()
 
-        # 按 (supplier_id, invoice_amount) 分组
+        # 按 (vendor_id, invoice_amount) 分组
         groups: dict[tuple[str, float], list[Any]] = {}
         for inv in invoices:
-            key = (inv.supplier_id, float(inv.invoice_amount))
+            key = (inv.vendor_id, float(inv.invoice_amount))
             groups.setdefault(key, []).append(inv)
 
         for (sid, amount), group in groups.items():
@@ -139,11 +139,11 @@ def _detect_duplicate_invoices_sync(
                     gap = abs((group[j].invoice_date - group[i].invoice_date).days)
                     if gap <= 3:
                         duplicates.append({
-                            "supplier_id": sid,
-                            "supplier_name": group[i].supplier_name,
+                            "vendor_id": sid,
+                            "vendor_name": group[i].vendor_name,
                             "amount": amount,
-                            "invoice_a": group[i].invoice_number,
-                            "invoice_b": group[j].invoice_number,
+                            "invoice_a": group[i].invoice_num,
+                            "invoice_b": group[j].invoice_num,
                             "date_a": group[i].invoice_date.isoformat(),
                             "date_b": group[j].invoice_date.isoformat(),
                             "date_gap_days": gap,
@@ -154,13 +154,13 @@ def _detect_duplicate_invoices_sync(
 
 @tool
 async def detect_duplicate_invoices(
-    supplier_id: str = "",
+    vendor_id: str = "",
     days: int = 30,
 ) -> str:
     """检测重复发票：同供应商、同金额、同日期（±3天）的发票对。
 
     Args:
-        supplier_id: 供应商 ID，空则检查全部。
+        vendor_id: 供应商 ID，空则检查全部。
         days: 分析最近 N 天。
 
     Returns:
@@ -168,7 +168,7 @@ async def detect_duplicate_invoices(
     """
     repo = _get_repository()
     result = await asyncio.to_thread(
-        _detect_duplicate_invoices_sync, repo, supplier_id, days
+        _detect_duplicate_invoices_sync, repo, vendor_id, days
     )
     return _clip_and_dump(result)
 
@@ -177,7 +177,7 @@ async def detect_duplicate_invoices(
 
 
 def _analyze_discount_utilization_sync(
-    repo: P2PRepository, supplier_id: str, days: int
+    repo: P2PRepository, vendor_id: str, days: int
 ) -> dict[str, Any]:
     """同步执行折扣利用率分析。"""
     from datetime import date, timedelta
@@ -195,8 +195,8 @@ def _analyze_discount_utilization_sync(
                 ApInvoice.discount_due_date.isnot(None),
             )
         )
-        if supplier_id:
-            stmt = stmt.where(ApInvoice.supplier_id == supplier_id)
+        if vendor_id:
+            stmt = stmt.where(ApInvoice.vendor_id == vendor_id)
         invoices = session.scalars(stmt).all()
 
         total_eligible = len(invoices)
@@ -208,7 +208,7 @@ def _analyze_discount_utilization_sync(
         for inv in invoices:
             payment = session.execute(
                 select(ApPayment)
-                .where(ApPayment.invoice_number == inv.invoice_number)
+                .where(ApPayment.invoice_num == inv.invoice_num)
                 .limit(1)
             ).scalar()
 
@@ -216,18 +216,18 @@ def _analyze_discount_utilization_sync(
                 continue
 
             potential_saving = float(inv.invoice_amount) * discount_rate
-            if payment.payment_date <= inv.discount_due_date:
+            if payment.check_date <= inv.discount_due_date:
                 utilized += 1
             else:
                 missed += 1
                 missed_amount += potential_saving
                 details.append({
-                    "invoice_number": inv.invoice_number,
-                    "supplier_name": inv.supplier_name,
+                    "invoice_num": inv.invoice_num,
+                    "vendor_name": inv.vendor_name,
                     "invoice_amount": float(inv.invoice_amount),
                     "discount_due_date": inv.discount_due_date.isoformat(),
-                    "payment_date": payment.payment_date.isoformat(),
-                    "days_late": (payment.payment_date - inv.discount_due_date).days,
+                    "check_date": payment.check_date.isoformat(),
+                    "days_late": (payment.check_date - inv.discount_due_date).days,
                     "missed_saving": round(potential_saving, 2),
                 })
 
@@ -245,7 +245,7 @@ def _analyze_discount_utilization_sync(
 
 @tool
 async def analyze_discount_utilization(
-    supplier_id: str = "",
+    vendor_id: str = "",
     days: int = 30,
 ) -> str:
     """分析早付折扣利用率：哪些发票有折扣机会但未利用。
@@ -254,7 +254,7 @@ async def analyze_discount_utilization(
     计算折扣利用率和因未利用折扣损失的金额。
 
     Args:
-        supplier_id: 供应商 ID，空则分析全部。
+        vendor_id: 供应商 ID，空则分析全部。
         days: 分析最近 N 天。
 
     Returns:
@@ -262,7 +262,7 @@ async def analyze_discount_utilization(
     """
     repo = _get_repository()
     result = await asyncio.to_thread(
-        _analyze_discount_utilization_sync, repo, supplier_id, days
+        _analyze_discount_utilization_sync, repo, vendor_id, days
     )
     return _clip_and_dump(result)
 
@@ -284,13 +284,13 @@ def _analyze_vendor_concentration_sync(
         # 按供应商汇总支出
         stmt = (
             select(
-                PoHeader.supplier_id,
-                PoHeader.supplier_name,
+                PoHeader.vendor_id,
+                PoHeader.vendor_name,
                 func.sum(PoHeader.total_amount).label("total_spend"),
                 func.count(func.distinct(PoHeader.po_number)).label("order_count"),
             )
             .where(PoHeader.creation_date >= cutoff)
-            .group_by(PoHeader.supplier_id, PoHeader.supplier_name)
+            .group_by(PoHeader.vendor_id, PoHeader.vendor_name)
             .order_by(func.sum(PoHeader.total_amount).desc())
         )
         vendor_rows = session.execute(stmt).all()
@@ -302,8 +302,8 @@ def _analyze_vendor_concentration_sync(
             spend = float(r.total_spend or 0)
             pct = (spend / grand_total * 100) if grand_total > 0 else 0
             entry = {
-                "supplier_id": r.supplier_id,
-                "supplier_name": r.supplier_name,
+                "vendor_id": r.vendor_id,
+                "vendor_name": r.vendor_name,
                 "total_spend": round(spend, 2),
                 "order_count": r.order_count,
                 "spend_pct": round(pct, 1),
@@ -315,16 +315,16 @@ def _analyze_vendor_concentration_sync(
         # 单一来源品类
         cat_stmt = (
             select(
-                PoLine.category,
-                func.count(func.distinct(PoHeader.supplier_id)).label("vendor_count"),
+                PoLine.category_id,
+                func.count(func.distinct(PoHeader.vendor_id)).label("vendor_count"),
             )
             .join(PoHeader, PoHeader.po_header_id == PoLine.po_header_id)
             .where(PoHeader.creation_date >= cutoff)
-            .group_by(PoLine.category)
-            .having(func.count(func.distinct(PoHeader.supplier_id)) == 1)
+            .group_by(PoLine.category_id)
+            .having(func.count(func.distinct(PoHeader.vendor_id)) == 1)
         )
         single_source = session.execute(cat_stmt).all()
-        single_source_categories = [r.category for r in single_source]
+        single_source_categories = [r.category_id for r in single_source]
 
     return {
         "grand_total_spend": round(grand_total, 2),
@@ -362,7 +362,7 @@ async def analyze_vendor_concentration(
 
 
 def _calculate_po_cycle_time_sync(
-    repo: P2PRepository, days: int, supplier_id: str
+    repo: P2PRepository, days: int, vendor_id: str
 ) -> dict[str, Any]:
     """同步执行 PO 周期分析。"""
     from datetime import date, timedelta
@@ -373,8 +373,8 @@ def _calculate_po_cycle_time_sync(
 
     with repo._session_factory() as session:
         stmt = select(PoHeader).where(PoHeader.creation_date >= cutoff)
-        if supplier_id:
-            stmt = stmt.where(PoHeader.supplier_id == supplier_id)
+        if vendor_id:
+            stmt = stmt.where(PoHeader.vendor_id == vendor_id)
         orders = session.scalars(stmt).all()
 
         details: list[dict[str, Any]] = []
@@ -387,7 +387,7 @@ def _calculate_po_cycle_time_sync(
         for po in orders:
             entry: dict[str, Any] = {
                 "po_number": po.po_number,
-                "supplier_name": po.supplier_name,
+                "vendor_name": po.vendor_name,
                 "created_date": po.creation_date.isoformat(),
             }
 
@@ -406,8 +406,8 @@ def _calculate_po_cycle_time_sync(
 
                 # 最早付款日期（通过发票关联）
                 first_payment_date = session.execute(
-                    select(func.min(ApPayment.payment_date))
-                    .join(ApInvoice, ApPayment.invoice_number == ApInvoice.invoice_number)
+                    select(func.min(ApPayment.check_date))
+                    .join(ApInvoice, ApPayment.invoice_num == ApInvoice.invoice_num)
                     .where(ApInvoice.po_number == po.po_number)
                 ).scalar()
 
@@ -446,19 +446,19 @@ def _calculate_po_cycle_time_sync(
 @tool
 async def calculate_po_cycle_time(
     days: int = 30,
-    supplier_id: str = "",
+    vendor_id: str = "",
 ) -> str:
     """计算采购订单全流程周期：创建→收货→付款各阶段耗时。
 
     Args:
         days: 分析最近 N 天的采购订单。
-        supplier_id: 供应商 ID，空则分析全部。
+        vendor_id: 供应商 ID，空则分析全部。
 
     Returns:
         JSON 格式的周期分析结果。
     """
     repo = _get_repository()
     result = await asyncio.to_thread(
-        _calculate_po_cycle_time_sync, repo, days, supplier_id
+        _calculate_po_cycle_time_sync, repo, days, vendor_id
     )
     return _clip_and_dump(result)

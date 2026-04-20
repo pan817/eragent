@@ -70,9 +70,9 @@ class DocumentRef(BaseModel):
 
     po_number: str = Field(default="", description="采购订单号")
     gr_number: str = Field(default="", description="收货单号")
-    invoice_number: str = Field(default="", description="发票号")
-    payment_number: str = Field(default="", description="付款单号")
-    supplier_name: str = Field(default="", description="供应商名称")
+    invoice_num: str = Field(default="", description="发票号")
+    check_number: str = Field(default="", description="付款单号")
+    vendor_name: str = Field(default="", description="供应商名称")
 
 
 class AnomalyDetail(BaseModel):
@@ -116,8 +116,8 @@ class KPIValue(BaseModel):
 class SupplierKPIReport(BaseModel):
     """供应商绩效 KPI 报告。"""
 
-    supplier_id: str = Field(description="供应商 ID")
-    supplier_name: str = Field(description="供应商名称")
+    vendor_id: str = Field(description="供应商 ID")
+    vendor_name: str = Field(description="供应商名称")
     period: str = Field(description="评估周期")
     kpis: dict[str, KPIValue] = Field(description="各项 KPI 指标")
 

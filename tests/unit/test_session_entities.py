@@ -59,7 +59,7 @@ class TestEntityContextCRUD:
 
     def test_save_and_load(self, stm):
         """写入后能读回。"""
-        entities = {"po_number": "PO-001", "supplier_id": "SUP-001"}
+        entities = {"po_number": "PO-001", "vendor_id": "SUP-001"}
         stm.save_entity_context("sess-1", entities)
 
         loaded = stm._load_entity_context("sess-1")
@@ -68,10 +68,10 @@ class TestEntityContextCRUD:
     def test_save_merge_preserves_old_keys(self, stm):
         """第二次写入 merge：新 key 追加，旧 key 保留。"""
         stm.save_entity_context("sess-2", {"po_number": "PO-001"})
-        stm.save_entity_context("sess-2", {"supplier_id": "SUP-001"})
+        stm.save_entity_context("sess-2", {"vendor_id": "SUP-001"})
 
         loaded = stm._load_entity_context("sess-2")
-        assert loaded == {"po_number": "PO-001", "supplier_id": "SUP-001"}
+        assert loaded == {"po_number": "PO-001", "vendor_id": "SUP-001"}
 
     def test_save_merge_overwrites_same_key(self, stm):
         """同名 key 新值覆盖旧值。"""
@@ -98,8 +98,8 @@ class TestEntityContextCRUD:
         """空值实体不写入。"""
         stm.save_entity_context("sess-5", {
             "po_number": "PO-001",
-            "supplier_id": "",
-            "invoice_number": None,
+            "vendor_id": "",
+            "invoice_num": None,
         })
 
         loaded = stm._load_entity_context("sess-5")
@@ -125,9 +125,9 @@ class TestReferenceResolutionWithEntityContext:
     @pytest.mark.parametrize("query,entity_key,entity_val,expected_fragment", [
         # 5 种实体的指代消解
         ("这个PO的供应商绩效", "po_number", "PO-2024-0001", "采购订单 PO-2024-0001"),
-        ("该供应商的交期表现", "supplier_id", "SUP-001", "供应商 SUP-001"),
-        ("这个付款单的状态", "payment_number", "PAY-001", "付款单 PAY-001"),
-        ("该发票的三路匹配", "invoice_number", "INV-001", "发票 INV-001"),
+        ("该供应商的交期表现", "vendor_id", "SUP-001", "供应商 SUP-001"),
+        ("这个付款单的状态", "check_number", "PAY-001", "付款单 PAY-001"),
+        ("该发票的三路匹配", "invoice_num", "INV-001", "发票 INV-001"),
         ("这个收货单对应的PO", "receipt_number", "RCV-001", "收货单 RCV-001"),
     ])
     def test_reference_resolved_from_entity_context(
@@ -170,12 +170,12 @@ class TestReferenceResolutionWithEntityContext:
         session_ctx = {
             "has_history": True,
             "context_summary": "",
-            "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"},
+            "entities": {"po_number": "PO-001", "vendor_id": "SUP-001"},
         }
 
         _, relevant = resolve_references("它的情况怎么样", session_ctx)
 
-        assert relevant == {"po_number": "PO-001", "supplier_id": "SUP-001"}
+        assert relevant == {"po_number": "PO-001", "vendor_id": "SUP-001"}
 
 
 # ============================================================
@@ -194,31 +194,31 @@ class TestMultiTurnCrossEntityScenarios:
         # 轮 2：PO 仍在，追加 supplier（模拟 enrich_entities 结果）
         stm.save_entity_context("multi-1", {
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
+            "vendor_id": "SUP-001",
         })
 
         # 轮 3：读取——两个实体都在
         entities = stm._load_entity_context("multi-1")
         assert entities["po_number"] == "PO-001"
-        assert entities["supplier_id"] == "SUP-001"
+        assert entities["vendor_id"] == "SUP-001"
 
     def test_invoice_to_po_to_supplier_three_level(self, stm):
         """发票 → PO → 供应商三级级联。"""
         # 轮 1：只有发票
-        stm.save_entity_context("multi-2", {"invoice_number": "INV-001"})
+        stm.save_entity_context("multi-2", {"invoice_num": "INV-001"})
 
         # 轮 2：enrich 补充了 PO 和 supplier
         stm.save_entity_context("multi-2", {
-            "invoice_number": "INV-001",
+            "invoice_num": "INV-001",
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
+            "vendor_id": "SUP-001",
         })
 
         entities = stm._load_entity_context("multi-2")
         assert entities == {
-            "invoice_number": "INV-001",
+            "invoice_num": "INV-001",
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
+            "vendor_id": "SUP-001",
         }
 
     def test_context_switch_overwrites_stale_entity(self, stm):
@@ -226,18 +226,18 @@ class TestMultiTurnCrossEntityScenarios:
         # 轮 1-2：PO-001 + SUP-001
         stm.save_entity_context("multi-3", {
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
+            "vendor_id": "SUP-001",
         })
 
         # 轮 3：用户切换到 PO-002，enrich 得到 SUP-002
         stm.save_entity_context("multi-3", {
             "po_number": "PO-002",
-            "supplier_id": "SUP-002",
+            "vendor_id": "SUP-002",
         })
 
         entities = stm._load_entity_context("multi-3")
         assert entities["po_number"] == "PO-002"
-        assert entities["supplier_id"] == "SUP-002"  # 旧 SUP-001 被覆盖
+        assert entities["vendor_id"] == "SUP-002"  # 旧 SUP-001 被覆盖
 
     def test_gr_prefix_receipt_number(self, stm):
         """GR-前缀收货单号正确存储和读取。"""
@@ -248,23 +248,23 @@ class TestMultiTurnCrossEntityScenarios:
 
     def test_payment_to_invoice_cascade(self, stm):
         """付款单 → 发票级联。"""
-        stm.save_entity_context("multi-5", {"payment_number": "PAY-001"})
+        stm.save_entity_context("multi-5", {"check_number": "PAY-001"})
         stm.save_entity_context("multi-5", {
-            "payment_number": "PAY-001",
-            "invoice_number": "INV-001",
+            "check_number": "PAY-001",
+            "invoice_num": "INV-001",
         })
 
         entities = stm._load_entity_context("multi-5")
-        assert entities["payment_number"] == "PAY-001"
-        assert entities["invoice_number"] == "INV-001"
+        assert entities["check_number"] == "PAY-001"
+        assert entities["invoice_num"] == "INV-001"
 
     def test_all_five_entities_coexist(self, stm):
         """5 种实体全部共存。"""
         all_entities = {
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
-            "invoice_number": "INV-001",
-            "payment_number": "PAY-001",
+            "vendor_id": "SUP-001",
+            "invoice_num": "INV-001",
+            "check_number": "PAY-001",
             "receipt_number": "RCV-001",
         }
         stm.save_entity_context("multi-6", all_entities)
@@ -276,12 +276,12 @@ class TestMultiTurnCrossEntityScenarios:
         """轮2只提到supplier，轮1的PO不丢失。"""
         stm.save_entity_context("multi-7", {"po_number": "PO-001"})
         # 轮 2 只有 supplier（指代消解走了"该供应商"路径）
-        stm.save_entity_context("multi-7", {"supplier_id": "SUP-001"})
+        stm.save_entity_context("multi-7", {"vendor_id": "SUP-001"})
 
         entities = stm._load_entity_context("multi-7")
         # 两者都在
         assert entities["po_number"] == "PO-001"
-        assert entities["supplier_id"] == "SUP-001"
+        assert entities["vendor_id"] == "SUP-001"
 
 
 # ============================================================
@@ -324,7 +324,7 @@ class TestOrchestratorSaveSessionEntities:
         )
         parsed_params = {
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
+            "vendor_id": "SUP-001",
             "days": 30,
         }
 
@@ -332,7 +332,7 @@ class TestOrchestratorSaveSessionEntities:
 
         entities = stm._load_entity_context("orch-1")
         assert entities["po_number"] == "PO-001"
-        assert entities["supplier_id"] == "SUP-001"
+        assert entities["vendor_id"] == "SUP-001"
         assert "days" not in entities
 
     @pytest.mark.asyncio
@@ -357,7 +357,7 @@ class TestOrchestratorSaveSessionEntities:
 
         entities = stm._load_entity_context("orch-2")
         assert entities["po_number"] == "PO-2024-0001"
-        assert entities["supplier_id"] == "SUP-003"
+        assert entities["vendor_id"] == "SUP-003"
 
     @pytest.mark.asyncio
     async def test_parsed_params_takes_priority_over_report(self, orchestrator, stm):
@@ -374,10 +374,10 @@ class TestOrchestratorSaveSessionEntities:
             time_range="30天",
             report_markdown="对比供应商 SUP-001 和 SUP-002 的绩效",
         )
-        parsed_params = {"supplier_id": "SUP-001", "days": 30}
+        parsed_params = {"vendor_id": "SUP-001", "days": 30}
 
         await orchestrator._save_session_entities("orch-3", parsed_params, result)
 
         entities = stm._load_entity_context("orch-3")
         # parsed_params 的 SUP-001 优先，report 的 SUP-002 不覆盖
-        assert entities["supplier_id"] == "SUP-001"
+        assert entities["vendor_id"] == "SUP-001"

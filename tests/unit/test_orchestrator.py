@@ -412,23 +412,23 @@ class TestReferenceResolution:
 
     def test_po_reference(self) -> None:
         """'这个po' 应只关联 po_number。"""
-        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"}}
+        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "vendor_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("分析这个po的风险", ctx)
         assert "PO-001" in enhanced
         assert "po_number" in entities
-        assert "supplier_id" not in entities
+        assert "vendor_id" not in entities
 
     def test_supplier_reference(self) -> None:
         """'这个供应商' 应只关联 supplier_id。"""
-        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"}}
+        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "vendor_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("评估这个供应商的绩效", ctx)
         assert "SUP-001" in enhanced
-        assert "supplier_id" in entities
+        assert "vendor_id" in entities
         assert "po_number" not in entities
 
     def test_no_reference(self) -> None:
         """无指代词时不做隐式继承。"""
-        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"}}
+        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "vendor_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("分析价格差异", ctx)
         assert enhanced == "分析价格差异"
         assert entities == {}  # 无指代词，不继承任何实体
@@ -442,10 +442,10 @@ class TestReferenceResolution:
 
     def test_generic_reference(self) -> None:
         """'它的'等通用指代应全部补充。"""
-        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "supplier_id": "SUP-001"}}
+        ctx = {"has_history": True, "entities": {"po_number": "PO-001", "vendor_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("它的情况怎么样", ctx)
         assert "po_number" in entities
-        assert "supplier_id" in entities
+        assert "vendor_id" in entities
 
     def test_order_reference(self) -> None:
         """'该订单' 应关联 po_number。"""
@@ -458,24 +458,24 @@ class TestReferenceResolution:
         """'这个支付单' 应只关联 payment_number。"""
         ctx = {
             "has_history": True,
-            "entities": {"payment_number": "PAY-001", "supplier_id": "SUP-001", "po_number": "PO-001"},
+            "entities": {"check_number": "PAY-001", "vendor_id": "SUP-001", "po_number": "PO-001"},
         }
         enhanced, entities = Orchestrator._resolve_references("分析这个支付单的合规性", ctx)
         assert "PAY-001" in enhanced
-        assert "payment_number" in entities
-        assert "supplier_id" not in entities
+        assert "check_number" in entities
+        assert "vendor_id" not in entities
         assert "po_number" not in entities
 
     def test_invoice_reference(self) -> None:
         """'这个发票' 应只关联 invoice_number。"""
         ctx = {
             "has_history": True,
-            "entities": {"invoice_number": "INV-001", "supplier_id": "SUP-001"},
+            "entities": {"invoice_num": "INV-001", "vendor_id": "SUP-001"},
         }
         enhanced, entities = Orchestrator._resolve_references("检查这个发票的匹配情况", ctx)
         assert "INV-001" in enhanced
-        assert "invoice_number" in entities
-        assert "supplier_id" not in entities
+        assert "invoice_num" in entities
+        assert "vendor_id" not in entities
 
     def test_receipt_reference(self) -> None:
         """'该收货单' 应只关联 receipt_number。"""
@@ -486,32 +486,32 @@ class TestReferenceResolution:
 
     def test_quantifier_payment_reference(self) -> None:
         """'这笔付款' 应关联 payment_number。"""
-        ctx = {"has_history": True, "entities": {"payment_number": "PAY-001", "supplier_id": "SUP-001"}}
+        ctx = {"has_history": True, "entities": {"check_number": "PAY-001", "vendor_id": "SUP-001"}}
         enhanced, entities = Orchestrator._resolve_references("这笔付款有问题吗", ctx)
         assert "PAY-001" in enhanced
-        assert "payment_number" in entities
-        assert "supplier_id" not in entities
+        assert "check_number" in entities
+        assert "vendor_id" not in entities
 
     def test_quantifier_invoice_reference(self) -> None:
         """'这张发票' 应关联 invoice_number。"""
-        ctx = {"has_history": True, "entities": {"invoice_number": "INV-001"}}
+        ctx = {"has_history": True, "entities": {"invoice_num": "INV-001"}}
         enhanced, entities = Orchestrator._resolve_references("这张发票金额不对", ctx)
         assert "INV-001" in enhanced
-        assert entities.get("invoice_number") == "INV-001"
+        assert entities.get("invoice_num") == "INV-001"
 
     def test_temporal_reference(self) -> None:
         """'刚才的付款单' 应关联 payment_number。"""
-        ctx = {"has_history": True, "entities": {"payment_number": "PAY-002"}}
+        ctx = {"has_history": True, "entities": {"check_number": "PAY-002"}}
         enhanced, entities = Orchestrator._resolve_references("刚才的付款单有没有逾期", ctx)
         assert "PAY-002" in enhanced
-        assert entities.get("payment_number") == "PAY-002"
+        assert entities.get("check_number") == "PAY-002"
 
     def test_above_mentioned_reference(self) -> None:
         """'上面提到的供应商' 应关联 supplier_id。"""
-        ctx = {"has_history": True, "entities": {"supplier_id": "SUP-003", "po_number": "PO-001"}}
+        ctx = {"has_history": True, "entities": {"vendor_id": "SUP-003", "po_number": "PO-001"}}
         enhanced, entities = Orchestrator._resolve_references("上面提到的供应商绩效怎么样", ctx)
         assert "SUP-003" in enhanced
-        assert "supplier_id" in entities
+        assert "vendor_id" in entities
         assert "po_number" not in entities
 
 
@@ -570,14 +570,14 @@ class TestOrchestratorSessionContext:
         with entity_engine.begin() as conn:
             conn.execute(session_entities_table.insert().values(
                 session_id="s1",
-                entities={"po_number": "PO-2024-0035", "supplier_id": "SUP-001"},
+                entities={"po_number": "PO-2024-0035", "vendor_id": "SUP-001"},
             ))
         orch._memory._short_term._entity_engine = entity_engine
 
         ctx = orch._load_session_context("s1")
         assert ctx["has_history"] is True
         assert ctx["entities"].get("po_number") is not None
-        assert ctx["entities"].get("supplier_id") is not None
+        assert ctx["entities"].get("vendor_id") is not None
 
     def test_load_context_failure_not_blocking(self, settings: Settings) -> None:
         """checkpointer 读取异常不应阻塞。"""
@@ -615,7 +615,7 @@ class TestOrchestratorSessionContext:
             return_value={
                 "has_history": True,
                 "context_summary": "PO-2024-0035 的数据...",
-                "entities": {"po_number": "PO-2024-0035", "supplier_id": "SUP-001"},
+                "entities": {"po_number": "PO-2024-0035", "vendor_id": "SUP-001"},
             },
         ), patch.object(
             orch._intent_router, "route",
@@ -1302,33 +1302,33 @@ class TestValidateEntities:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.return_value = []
-        params = {"supplier_id": "SUP-999", "days": 30}
+        params = {"vendor_id": "SUP-999", "days": 30}
 
         from core.orchestrator.entity import validate_entities
         await validate_entities(mock_repo, params)
-        assert "supplier_id" not in params
+        assert "vendor_id" not in params
 
     @pytest.mark.asyncio
     async def test_invoice_not_found_discarded(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
-        mock_repo.query_invoices.return_value = [{"invoice_number": "INV-OTHER"}]
-        params = {"invoice_number": "INV-999", "days": 30}
+        mock_repo.query_invoices.return_value = [{"invoice_num": "INV-OTHER"}]
+        params = {"invoice_num": "INV-999", "days": 30}
 
         from core.orchestrator.entity import validate_entities
         await validate_entities(mock_repo, params)
-        assert "invoice_number" not in params
+        assert "invoice_num" not in params
 
     @pytest.mark.asyncio
     async def test_payment_not_found_discarded(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
         mock_repo.query_payments.return_value = []
-        params = {"payment_number": "PAY-999", "days": 30}
+        params = {"check_number": "PAY-999", "days": 30}
 
         from core.orchestrator.entity import validate_entities
         await validate_entities(mock_repo, params)
-        assert "payment_number" not in params
+        assert "check_number" not in params
 
     @pytest.mark.asyncio
     async def test_receipt_not_found_discarded(self, settings: Settings) -> None:
@@ -1365,23 +1365,23 @@ class TestEnrichEntities:
     async def test_payment_to_invoice(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
-        mock_repo.query_payments.return_value = [{"invoice_number": "INV-001"}]
+        mock_repo.query_payments.return_value = [{"invoice_num": "INV-001"}]
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_invoices.return_value = []
         mock_repo.query_receipts.return_value = []
 
-        params = {"payment_number": "PAY-001", "days": 30}
+        params = {"check_number": "PAY-001", "days": 30}
 
         with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
             await orch._enrich_entities(params)
 
-        assert params.get("invoice_number") == "INV-001"
+        assert params.get("invoice_num") == "INV-001"
 
     @pytest.mark.asyncio
     async def test_po_to_supplier(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
-        mock_repo.query_purchase_orders.return_value = [{"supplier_id": "SUP-001"}]
+        mock_repo.query_purchase_orders.return_value = [{"vendor_id": "SUP-001"}]
         mock_repo.query_invoices.return_value = []
         mock_repo.query_receipts.return_value = []
         mock_repo.query_payments.return_value = []
@@ -1391,14 +1391,14 @@ class TestEnrichEntities:
         with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
             await orch._enrich_entities(params)
 
-        assert params.get("supplier_id") == "SUP-001"
+        assert params.get("vendor_id") == "SUP-001"
 
     @pytest.mark.asyncio
     async def test_receipt_to_po_and_supplier(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
         mock_repo.query_receipts.return_value = [
-            {"receipt_id": "RCV-001", "po_number": "PO-001", "supplier_id": "SUP-001"}
+            {"receipt_id": "RCV-001", "po_number": "PO-001", "vendor_id": "SUP-001"}
         ]
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_invoices.return_value = []
@@ -1410,26 +1410,26 @@ class TestEnrichEntities:
             await orch._enrich_entities(params)
 
         assert params.get("po_number") == "PO-001"
-        assert params.get("supplier_id") == "SUP-001"
+        assert params.get("vendor_id") == "SUP-001"
 
     @pytest.mark.asyncio
     async def test_invoice_to_po_and_supplier(self, settings: Settings) -> None:
         orch = Orchestrator(settings=settings)
         mock_repo = MagicMock()
         mock_repo.query_invoices.return_value = [
-            {"invoice_number": "INV-001", "po_number": "PO-002", "supplier_id": "SUP-002"}
+            {"invoice_num": "INV-001", "po_number": "PO-002", "vendor_id": "SUP-002"}
         ]
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_receipts.return_value = []
         mock_repo.query_payments.return_value = []
 
-        params = {"invoice_number": "INV-001", "days": 30}
+        params = {"invoice_num": "INV-001", "days": 30}
 
         with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
             await orch._enrich_entities(params)
 
         assert params.get("po_number") == "PO-002"
-        assert params.get("supplier_id") == "SUP-002"
+        assert params.get("vendor_id") == "SUP-002"
 
     @pytest.mark.asyncio
     async def test_repo_init_failure(self, settings: Settings) -> None:

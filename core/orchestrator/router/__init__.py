@@ -238,9 +238,9 @@ def _extract_params(
 # 默认实体正则（与 AnalysisSettings.entity_patterns 一致）
 _DEFAULT_ENTITY_PATTERNS: dict[str, list[str]] = {
     "po_number": [r"PO-\d[\da-zA-Z_-]*\d", r"PO-\d+"],
-    "supplier_id": [r"SUP-\d+"],
-    "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
-    "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
+    "vendor_id": [r"SUP-\d+"],
+    "invoice_num": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
+    "check_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
     "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+", r"GR-\d+"],
     "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
 }

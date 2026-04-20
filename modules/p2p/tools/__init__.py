@@ -1,6 +1,13 @@
-"""P2P 工具包：统一导出全部 19 个 @tool + 注入管理。"""
+"""P2P 工具包：统一导出全部 25 个 @tool + 注入管理。"""
 
-from modules.p2p.tools._inject import _get_repository, set_repository
+from modules.p2p.tools._inject import (
+    _get_graphiti_client,
+    _get_query_backend,
+    _get_repository,
+    set_graphiti_client,
+    set_query_backend,
+    set_repository,
+)
 from modules.p2p.tools.query import (
     query_invoices,
     query_payments,
@@ -28,11 +35,23 @@ from modules.p2p.tools.stub import (
     query_material_master,
     run_vendor_risk_scoring,
 )
+from modules.p2p.tools.graph import (
+    compare_entities,
+    detect_graph_anomalies,
+    query_entity_relationships,
+    query_entity_timeline,
+    query_supplier_profile,
+    search_knowledge_graph,
+)
 
 __all__ = [
     # inject
     "set_repository",
     "_get_repository",
+    "set_graphiti_client",
+    "_get_graphiti_client",
+    "set_query_backend",
+    "_get_query_backend",
     # query (4)
     "query_purchase_orders",
     "query_receipts",
@@ -56,4 +75,11 @@ __all__ = [
     "run_vendor_risk_scoring",
     "check_approval_limits",
     "check_blacklist",
+    # graph (6)
+    "search_knowledge_graph",
+    "query_entity_timeline",
+    "query_entity_relationships",
+    "query_supplier_profile",
+    "compare_entities",
+    "detect_graph_anomalies",
 ]

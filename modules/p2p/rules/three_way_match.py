@@ -73,8 +73,8 @@ class ThreeWayMatchChecker:
                 - po_number (str): 采购订单号
                 - po_amount (float): 采购金额
                 - po_quantity (float): 采购数量
-                - supplier_id (str, 可选): 供应商 ID
-                - supplier_name (str, 可选): 供应商名称
+                - vendor_id (str, 可选): 供应商 ID
+                - vendor_name (str, 可选): 供应商名称
                 - material_category (str, 可选): 物料类别
             gr_lines: 收货行列表，每条需包含:
                 - po_number (str): 关联采购订单号
@@ -82,7 +82,7 @@ class ThreeWayMatchChecker:
                 - gr_quantity (float): 收货数量
             invoice_lines: 发票行列表，每条需包含:
                 - po_number (str): 关联采购订单号
-                - invoice_number (str): 发票号
+                - invoice_num (str): 发票号
                 - invoice_amount (float): 发票金额
 
         Returns:
@@ -111,12 +111,12 @@ class ThreeWayMatchChecker:
                 continue
             po_amount: float = safe_float(po.get("po_amount"))
             po_quantity: float = safe_float(po.get("po_quantity"))
-            supplier_id: str = po.get("supplier_id", "")
-            supplier_name: str = po.get("supplier_name", "")
+            vendor_id: str = po.get("vendor_id", "")
+            vendor_name: str = po.get("vendor_name", "")
             material_category: str = po.get("material_category", "")
 
             tolerance: float = self._resolve_tolerance(
-                supplier_id=supplier_id,
+                vendor_id=vendor_id,
                 category=material_category,
                 amount=po_amount,
             )
@@ -137,8 +137,8 @@ class ThreeWayMatchChecker:
                             severity=severity,
                             documents=DocumentRef(
                                 po_number=po_number,
-                                invoice_number=inv.get("invoice_number", ""),
-                                supplier_name=supplier_name,
+                                invoice_num=inv.get("invoice_num", ""),
+                                vendor_name=vendor_name,
                             ),
                             detail=AnomalyDetail(
                                 field="invoice_amount",
@@ -163,8 +163,8 @@ class ThreeWayMatchChecker:
                             severity=Severity.LOW,
                             documents=DocumentRef(
                                 po_number=po_number,
-                                invoice_number=inv.get("invoice_number", ""),
-                                supplier_name=supplier_name,
+                                invoice_num=inv.get("invoice_num", ""),
+                                vendor_name=vendor_name,
                             ),
                             detail=AnomalyDetail(
                                 field="invoice_amount",
@@ -198,7 +198,7 @@ class ThreeWayMatchChecker:
                             documents=DocumentRef(
                                 po_number=po_number,
                                 gr_number=gr.get("gr_number", ""),
-                                supplier_name=supplier_name,
+                                vendor_name=vendor_name,
                             ),
                             detail=AnomalyDetail(
                                 field="gr_quantity",
@@ -223,7 +223,7 @@ class ThreeWayMatchChecker:
                             documents=DocumentRef(
                                 po_number=po_number,
                                 gr_number=gr.get("gr_number", ""),
-                                supplier_name=supplier_name,
+                                vendor_name=vendor_name,
                             ),
                             detail=AnomalyDetail(
                                 field="gr_quantity",
@@ -248,7 +248,7 @@ class ThreeWayMatchChecker:
 
     def _resolve_tolerance(
         self,
-        supplier_id: str,
+        vendor_id: str,
         category: str,
         amount: float,
     ) -> float:
@@ -257,7 +257,7 @@ class ThreeWayMatchChecker:
         优先级（从高到低）：供应商 > 物料类别 > 金额区间 > 默认值。
 
         Args:
-            supplier_id: 供应商 ID。
+            vendor_id: 供应商 ID。
             category: 物料类别。
             amount: 采购金额，用于匹配金额区间容差。
 
@@ -267,8 +267,8 @@ class ThreeWayMatchChecker:
         cfg = self._settings.three_way_match
 
         # 1. 供应商级别容差
-        if supplier_id and supplier_id in cfg.supplier_tolerances:
-            return cfg.supplier_tolerances[supplier_id]
+        if vendor_id and vendor_id in cfg.supplier_tolerances:
+            return cfg.supplier_tolerances[vendor_id]
 
         # 2. 物料类别容差
         if category and category in cfg.category_tolerances:

@@ -29,9 +29,9 @@ class TestParseResponse:
         """完整参数解析。"""
         content = json.dumps({
             "po_number": "PO-2024-001",
-            "supplier_id": "SUP-001",
-            "invoice_number": None,
-            "payment_number": None,
+            "vendor_id": "SUP-001",
+            "invoice_num": None,
+            "check_number": None,
             "receipt_number": None,
             "days": 30,
             "limit": 1,
@@ -39,17 +39,17 @@ class TestParseResponse:
         })
         result = extractor._parse_response(content)
         assert result["po_number"] == "PO-2024-001"
-        assert result["supplier_id"] == "SUP-001"
+        assert result["vendor_id"] == "SUP-001"
         assert result["days"] == 30
         assert result["limit"] == 1
         assert result["order_by"] == "date_desc"
-        assert "invoice_number" not in result  # None 值不保留
+        assert "invoice_num" not in result  # None 值不保留
 
     def test_limit_only(self, extractor: ParamExtractor) -> None:
         """仅提取 limit。"""
         content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": 5, "order_by": None,
         })
@@ -59,8 +59,8 @@ class TestParseResponse:
     def test_order_by_validation(self, extractor: ParamExtractor) -> None:
         """非法 order_by 值被丢弃。"""
         content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": None, "order_by": "invalid_value",
         })
@@ -71,8 +71,8 @@ class TestParseResponse:
         """所有合法 order_by 枚举值均通过校验。"""
         for val in ("date_desc", "date_asc", "amount_desc", "amount_asc"):
             content = json.dumps({
-                "po_number": None, "supplier_id": None,
-                "invoice_number": None, "payment_number": None,
+                "po_number": None, "vendor_id": None,
+                "invoice_num": None, "check_number": None,
                 "receipt_number": None, "days": None,
                 "limit": None, "order_by": val,
             })
@@ -82,8 +82,8 @@ class TestParseResponse:
     def test_negative_limit_ignored(self, extractor: ParamExtractor) -> None:
         """负数 limit 被丢弃。"""
         content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": -1, "order_by": None,
         })
@@ -93,8 +93,8 @@ class TestParseResponse:
     def test_zero_limit_ignored(self, extractor: ParamExtractor) -> None:
         """零 limit 被丢弃。"""
         content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": 0, "order_by": None,
         })
@@ -104,8 +104,8 @@ class TestParseResponse:
     def test_negative_days_ignored(self, extractor: ParamExtractor) -> None:
         """负数 days 被丢弃。"""
         content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": -7,
             "limit": None, "order_by": None,
         })
@@ -114,7 +114,7 @@ class TestParseResponse:
 
     def test_markdown_wrapped_json(self, extractor: ParamExtractor) -> None:
         """处理 markdown 代码块包裹的 JSON。"""
-        content = '```json\n{"po_number": "PO-001", "supplier_id": null, "invoice_number": null, "payment_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}\n```'
+        content = '```json\n{"po_number": "PO-001", "vendor_id": null, "invoice_num": null, "check_number": null, "receipt_number": null, "days": null, "limit": null, "order_by": null}\n```'
         result = extractor._parse_response(content)
         assert result["po_number"] == "PO-001"
 
@@ -131,8 +131,8 @@ class TestParseResponse:
     def test_entity_whitespace_stripped(self, extractor: ParamExtractor) -> None:
         """实体编号前后空格被去除。"""
         content = json.dumps({
-            "po_number": " PO-001 ", "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": " PO-001 ", "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": None, "order_by": None,
         })
@@ -147,8 +147,8 @@ class TestExtract:
         """LLM 调用成功时返回解析结果。"""
         mock_response = MagicMock()
         mock_response.content = json.dumps({
-            "po_number": None, "supplier_id": None,
-            "invoice_number": None, "payment_number": None,
+            "po_number": None, "vendor_id": None,
+            "invoice_num": None, "check_number": None,
             "receipt_number": None, "days": None,
             "limit": 1, "order_by": "date_desc",
         })

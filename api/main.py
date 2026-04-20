@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.analyze import router as analyze_router
 from api.routes.analyze_async import router as analyze_async_router
+from api.routes.etl import router as etl_router
 from api.routes.sessions import router as sessions_router
 from api.routes.admin_metrics import router as admin_metrics_router
 from api.routes.traces import router as traces_router
@@ -189,9 +190,102 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "task registry ready: backend=%s max_concurrent=%d",
         async_cfg.event_backend, async_cfg.max_concurrent_tasks,
     )
+    # 初始化 Graphiti ETL（可选，受 graphiti_etl.enabled 控制）
+    etl_scheduler = None
+    graphiti_client = None
+    if settings.graphiti_etl.enabled and settings.neo4j.enabled:
+        from core.etl.client import GraphitiClient
+        from core.etl.scheduler import ETLScheduler
+        from core.etl.pipeline import ETLPipeline
+        from core.etl.state import SyncStateManager
+        from core.etl.transformers.structured import StructuredTransformer
+        from core.etl.transformers.registry import MAPPING_REGISTRY
+        from core.etl.loaders.graphiti_loader import GraphitiLoader
+        from core.etl.extractors.master_data import MasterDataExtractor
+        from core.etl.extractors.purchasing import PurchasingExtractor
+        from core.etl.extractors.receiving import ReceivingExtractor
+        from core.etl.extractors.payables import PayablesExtractor
+        from core.etl.extractors.sourcing import SourcingExtractor
+
+        etl_cfg = settings.graphiti_etl
+        graphiti_client = GraphitiClient(settings)
+        try:
+            await graphiti_client.initialize()
+            _logger.info("Graphiti client connected")
+        except Exception:
+            _logger.warning("Graphiti client init failed — ETL disabled", exc_info=True)
+            graphiti_client = None
+
+        if graphiti_client is not None:
+            batch_size = etl_cfg.batch_size
+            max_rows = etl_cfg.max_rows_per_table
+            ext_kwargs = dict(
+                session_factory=session_factory,
+                batch_size=batch_size,
+                max_rows_per_table=max_rows,
+            )
+            extractors = {
+                "master_data": MasterDataExtractor(**ext_kwargs),
+                "purchasing": PurchasingExtractor(**ext_kwargs),
+                "receiving": ReceivingExtractor(**ext_kwargs),
+                "payables": PayablesExtractor(**ext_kwargs),
+                "sourcing": SourcingExtractor(**ext_kwargs),
+            }
+            transformer = StructuredTransformer(MAPPING_REGISTRY)
+            loader = GraphitiLoader(
+                graphiti_client,
+                episode_batch_size=etl_cfg.episode_batch_size,
+                max_concurrency=etl_cfg.max_load_concurrency,
+            )
+            state_mgr = SyncStateManager(session_factory)
+            pipeline = ETLPipeline(
+                extractors=extractors,
+                transformer=transformer,
+                loader=loader,
+                state_manager=state_mgr,
+                max_concurrent_domains=etl_cfg.max_concurrent_domains,
+            )
+            etl_scheduler = ETLScheduler(
+                pipeline=pipeline,
+                state_manager=state_mgr,
+                interval_seconds=etl_cfg.sync_interval_seconds,
+                full_sync_on_startup=False,  # never auto-sync; use Admin API
+            )
+            # Do NOT call etl_scheduler.start() — ETL is triggered manually
+            # via POST /admin/etl/trigger only.
+            app.state.etl_scheduler = etl_scheduler
+            app.state.graphiti_client = graphiti_client
+            # Inject into tool layer so graph tools can use the client
+            from modules.p2p.tools import set_graphiti_client, set_query_backend
+            set_graphiti_client(graphiti_client)
+            # Create QueryBackend based on config (graphiti/postgresql/hybrid)
+            from core.etl.query_backend import create_query_backend
+            qb = create_query_backend(
+                query_backend_mode=etl_cfg.query_backend,
+                repository=P2PRepository(session_factory),
+                graphiti_client=graphiti_client,
+            )
+            set_query_backend(qb)
+            _logger.info(
+                "ETL ready: query_backend=%s (manual trigger only via Admin API)",
+                etl_cfg.query_backend,
+            )
+    else:
+        _logger.info(
+            "ETL skipped: graphiti_etl.enabled=%s neo4j.enabled=%s",
+            settings.graphiti_etl.enabled,
+            settings.neo4j.enabled,
+        )
+
     _logger.info("lifespan startup complete — serving traffic")
     yield
     _logger.info("lifespan shutdown: draining tasks")
+
+    # Shutdown ETL
+    if etl_scheduler is not None:
+        await etl_scheduler.shutdown()
+    if graphiti_client is not None:
+        await graphiti_client.close()
     await registry.shutdown()
     shutdown_task_registry()
     # 如果是 Redis 后端，关闭底层连接；memory 后端此调用是 no-op
@@ -237,6 +331,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router, prefix="/api/v1/ptp-agent")
     app.include_router(traces_router, prefix="/api/v1/ptp-agent")
     app.include_router(admin_metrics_router, prefix="/api/v1/ptp-agent")
+    app.include_router(etl_router, prefix="/api/v1/ptp-agent")
 
     return app
 

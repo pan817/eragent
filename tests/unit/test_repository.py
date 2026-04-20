@@ -13,13 +13,13 @@ class TestQueryMethods:
         pos = repository.query_purchase_orders(days=0)
         assert len(pos) == 50
         assert all("po_number" in po for po in pos)
-        assert all("supplier_id" in po for po in pos)
+        assert all("vendor_id" in po for po in pos)
 
     def test_query_purchase_orders_by_supplier(self, repository: P2PRepository) -> None:
         """按供应商过滤应只返回该供应商的 PO。"""
-        pos = repository.query_purchase_orders(supplier_id="SUP-001", days=0)
+        pos = repository.query_purchase_orders(vendor_id="SUP-001", days=0)
         assert len(pos) > 0
-        assert all(po["supplier_id"] == "SUP-001" for po in pos)
+        assert all(po["vendor_id"] == "SUP-001" for po in pos)
 
     def test_query_receipts_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有收货记录。"""
@@ -40,9 +40,9 @@ class TestQueryMethods:
 
     def test_query_invoices_by_supplier(self, repository: P2PRepository) -> None:
         """按供应商过滤。"""
-        invoices = repository.query_invoices(supplier_id="SUP-002", days=0)
+        invoices = repository.query_invoices(vendor_id="SUP-002", days=0)
         assert len(invoices) > 0
-        assert all(inv["supplier_id"] == "SUP-002" for inv in invoices)
+        assert all(inv["vendor_id"] == "SUP-002" for inv in invoices)
 
     def test_query_payments_all(self, repository: P2PRepository) -> None:
         """无过滤条件应返回所有付款记录。"""
@@ -51,9 +51,9 @@ class TestQueryMethods:
 
     def test_query_payments_by_invoice(self, repository: P2PRepository) -> None:
         """按发票号过滤。"""
-        payments = repository.query_payments(invoice_number="INV-2024-0001", days=0)
+        payments = repository.query_payments(invoice_num="INV-2024-0001", days=0)
         assert len(payments) >= 1
-        assert all(p["invoice_number"] == "INV-2024-0001" for p in payments)
+        assert all(p["invoice_num"] == "INV-2024-0001" for p in payments)
 
 
 class TestFlattenedMethods:
@@ -64,7 +64,7 @@ class TestFlattenedMethods:
         pos = repository.get_flattened_purchase_orders()
         assert len(pos) > 0
         required_keys = {
-            "po_number", "supplier_id", "supplier_name", "material_category",
+            "po_number", "vendor_id", "vendor_name", "material_category",
             "po_amount", "po_quantity", "unit_price", "contract_price",
             "status", "creation_date", "required_date", "material_code",
             "material_name", "line_number",
@@ -91,7 +91,7 @@ class TestFlattenedMethods:
         invoices = repository.get_flattened_invoices()
         assert len(invoices) > 0
         required_keys = {
-            "invoice_number", "po_number", "invoice_amount",
+            "invoice_num", "po_number", "invoice_amount",
             "due_date", "discount_due_date",
         }
         for inv in invoices:
@@ -102,7 +102,7 @@ class TestFlattenedMethods:
         payments = repository.get_flattened_payments()
         assert len(payments) > 0
         required_keys = {
-            "payment_number", "invoice_number", "payment_amount", "payment_date",
+            "check_number", "invoice_num", "amount", "check_date",
         }
         for p in payments:
             assert required_keys.issubset(p.keys())
@@ -125,7 +125,7 @@ class TestResetAndSeed:
         counts = reset_and_seed(db_engine, seed=0, count=20)
         assert counts["po_headers"] == 20
         assert counts["ap_invoices"] == 20
-        assert counts["ap_payments"] == 20
+        assert counts["ap_checks"] == 20
 
     def test_reset_and_seed_different_count(self, db_engine) -> None:
         """不同 count 应产生不同记录数。"""

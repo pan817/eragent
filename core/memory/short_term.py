@@ -112,7 +112,7 @@ class ShortTermMemory:
 
         返回字典包含：
         - context_summary: 最近一轮 AI 回复的摘要
-        - entities: 从历史中提取的实体（po_number / supplier_id）
+        - entities: 从历史中提取的实体（po_number / vendor_id）
         - has_history: 是否有历史对话
 
         读取失败返回空上下文，不阻塞主流程。
@@ -264,8 +264,8 @@ class ShortTermMemory:
     # ── 结构化实体上下文（session_entities 表）──────────────────────
 
     # 仅保留业务实体键，排除 days 等参数
-    _ENTITY_KEYS = {"po_number", "supplier_id", "invoice_number",
-                    "payment_number", "receipt_number"}
+    _ENTITY_KEYS = {"po_number", "vendor_id", "invoice_num",
+                    "check_number", "receipt_number"}
 
     def _get_entity_engine(self) -> Any:
         """获取 session_entities 使用的 SQLAlchemy engine。

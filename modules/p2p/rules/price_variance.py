@@ -67,7 +67,7 @@ class PriceVarianceAnalyzer:
                 - material_code (str): 物料编码，用于在 contract_prices 中查找标准价
                 - unit_price (float): 实际采购单价
                 - quantity (float, 可选): 采购数量
-                - supplier_name (str, 可选): 供应商名称
+                - vendor_name (str, 可选): 供应商名称
                 - material_name (str, 可选): 物料描述
             contract_prices: 合同价/标准价字典，key 为物料编码，value 为标准单价。
 
@@ -100,7 +100,7 @@ class PriceVarianceAnalyzer:
 
             severity = self._determine_severity(variance_pct, tolerance_pct, unit_price)
             po_number: str = line.get("po_number", "")
-            supplier_name: str = line.get("supplier_name", "")
+            vendor_name: str = line.get("vendor_name", "")
             line_number: str = str(line.get("line_number", ""))
             material_name: str = line.get("material_name", material_code)
 
@@ -112,7 +112,7 @@ class PriceVarianceAnalyzer:
                     rule_id=_RULE_PRICE_VARIANCE,
                     documents=DocumentRef(
                         po_number=po_number,
-                        supplier_name=supplier_name,
+                        vendor_name=vendor_name,
                     ),
                     details=AnomalyDetail(
                         field="unit_price",

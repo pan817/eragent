@@ -27,7 +27,7 @@ class TestExtractParams:
 
     def test_extract_supplier_id(self) -> None:
         params = _extract_params("查看 SUP-001 的采购订单")
-        assert params["supplier_id"] == "SUP-001"
+        assert params["vendor_id"] == "SUP-001"
 
     def test_extract_po_number(self) -> None:
         params = _extract_params("检查 PO-2024-0001 的匹配情况")
@@ -43,11 +43,11 @@ class TestExtractParams:
 
     def test_extract_invoice_number(self) -> None:
         params = _extract_params("查看发票 INV-2024-0001 的详情")
-        assert params["invoice_number"] == "INV-2024-0001"
+        assert params["invoice_num"] == "INV-2024-0001"
 
     def test_extract_payment_number(self) -> None:
         params = _extract_params("查询付款单 PAY-2024-0500")
-        assert params["payment_number"] == "PAY-2024-0500"
+        assert params["check_number"] == "PAY-2024-0500"
 
     def test_extract_receipt_number(self) -> None:
         params = _extract_params("收货单 RCV-2024-0100 有问题")
@@ -56,9 +56,9 @@ class TestExtractParams:
     def test_extract_multiple_entities(self) -> None:
         params = _extract_params("PO-001 的发票 INV-001 付款 PAY-001 来自 SUP-001")
         assert params.get("po_number") == "PO-001"
-        assert params.get("invoice_number") == "INV-001"
-        assert params.get("payment_number") == "PAY-001"
-        assert params.get("supplier_id") == "SUP-001"
+        assert params.get("invoice_num") == "INV-001"
+        assert params.get("check_number") == "PAY-001"
+        assert params.get("vendor_id") == "SUP-001"
 
     def test_no_params(self) -> None:
         params = _extract_params("给我一份分析报告")
@@ -91,8 +91,8 @@ class TestParseIntegration:
         self._mock_unified(
             '{"intent_kind":"analysis","type":"three_way_match","confidence":0.9,'
             '"is_cross_entity":false,"resolved_query":"分析三路匹配","missing_params":[],'
-            '"po_number":null,"supplier_id":null,"invoice_number":null,'
-            '"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
+            '"po_number":null,"vendor_id":null,"invoice_num":null,'
+            '"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
         )
         signal = self.router.route("分析三路匹配")
         assert signal.intent_kind == IntentKind.ANALYSIS
@@ -104,8 +104,8 @@ class TestParseIntegration:
         self._mock_unified(
             '{"intent_kind":"data_lookup","type":"","confidence":0.9,'
             '"is_cross_entity":false,"resolved_query":"查最新PO","missing_params":[],'
-            '"po_number":null,"supplier_id":null,"invoice_number":null,'
-            '"payment_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}'
+            '"po_number":null,"vendor_id":null,"invoice_num":null,'
+            '"check_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}'
         )
         signal = self.router.route("查最新的一个PO")
         assert signal.intent_kind == IntentKind.DATA_LOOKUP
@@ -117,23 +117,23 @@ class TestParseIntegration:
         self._mock_unified(
             '{"intent_kind":"data_lookup","type":"","confidence":0.85,'
             '"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的PO","missing_params":[],'
-            '"po_number":null,"supplier_id":null,"invoice_number":null,'
-            '"payment_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}'
+            '"po_number":null,"vendor_id":null,"invoice_num":null,'
+            '"check_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}'
         )
         signal = self.router.route("这个支付单对应的PO")
         assert signal.is_cross_entity is True
-        assert signal.entities.get("payment_number") == "PAY-001"
+        assert signal.entities.get("check_number") == "PAY-001"
 
     def test_unified_llm_with_params(self) -> None:
         """统一 LLM 提取参数。"""
         self._mock_unified(
             '{"intent_kind":"analysis","type":"price_variance","confidence":0.95,'
             '"is_cross_entity":false,"resolved_query":"分析SUP-001价格差异","missing_params":[],'
-            '"po_number":null,"supplier_id":"SUP-001","invoice_number":null,'
-            '"payment_number":null,"receipt_number":null,"days":60,"limit":null,"order_by":null}'
+            '"po_number":null,"vendor_id":"SUP-001","invoice_num":null,'
+            '"check_number":null,"receipt_number":null,"days":60,"limit":null,"order_by":null}'
         )
         signal = self.router.route("分析 SUP-001 最近60天的价格差异")
-        assert signal.entities.get("supplier_id") == "SUP-001"
+        assert signal.entities.get("vendor_id") == "SUP-001"
         assert signal.time_range_days == 60
 
     def test_bypass_chitchat_skips_llm(self) -> None:
@@ -153,12 +153,12 @@ class TestParseIntegration:
         self._mock_unified(
             '{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,'
             '"is_cross_entity":false,"resolved_query":"分析SUP-001三路匹配","missing_params":[],'
-            '"po_number":null,"supplier_id":null,"invoice_number":null,'
-            '"payment_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
+            '"po_number":null,"vendor_id":null,"invoice_num":null,'
+            '"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}'
         )
         # query 中有 SUP-001，LLM 没提取到，regex 兜底
         signal = self.router.route("分析 SUP-001 三路匹配")
-        assert signal.entities.get("supplier_id") == "SUP-001"
+        assert signal.entities.get("vendor_id") == "SUP-001"
 
 
 # ============================================================
@@ -182,7 +182,7 @@ class TestQuerySignal:
         signal = QuerySignal(
             raw_query="分析价格差异",
             keywords=["price_variance"],
-            entities={"supplier_id": "SUP-001"},
+            entities={"vendor_id": "SUP-001"},
             time_range_days=30,
             route_level=1,
             confidence=0.85,

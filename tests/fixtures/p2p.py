@@ -28,8 +28,8 @@ def mock_po_data() -> list[dict[str, Any]]:
     return [
         {
             "po_number": "PO-001",
-            "supplier_id": "SUP-001",
-            "supplier_name": "测试供应商A",
+            "vendor_id": "SUP-001",
+            "vendor_name": "测试供应商A",
             "material_category": "机械零件",
             "po_amount": 100000.00,
             "po_quantity": 500.0,
@@ -42,8 +42,8 @@ def mock_po_data() -> list[dict[str, Any]]:
         },
         {
             "po_number": "PO-002",
-            "supplier_id": "SUP-001",
-            "supplier_name": "测试供应商A",
+            "vendor_id": "SUP-001",
+            "vendor_name": "测试供应商A",
             "material_category": "机械零件",
             "po_amount": 50000.00,
             "po_quantity": 200.0,
@@ -56,8 +56,8 @@ def mock_po_data() -> list[dict[str, Any]]:
         },
         {
             "po_number": "PO-003",
-            "supplier_id": "SUP-002",
-            "supplier_name": "测试供应商B",
+            "vendor_id": "SUP-002",
+            "vendor_name": "测试供应商B",
             "material_category": "电子元器件",
             "po_amount": 200000.00,
             "po_quantity": 1000.0,
@@ -70,8 +70,8 @@ def mock_po_data() -> list[dict[str, Any]]:
         },
         {
             "po_number": "PO-004",
-            "supplier_id": "SUP-002",
-            "supplier_name": "测试供应商B",
+            "vendor_id": "SUP-002",
+            "vendor_name": "测试供应商B",
             "material_category": "电子元器件",
             "po_amount": 80000.00,
             "po_quantity": 400.0,
@@ -84,8 +84,8 @@ def mock_po_data() -> list[dict[str, Any]]:
         },
         {
             "po_number": "PO-005",
-            "supplier_id": "SUP-003",
-            "supplier_name": "测试供应商C",
+            "vendor_id": "SUP-003",
+            "vendor_name": "测试供应商C",
             "material_category": "原材料",
             "po_amount": 600000.00,
             "po_quantity": 3000.0,
@@ -115,11 +115,11 @@ def mock_gr_data() -> list[dict[str, Any]]:
 def mock_invoice_data() -> list[dict[str, Any]]:
     """返回测试用发票数据（含金额偏差）。"""
     return [
-        {"po_number": "PO-001", "invoice_number": "INV-001", "invoice_amount": 112000.00, "supplier_name": "测试供应商A", "due_date": "2026-04-01"},
-        {"po_number": "PO-002", "invoice_number": "INV-002", "invoice_amount": 50000.00, "supplier_name": "测试供应商A", "due_date": "2026-04-05"},
-        {"po_number": "PO-003", "invoice_number": "INV-003", "invoice_amount": 195000.00, "supplier_name": "测试供应商B", "due_date": "2026-04-10"},
-        {"po_number": "PO-004", "invoice_number": "INV-004", "invoice_amount": 80000.00, "supplier_name": "测试供应商B", "due_date": "2026-04-15"},
-        {"po_number": "PO-005", "invoice_number": "INV-005", "invoice_amount": 700000.00, "supplier_name": "测试供应商C", "due_date": "2026-04-20"},
+        {"po_number": "PO-001", "invoice_num": "INV-001", "invoice_amount": 112000.00, "vendor_name": "测试供应商A", "due_date": "2026-04-01"},
+        {"po_number": "PO-002", "invoice_num": "INV-002", "invoice_amount": 50000.00, "vendor_name": "测试供应商A", "due_date": "2026-04-05"},
+        {"po_number": "PO-003", "invoice_num": "INV-003", "invoice_amount": 195000.00, "vendor_name": "测试供应商B", "due_date": "2026-04-10"},
+        {"po_number": "PO-004", "invoice_num": "INV-004", "invoice_amount": 80000.00, "vendor_name": "测试供应商B", "due_date": "2026-04-15"},
+        {"po_number": "PO-005", "invoice_num": "INV-005", "invoice_amount": 700000.00, "vendor_name": "测试供应商C", "due_date": "2026-04-20"},
     ]
 
 
@@ -127,8 +127,8 @@ def mock_invoice_data() -> list[dict[str, Any]]:
 def mock_payment_data() -> list[dict[str, Any]]:
     """返回测试用付款数据（含逾期和提前付款）。"""
     return [
-        {"payment_number": "PAY-001", "invoice_number": "INV-001", "payment_date": "2026-04-11", "payment_amount": 112000.00},
-        {"payment_number": "PAY-002", "invoice_number": "INV-002", "payment_date": "2026-04-04", "payment_amount": 50000.00},
-        {"payment_number": "PAY-003", "invoice_number": "INV-003", "payment_date": "2026-03-26", "payment_amount": 195000.00},
-        {"payment_number": "PAY-004", "invoice_number": "INV-004", "payment_date": "2026-04-20", "payment_amount": 76000.00},
+        {"check_number": "PAY-001", "invoice_num": "INV-001", "check_date": "2026-04-11", "amount": 112000.00},
+        {"check_number": "PAY-002", "invoice_num": "INV-002", "check_date": "2026-04-04", "amount": 50000.00},
+        {"check_number": "PAY-003", "invoice_num": "INV-003", "check_date": "2026-03-26", "amount": 195000.00},
+        {"check_number": "PAY-004", "invoice_num": "INV-004", "check_date": "2026-04-20", "amount": 76000.00},
     ]

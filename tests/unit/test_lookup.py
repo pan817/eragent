@@ -42,38 +42,38 @@ class TestResolveLookupTool:
     def test_path_a_invoice_number(self) -> None:
         """路径 A：有 invoice_number → query_invoices，days=0（不限时间）。"""
         result = resolve_lookup_tool(
-            {"invoice_number": "INV-001", "days": 7}, "查看发票INV-001"
+            {"invoice_num": "INV-001", "days": 7}, "查看发票INV-001"
         )
         assert result is not None
         tool_name, kwargs = result
         assert tool_name == "query_invoices"
-        assert kwargs["invoice_number"] == "INV-001"
+        assert kwargs["invoice_num"] == "INV-001"
         assert kwargs["days"] == 0  # 有实体编号时不限时间
 
     def test_path_a_payment_number(self) -> None:
         """路径 A：有 payment_number → query_payments。"""
         result = resolve_lookup_tool(
-            {"payment_number": "PAY-001", "days": 30}, "查看付款单PAY-001"
+            {"check_number": "PAY-001", "days": 30}, "查看付款单PAY-001"
         )
         assert result is not None
         tool_name, kwargs = result
         assert tool_name == "query_payments"
-        assert kwargs["payment_number"] == "PAY-001"
+        assert kwargs["check_number"] == "PAY-001"
 
     def test_path_a_supplier_id(self) -> None:
         """路径 A：仅有 supplier_id → __supplier_combo__。"""
         result = resolve_lookup_tool(
-            {"supplier_id": "SUP-001", "days": 30}, "查看供应商SUP-001"
+            {"vendor_id": "SUP-001", "days": 30}, "查看供应商SUP-001"
         )
         assert result is not None
         tool_name, kwargs = result
         assert tool_name == "__supplier_combo__"
-        assert kwargs["supplier_id"] == "SUP-001"
+        assert kwargs["vendor_id"] == "SUP-001"
 
     def test_path_a_priority_po_over_supplier(self) -> None:
         """路径 A：同时有 po_number 和 supplier_id 时优先 po_number。"""
         result = resolve_lookup_tool(
-            {"po_number": "PO-001", "supplier_id": "SUP-001", "days": 30},
+            {"po_number": "PO-001", "vendor_id": "SUP-001", "days": 30},
             "查看PO-001",
         )
         assert result is not None
@@ -231,7 +231,7 @@ class TestFormatLookupResult:
         data = [
             {
                 "po_number": "PO-001",
-                "supplier_name": "供应商A",
+                "vendor_name": "供应商A",
                 "total_amount": 10000,
                 "status": "approved",
                 "order_date": "2024-01-15",
@@ -251,7 +251,7 @@ class TestFormatLookupResult:
     def test_truncated_data(self) -> None:
         """带截断标记的数据正确展示总数。"""
         data = [
-            {"po_number": "PO-001", "supplier_name": "A", "total_amount": 100,
+            {"po_number": "PO-001", "vendor_name": "A", "total_amount": 100,
              "status": "ok", "order_date": "2024-01-01"},
             {"_truncated": True, "dropped": 5,
              "reason": "系统预算裁剪：共 6 条，仅展示前 1 条"},
@@ -269,7 +269,7 @@ class TestFormatLookupResult:
         """发票数据使用正确的列定义。"""
         data = [
             {
-                "invoice_number": "INV-001",
+                "invoice_num": "INV-001",
                 "po_number": "PO-001",
                 "total_amount": 5000,
                 "status": "pending",
@@ -283,8 +283,8 @@ class TestFormatLookupResult:
     def test_summary_with_limit_and_order(self) -> None:
         """带 limit + order_by 时摘要显示排序描述。"""
         data = [
-            {"payment_number": "PAY-001", "invoice_number": "INV-001",
-             "amount": 5000, "status": "paid", "payment_date": "2024-03-15"},
+            {"check_number": "PAY-001", "invoice_num": "INV-001",
+             "amount": 5000, "status": "paid", "check_date": "2024-03-15"},
         ]
         result = format_lookup_result(
             json.dumps(data), "query_payments",
@@ -295,8 +295,8 @@ class TestFormatLookupResult:
     def test_summary_with_limit_amount_desc(self) -> None:
         """带 limit + amount_desc 时摘要显示金额排序描述。"""
         data = [
-            {"payment_number": "PAY-001", "invoice_number": "INV-001",
-             "amount": 9999, "status": "paid", "payment_date": "2024-03-15"},
+            {"check_number": "PAY-001", "invoice_num": "INV-001",
+             "amount": 9999, "status": "paid", "check_date": "2024-03-15"},
         ]
         result = format_lookup_result(
             json.dumps(data), "query_payments",
@@ -307,8 +307,8 @@ class TestFormatLookupResult:
     def test_summary_with_limit_only(self) -> None:
         """只有 limit 无 order_by 时显示简单计数。"""
         data = [
-            {"payment_number": "PAY-001", "invoice_number": "INV-001",
-             "amount": 100, "status": "paid", "payment_date": "2024-01-01"},
+            {"check_number": "PAY-001", "invoice_num": "INV-001",
+             "amount": 100, "status": "paid", "check_date": "2024-01-01"},
         ]
         result = format_lookup_result(
             json.dumps(data), "query_payments",
@@ -333,7 +333,7 @@ class TestExecuteLookup:
         """正常工具调用返回格式化结果。"""
         mock_tool = AsyncMock()
         mock_tool.ainvoke.return_value = json.dumps([
-            {"po_number": "PO-001", "supplier_name": "A",
+            {"po_number": "PO-001", "vendor_name": "A",
              "total_amount": 100, "status": "ok", "order_date": "2024-01-01"},
         ])
 
@@ -375,13 +375,13 @@ class TestExecuteLookup:
         """supplier_combo 双工具调用。"""
         vendor_tool = AsyncMock()
         vendor_tool.ainvoke.return_value = json.dumps([
-            {"supplier_id": "SUP-001", "supplier_name": "供应商A",
-             "site": "上海", "payment_terms": "NET30", "status": "active"},
+            {"vendor_id": "SUP-001", "vendor_name": "供应商A",
+             "site": "上海", "terms_id": "NET30", "enabled_flag": "Y"},
         ])
 
         po_tool = AsyncMock()
         po_tool.ainvoke.return_value = json.dumps([
-            {"po_number": "PO-001", "supplier_name": "供应商A",
+            {"po_number": "PO-001", "vendor_name": "供应商A",
              "total_amount": 100, "status": "ok", "order_date": "2024-01-01"},
         ])
 
@@ -397,7 +397,7 @@ class TestExecuteLookup:
 
         result = await execute_lookup(
             "__supplier_combo__",
-            {"supplier_id": "SUP-001", "days": 30},
+            {"vendor_id": "SUP-001", "days": 30},
             registry,
         )
         assert result is not None

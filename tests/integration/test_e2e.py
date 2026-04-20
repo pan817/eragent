@@ -142,7 +142,7 @@ class TestE2ESupplierPerformance:
         from modules.p2p.mock_data.generator import MockDataGenerator
         gen = MockDataGenerator(seed=0)
         raw = gen.generate_all()
-        supplier_id = raw["po_headers"][0]["supplier_id"]
+        supplier_id = raw["po_headers"][0]["vendor_id"]
 
         resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
             "query": f"评估供应商 {supplier_id} 的绩效 KPI",

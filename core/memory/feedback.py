@@ -30,7 +30,7 @@ FEEDBACK_EXTRACT_PROMPT = """\
 4. none — 不是反馈，是追问或新的分析请求
 
 输出严格 JSON 格式（不要输出其他内容）：
-{{"type": "correction|user_preference|domain_fact|none", "content": "提取的记忆内容", "related_entities": {{"po_number": "", "supplier_id": ""}}, "confidence": 0.0}}
+{{"type": "correction|user_preference|domain_fact|none", "content": "提取的记忆内容", "related_entities": {{"po_number": "", "vendor_id": ""}}, "confidence": 0.0}}
 
 规则：
 - 如果 type=none 或 confidence<0.6，content 必须为空字符串

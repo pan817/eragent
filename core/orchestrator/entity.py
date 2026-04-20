@@ -35,17 +35,17 @@ _REF_PATTERNS: list[tuple[str, str, str]] = [
     ),
     (
         _REF_PREFIX + r"\s*(?:供应商|vendor|supplier)",
-        "supplier_id",
+        "vendor_id",
         "供应商 {val}",
     ),
     (
         _REF_PREFIX + r"\s*(?:支付单|付款单|付款|payment|PAY|pay)",
-        "payment_number",
+        "check_number",
         "付款单 {val}",
     ),
     (
         _REF_PREFIX + r"\s*(?:发票|invoice|INV|inv)",
-        "invoice_number",
+        "invoice_num",
         "发票 {val}",
     ),
     (
@@ -70,7 +70,7 @@ def resolve_references(
 
     规则：
     - "这个/该/上述 + po/订单/采购订单" → 只关联 po_number
-    - "这个/该/上述 + 供应商" → 只关联 supplier_id
+    - "这个/该/上述 + 供应商" → 只关联 vendor_id
     - 无指代但有历史 → 全部补充（保持兼容）
     - 无历史 → 原样返回
 
@@ -157,56 +157,56 @@ async def validate_entities(
                 errors.append(f"po_number: {type(exc).__name__}: {exc}")
 
         # 供应商验证（days=0 不限时间）
-        sid = params.get("supplier_id", "")
+        sid = params.get("vendor_id", "")
         if sid:
             try:
                 orders = await asyncio.to_thread(
-                    repo.query_purchase_orders, supplier_id=sid, days=0
+                    repo.query_purchase_orders, vendor_id=sid, days=0
                 )
                 if not orders:
-                    _logger.info("entity validation: supplier_id=%s not found in DB, discarded", sid)
-                    del params["supplier_id"]
-                    discarded.append(f"supplier_id={sid}")
+                    _logger.info("entity validation: vendor_id=%s not found in DB, discarded", sid)
+                    del params["vendor_id"]
+                    discarded.append(f"vendor_id={sid}")
             except Exception as exc:
-                _logger.warning("entity validation (supplier_id) failed: %s", exc)
-                errors.append(f"supplier_id: {type(exc).__name__}: {exc}")
+                _logger.warning("entity validation (vendor_id) failed: %s", exc)
+                errors.append(f"vendor_id: {type(exc).__name__}: {exc}")
 
         # 发票号验证（days=0 不限时间）
-        inv = params.get("invoice_number", "")
+        inv = params.get("invoice_num", "")
         if inv:
             try:
                 invoices = await asyncio.to_thread(
-                    repo.query_invoices, supplier_id="", status="", days=0
+                    repo.query_invoices, vendor_id="", status="", days=0
                 )
-                if not any(i.get("invoice_number") == inv for i in invoices):
-                    _logger.info("entity validation: invoice_number=%s not found in DB, discarded", inv)
-                    del params["invoice_number"]
-                    discarded.append(f"invoice_number={inv}")
+                if not any(i.get("invoice_num") == inv for i in invoices):
+                    _logger.info("entity validation: invoice_num=%s not found in DB, discarded", inv)
+                    del params["invoice_num"]
+                    discarded.append(f"invoice_num={inv}")
             except Exception as exc:
-                _logger.warning("entity validation (invoice_number) failed: %s", exc)
-                errors.append(f"invoice_number: {type(exc).__name__}: {exc}")
+                _logger.warning("entity validation (invoice_num) failed: %s", exc)
+                errors.append(f"invoice_num: {type(exc).__name__}: {exc}")
 
         # 付款号验证（days=0 不限时间）
-        pay = params.get("payment_number", "")
+        pay = params.get("check_number", "")
         if pay:
             try:
                 payments = await asyncio.to_thread(
-                    repo.query_payments, payment_number=pay, days=0
+                    repo.query_payments, check_number=pay, days=0
                 )
                 if not payments:
-                    _logger.info("entity validation: payment_number=%s not found in DB, discarded", pay)
-                    del params["payment_number"]
-                    discarded.append(f"payment_number={pay}")
+                    _logger.info("entity validation: check_number=%s not found in DB, discarded", pay)
+                    del params["check_number"]
+                    discarded.append(f"check_number={pay}")
             except Exception as exc:
-                _logger.warning("entity validation (payment_number) failed: %s", exc)
-                errors.append(f"payment_number: {type(exc).__name__}: {exc}")
+                _logger.warning("entity validation (check_number) failed: %s", exc)
+                errors.append(f"check_number: {type(exc).__name__}: {exc}")
 
         # 收货号验证（days=0 不限时间）
         rcv = params.get("receipt_number", "")
         if rcv:
             try:
                 receipts = await asyncio.to_thread(
-                    repo.query_receipts, po_number="", supplier_id="", days=0
+                    repo.query_receipts, po_number="", vendor_id="", days=0
                 )
                 if not any(
                     r.get("receipt_id") == rcv or r.get("gr_number") == rcv
@@ -243,10 +243,10 @@ async def enrich_entities(
     两阶段处理：
     阶段 1：DB 验证——正则提取的实体在 DB 中是否存在，不存在则清除（防误匹配）。
     阶段 2：级联补充——从已有实体反查关联实体。
-      1. payment_number → invoice_number（付款关联发票）
-      2. receipt_number → po_number, supplier_id（收货关联 PO 和供应商）
-      3. invoice_number → po_number, supplier_id（发票关联 PO 和供应商）
-      4. po_number → supplier_id（PO 关联供应商）
+      1. check_number → invoice_num（付款关联发票）
+      2. receipt_number → po_number, vendor_id（收货关联 PO 和供应商）
+      3. invoice_num → po_number, vendor_id（发票关联 PO 和供应商）
+      4. po_number → vendor_id（PO 关联供应商）
 
     查询失败不阻塞主流程。
     """
@@ -277,28 +277,28 @@ async def enrich_entities(
 
         # 所有级联查询统一使用 days=0（不限时间）——用户指定的实体可能创建于任何时间
 
-        # 1. payment_number → invoice_number
-        pay = params.get("payment_number", "")
-        if pay and not params.get("invoice_number"):
+        # 1. check_number → invoice_num
+        pay = params.get("check_number", "")
+        if pay and not params.get("invoice_num"):
             try:
                 payments = await asyncio.to_thread(
-                    repo.query_payments, payment_number=pay, days=0
+                    repo.query_payments, check_number=pay, days=0
                 )
                 if payments:
-                    inv_num = payments[0].get("invoice_number", "")
+                    inv_num = payments[0].get("invoice_num", "")
                     if inv_num:
-                        params["invoice_number"] = inv_num
-                        _log_enriched("payment_number", pay, "invoice_number", inv_num)
+                        params["invoice_num"] = inv_num
+                        _log_enriched("check_number", pay, "invoice_num", inv_num)
             except Exception as exc:
                 _logger.warning("entity enrichment (payment→invoice) failed: %s", exc)
                 errors.append(f"payment→invoice: {type(exc).__name__}: {exc}")
 
-        # 2. receipt_number → po_number, supplier_id
+        # 2. receipt_number → po_number, vendor_id
         rcv = params.get("receipt_number", "")
         if rcv:
             try:
                 receipts = await asyncio.to_thread(
-                    repo.query_receipts, po_number="", supplier_id="", days=0
+                    repo.query_receipts, po_number="", vendor_id="", days=0
                 )
                 matched = [r for r in receipts if r.get("receipt_id") == rcv or r.get("gr_number") == rcv]
                 if matched:
@@ -307,50 +307,50 @@ async def enrich_entities(
                         if po_num:
                             params["po_number"] = po_num
                             _log_enriched("receipt_number", rcv, "po_number", po_num)
-                    if not params.get("supplier_id"):
-                        sid = matched[0].get("supplier_id", "")
+                    if not params.get("vendor_id"):
+                        sid = matched[0].get("vendor_id", "")
                         if sid:
-                            params["supplier_id"] = sid
-                            _log_enriched("receipt_number", rcv, "supplier_id", sid)
+                            params["vendor_id"] = sid
+                            _log_enriched("receipt_number", rcv, "vendor_id", sid)
             except Exception as exc:
                 _logger.warning("entity enrichment (receipt→po/supplier) failed: %s", exc)
                 errors.append(f"receipt→po/supplier: {type(exc).__name__}: {exc}")
 
-        # 3. invoice_number → po_number, supplier_id
-        inv = params.get("invoice_number", "")
+        # 3. invoice_num → po_number, vendor_id
+        inv = params.get("invoice_num", "")
         if inv:
             try:
                 invoices = await asyncio.to_thread(
-                    repo.query_invoices, supplier_id="", status="", days=0
+                    repo.query_invoices, vendor_id="", status="", days=0
                 )
-                matched = [i for i in invoices if i.get("invoice_number") == inv]
+                matched = [i for i in invoices if i.get("invoice_num") == inv]
                 if matched:
                     if not params.get("po_number"):
                         po_num = matched[0].get("po_number", "")
                         if po_num:
                             params["po_number"] = po_num
-                            _log_enriched("invoice_number", inv, "po_number", po_num)
-                    if not params.get("supplier_id"):
-                        sid = matched[0].get("supplier_id", "")
+                            _log_enriched("invoice_num", inv, "po_number", po_num)
+                    if not params.get("vendor_id"):
+                        sid = matched[0].get("vendor_id", "")
                         if sid:
-                            params["supplier_id"] = sid
-                            _log_enriched("invoice_number", inv, "supplier_id", sid)
+                            params["vendor_id"] = sid
+                            _log_enriched("invoice_num", inv, "vendor_id", sid)
             except Exception as exc:
                 _logger.warning("entity enrichment (invoice→po/supplier) failed: %s", exc)
                 errors.append(f"invoice→po/supplier: {type(exc).__name__}: {exc}")
 
-        # 4. po_number → supplier_id
+        # 4. po_number → vendor_id
         po = params.get("po_number", "")
-        if po and not params.get("supplier_id"):
+        if po and not params.get("vendor_id"):
             try:
                 orders = await asyncio.to_thread(
                     repo.query_purchase_orders, po_number=po, days=0
                 )
                 if orders:
-                    sid = orders[0].get("supplier_id", "")
+                    sid = orders[0].get("vendor_id", "")
                     if sid:
-                        params["supplier_id"] = sid
-                        _log_enriched("po_number", po, "supplier_id", sid)
+                        params["vendor_id"] = sid
+                        _log_enriched("po_number", po, "vendor_id", sid)
             except Exception as exc:
                 _logger.warning("entity enrichment (po→supplier) failed: %s", exc)
                 errors.append(f"po→supplier: {type(exc).__name__}: {exc}")

@@ -41,8 +41,8 @@ class TestCollectEntities:
     def test_extracts_from_anomalies(self, extractor: MemoryExtractor) -> None:
         doc = MagicMock()
         doc.po_number = "PO-001"
-        doc.supplier_name = "SUP-003"
-        doc.invoice_number = ""
+        doc.vendor_name = "SUP-003"
+        doc.invoice_num = ""
         anomaly = MagicMock()
         anomaly.documents = doc
 
@@ -58,8 +58,8 @@ class TestCollectEntities:
     def test_dedup(self, extractor: MemoryExtractor) -> None:
         doc = MagicMock()
         doc.po_number = "PO-001"
-        doc.supplier_name = ""
-        doc.invoice_number = ""
+        doc.vendor_name = ""
+        doc.invoice_num = ""
         a1 = MagicMock(documents=doc)
         a2 = MagicMock(documents=doc)
 
@@ -92,8 +92,8 @@ class TestExtractEntityProfile:
     ) -> None:
         doc = MagicMock()
         doc.po_number = "PO-001"
-        doc.supplier_name = ""
-        doc.invoice_number = ""
+        doc.vendor_name = ""
+        doc.invoice_num = ""
         anomaly = MagicMock(documents=doc)
 
         result = MagicMock()
@@ -130,8 +130,8 @@ class TestExtractAnalysisInsight:
         # 构造有正确 documents 结构的 anomalies
         doc = MagicMock()
         doc.po_number = ""
-        doc.supplier_name = ""
-        doc.invoice_number = ""
+        doc.vendor_name = ""
+        doc.invoice_num = ""
         anomalies = [MagicMock(documents=doc) for _ in range(10)]
 
         result = MagicMock()

@@ -40,7 +40,7 @@ _RULE_DISCOUNT_ABUSE = "RULE_P2P_DISCOUNT_ABUSE"
 class PaymentComplianceChecker:
     """付款合规性检查器。
 
-    将付款数据与发票数据按 invoice_number 关联，
+    将付款数据与发票数据按 invoice_num 关联，
     逐条检测逾期付款、提前付款和折扣滥用。
     """
 
@@ -66,17 +66,17 @@ class PaymentComplianceChecker:
 
         Args:
             payments: 付款记录列表，每条需包含:
-                - payment_number (str): 付款单号
-                - invoice_number (str): 关联发票号
-                - payment_date (str): 付款日期，ISO 格式 (YYYY-MM-DD)
-                - payment_amount (float): 实际付款金额
+                - check_number (str): 付款单号
+                - invoice_num (str): 关联发票号
+                - check_date (str): 付款日期，ISO 格式 (YYYY-MM-DD)
+                - amount (float): 实际付款金额
             invoices: 发票记录列表，每条需包含:
-                - invoice_number (str): 发票号
+                - invoice_num (str): 发票号
                 - po_number (str): 关联采购订单号
                 - due_date (str): 付款截止日，ISO 格式
                 - discount_due_date (str, 可选): 折扣截止日，ISO 格式
                 - invoice_amount (float): 发票金额
-                - supplier_name (str): 供应商名称
+                - vendor_name (str): 供应商名称
 
         Returns:
             检测到的合规性异常记录列表。
@@ -84,40 +84,40 @@ class PaymentComplianceChecker:
         self._id_gen.reset()
         anomalies: list[AnomalyRecord] = []
 
-        # 按 invoice_number 索引发票
+        # 按 invoice_num 索引发票
         inv_map: dict[str, dict[str, Any]] = {
-            inv["invoice_number"]: inv for inv in invoices if inv.get("invoice_number")
+            inv["invoice_num"]: inv for inv in invoices if inv.get("invoice_num")
         }
 
         compliance_cfg = self._settings.payment_compliance
         early_threshold_days: int = compliance_cfg.early_payment_threshold_days
 
         for payment in payments:
-            invoice_number: str = payment.get("invoice_number", "")
-            if not invoice_number:
+            invoice_num: str = payment.get("invoice_num", "")
+            if not invoice_num:
                 continue
-            invoice: dict[str, Any] | None = inv_map.get(invoice_number)
+            invoice: dict[str, Any] | None = inv_map.get(invoice_num)
             if invoice is None:
                 continue  # 找不到对应发票，跳过
 
-            payment_date = safe_date(payment.get("payment_date"))
+            payment_date = safe_date(payment.get("check_date"))
             due_date = safe_date(invoice.get("due_date"))
             if payment_date is None or due_date is None:
                 _logger.info(
-                    "skip payment %s: invalid date(s)", payment.get("payment_number")
+                    "skip payment %s: invalid date(s)", payment.get("check_number")
                 )
                 continue
-            payment_amount: float = safe_float(payment.get("payment_amount"))
+            payment_amount: float = safe_float(payment.get("amount"))
             invoice_amount: float = safe_float(invoice.get("invoice_amount"))
-            payment_number: str = payment.get("payment_number", "")
+            payment_number: str = payment.get("check_number", "")
             po_number: str = invoice.get("po_number", "")
-            supplier_name: str = invoice.get("supplier_name", "")
+            vendor_name: str = invoice.get("vendor_name", "")
 
             docs = DocumentRef(
                 po_number=po_number,
-                invoice_number=invoice_number,
-                payment_number=payment_number,
-                supplier_name=supplier_name,
+                invoice_num=invoice_num,
+                check_number=payment_number,
+                vendor_name=vendor_name,
             )
 
             # --- 1. 逾期付款检测 ---
@@ -132,7 +132,7 @@ class PaymentComplianceChecker:
                         rule_id=_RULE_OVERDUE,
                         documents=docs,
                         details=AnomalyDetail(
-                            field="payment_date",
+                            field="check_date",
                             expected_value=None,
                             actual_value=None,
                             variance_pct=None,
@@ -164,7 +164,7 @@ class PaymentComplianceChecker:
                             rule_id=_RULE_EARLY,
                             documents=docs,
                             details=AnomalyDetail(
-                                field="payment_date",
+                                field="check_date",
                                 expected_value=float(early_threshold_days),
                                 actual_value=float(early_days),
                                 variance_pct=None,
@@ -202,7 +202,7 @@ class PaymentComplianceChecker:
                             rule_id=_RULE_DISCOUNT_ABUSE,
                             documents=docs,
                             details=AnomalyDetail(
-                                field="payment_amount",
+                                field="amount",
                                 expected_value=invoice_amount,
                                 actual_value=payment_amount,
                                 variance_pct=round(diff_pct, 2),
@@ -238,7 +238,7 @@ class PaymentComplianceChecker:
                                 rule_id=_RULE_DISCOUNT_ABUSE,
                                 documents=docs,
                                 details=AnomalyDetail(
-                                    field="payment_amount",
+                                    field="amount",
                                     expected_value=discount_expected,
                                     actual_value=payment_amount,
                                     variance_pct=round(

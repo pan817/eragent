@@ -203,16 +203,16 @@ class KnowledgeGraph:
         创建或合并供应商节点。
 
         Args:
-            data: 供应商属性字典，必须包含 ``supplier_id``。
-                  典型字段: supplier_id, supplier_name, status, creation_date 等。
+            data: 供应商属性字典，必须包含 ``vendor_id``。
+                  典型字段: vendor_id, vendor_name, status, creation_date 等。
 
         Returns:
-            供应商业务 ID（supplier_id 值）。
+            供应商业务 ID（vendor_id 值）。
 
         Raises:
-            NodeCreationError: 缺少 supplier_id 或写入失败时抛出。
+            NodeCreationError: 缺少 vendor_id 或写入失败时抛出。
         """
-        return self._create_node("Supplier", data, "supplier_id")
+        return self._create_node("Supplier", data, "vendor_id")
 
     def create_po_node(self, data: dict[str, Any]) -> str:
         """
@@ -220,7 +220,7 @@ class KnowledgeGraph:
 
         Args:
             data: 采购订单属性字典，必须包含 ``po_number``。
-                  典型字段: po_number, supplier_id, amount, currency,
+                  典型字段: po_number, vendor_id, amount, currency,
                   creation_date, status 等。
 
         Returns:
@@ -237,7 +237,7 @@ class KnowledgeGraph:
 
         Args:
             data: 发票属性字典，必须包含 ``invoice_id``。
-                  典型字段: invoice_id, invoice_number, po_number, amount,
+                  典型字段: invoice_id, invoice_num, po_number, amount,
                   due_date, status 等。
 
         Returns:
@@ -270,17 +270,17 @@ class KnowledgeGraph:
         创建或合并付款记录节点。
 
         Args:
-            data: 付款属性字典，必须包含 ``payment_id``。
-                  典型字段: payment_id, invoice_id, amount, payment_date,
-                  payment_method 等。
+            data: 付款属性字典，必须包含 ``check_id``。
+                  典型字段: check_id, invoice_id, amount, check_date,
+                  payment_method_code 等。
 
         Returns:
-            付款记录 ID（payment_id 值）。
+            付款记录 ID（check_id 值）。
 
         Raises:
-            NodeCreationError: 缺少 payment_id 或写入失败时抛出。
+            NodeCreationError: 缺少 check_id 或写入失败时抛出。
         """
-        return self._create_node("Payment", data, "payment_id")
+        return self._create_node("Payment", data, "check_id")
 
     # ------------------------------------------------------------------
     # 关系创建
@@ -339,12 +339,12 @@ class KnowledgeGraph:
     # 查询
     # ------------------------------------------------------------------
 
-    def query_supplier_pos(self, supplier_id: str) -> list[dict[str, Any]]:
+    def query_supplier_pos(self, vendor_id: str) -> list[dict[str, Any]]:
         """
         查询指定供应商的所有采购订单。
 
         Args:
-            supplier_id: 供应商业务 ID。
+            vendor_id: 供应商业务 ID。
 
         Returns:
             采购订单属性字典列表；供应商不存在或无关联 PO 时返回空列表。
@@ -353,17 +353,17 @@ class KnowledgeGraph:
             QueryError: 查询执行异常时抛出。
         """
         query = (
-            "MATCH (s:Supplier {supplier_id: $supplier_id})"
+            "MATCH (s:Supplier {vendor_id: $vendor_id})"
             "<-[:ISSUED_BY]-(po:PurchaseOrder) "
             "RETURN properties(po) AS po_data"
         )
         try:
             with self._get_session() as session:
-                result = session.run(query, supplier_id=supplier_id)
+                result = session.run(query, vendor_id=vendor_id)
                 return [dict(record["po_data"]) for record in result]
         except Exception as exc:
             raise QueryError(
-                f"查询供应商 {supplier_id} 的采购订单失败: {exc}"
+                f"查询供应商 {vendor_id} 的采购订单失败: {exc}"
             ) from exc
 
     def query_po_invoices(self, po_number: str) -> list[dict[str, Any]]:
@@ -393,14 +393,14 @@ class KnowledgeGraph:
                 f"查询采购订单 {po_number} 的发票失败: {exc}"
             ) from exc
 
-    def query_supplier_payments(self, supplier_id: str) -> list[dict[str, Any]]:
+    def query_supplier_payments(self, vendor_id: str) -> list[dict[str, Any]]:
         """
         查询指定供应商的所有付款记录。
 
         通过 Supplier -> PurchaseOrder -> Invoice -> Payment 路径查询。
 
         Args:
-            supplier_id: 供应商业务 ID。
+            vendor_id: 供应商业务 ID。
 
         Returns:
             付款记录属性字典列表；无匹配时返回空列表。
@@ -409,7 +409,7 @@ class KnowledgeGraph:
             QueryError: 查询执行异常时抛出。
         """
         query = (
-            "MATCH (s:Supplier {supplier_id: $supplier_id})"
+            "MATCH (s:Supplier {vendor_id: $vendor_id})"
             "<-[:ISSUED_BY]-(po:PurchaseOrder)"
             "<-[:REFERENCES_PO]-(inv:Invoice)"
             "<-[:APPLIED_TO_INVOICE]-(pmt:Payment) "
@@ -417,11 +417,11 @@ class KnowledgeGraph:
         )
         try:
             with self._get_session() as session:
-                result = session.run(query, supplier_id=supplier_id)
+                result = session.run(query, vendor_id=vendor_id)
                 return [dict(record["payment_data"]) for record in result]
         except Exception as exc:
             raise QueryError(
-                f"查询供应商 {supplier_id} 的付款记录失败: {exc}"
+                f"查询供应商 {vendor_id} 的付款记录失败: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -454,12 +454,12 @@ class KnowledgeGraph:
         """
         # 类名到业务 ID 字段的映射
         id_field_mapping: dict[str, str] = {
-            "Supplier": "supplier_id",
+            "Supplier": "vendor_id",
             "PurchaseOrder": "po_number",
             "PurchaseOrderLine": "po_line_id",
             "Invoice": "invoice_id",
             "ReceiptTransaction": "receipt_id",
-            "Payment": "payment_id",
+            "Payment": "check_id",
         }
 
         try:

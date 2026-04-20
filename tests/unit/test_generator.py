@@ -15,8 +15,8 @@ class TestMockDataGenerator:
         """应生成指定数量的供应商。"""
         suppliers = self.gen.generate_suppliers(5)
         assert len(suppliers) == 5
-        assert all("supplier_id" in s for s in suppliers)
-        assert all("supplier_name" in s for s in suppliers)
+        assert all("vendor_id" in s for s in suppliers)
+        assert all("vendor_name" in s for s in suppliers)
 
     def test_generate_purchase_orders(self) -> None:
         """应生成 PO 头、行、交货计划行。"""
@@ -51,13 +51,21 @@ class TestMockDataGenerator:
         assert len(payments) == 10
 
     def test_generate_all(self) -> None:
-        """generate_all 应返回完整数据集。"""
+        """generate_all 应返回完整数据集（20 张表）。"""
         data = self.gen.generate_all()
-        expected_keys = {"suppliers", "po_headers", "po_lines", "po_line_locations",
-                        "rcv_headers", "rcv_transactions", "invoices", "invoice_lines", "payments"}
+        expected_keys = {
+            "suppliers", "supplier_sites", "materials",
+            "po_headers", "po_lines", "po_line_locations", "po_distributions",
+            "rcv_headers", "rcv_transactions", "shipment_lines",
+            "invoices", "invoice_lines", "invoice_distributions",
+            "payments", "invoice_payments", "payment_schedules",
+            "auctions", "bids", "contracts", "contract_lines",
+        }
         assert set(data.keys()) == expected_keys
         assert len(data["po_headers"]) == 50
         assert len(data["suppliers"]) == 5
+        assert len(data["supplier_sites"]) == 5
+        assert len(data["materials"]) >= 1
 
     def test_deterministic_with_seed(self) -> None:
         """相同 seed 应生成相同数据。"""

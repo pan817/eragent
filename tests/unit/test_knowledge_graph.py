@@ -105,7 +105,7 @@ class TestNodeCreation:
     def test_create_supplier_node(self, kg: KnowledgeGraph) -> None:
         """创建供应商节点应返回 supplier_id。"""
         self._setup_kg_with_session(kg)
-        result = kg.create_supplier_node({"supplier_id": "SUP-001", "name": "Test"})
+        result = kg.create_supplier_node({"vendor_id": "SUP-001", "name": "Test"})
         assert result == "test-id"
 
     def test_create_po_node(self, kg: KnowledgeGraph) -> None:
@@ -129,7 +129,7 @@ class TestNodeCreation:
     def test_create_payment_node(self, kg: KnowledgeGraph) -> None:
         """创建付款节点应返回 payment_id。"""
         self._setup_kg_with_session(kg)
-        result = kg.create_payment_node({"payment_id": "PAY-001"})
+        result = kg.create_payment_node({"check_id": "PAY-001"})
         assert result == "test-id"
 
     def test_create_node_missing_id_key(self, kg: KnowledgeGraph) -> None:
@@ -148,7 +148,7 @@ class TestNodeCreation:
         mock_driver.session.return_value = mock_session
         kg._driver = mock_driver
         with pytest.raises(NodeCreationError, match="创建 Supplier 节点失败"):
-            kg.create_supplier_node({"supplier_id": "SUP-001"})
+            kg.create_supplier_node({"vendor_id": "SUP-001"})
 
     def test_create_node_no_record(self, kg: KnowledgeGraph) -> None:
         """single() 返回 None 时应使用 data 中的 id。"""
@@ -161,7 +161,7 @@ class TestNodeCreation:
         mock_session.__exit__ = MagicMock(return_value=False)
         mock_driver.session.return_value = mock_session
         kg._driver = mock_driver
-        result = kg.create_supplier_node({"supplier_id": "SUP-002"})
+        result = kg.create_supplier_node({"vendor_id": "SUP-002"})
         assert result == "SUP-002"
 
 
@@ -293,7 +293,7 @@ class TestQueries:
     def test_query_supplier_payments(self, kg: KnowledgeGraph) -> None:
         """查询供应商付款应返回列表。"""
         record = MagicMock()
-        record.__getitem__ = MagicMock(return_value={"payment_id": "PAY-001"})
+        record.__getitem__ = MagicMock(return_value={"check_id": "PAY-001"})
         self._setup_query(kg, [record])
         result = kg.query_supplier_payments("SUP-001")
         assert len(result) == 1

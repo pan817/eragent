@@ -51,8 +51,8 @@ class SupplierPerformanceCalculator:
 
     def calculate(
         self,
-        supplier_id: str,
-        supplier_name: str,
+        vendor_id: str,
+        vendor_name: str,
         po_lines: list[dict[str, Any]],
         gr_lines: list[dict[str, Any]],
         invoices: list[dict[str, Any]],
@@ -61,8 +61,8 @@ class SupplierPerformanceCalculator:
         """计算供应商绩效 KPI 报告。
 
         Args:
-            supplier_id: 供应商 ID。
-            supplier_name: 供应商名称。
+            vendor_id: 供应商 ID。
+            vendor_name: 供应商名称。
             po_lines: 该供应商的采购订单行列表，每行需包含:
                 - po_number (str): 采购订单号
                 - required_date (str, 可选): 要求交付日期 (YYYY-MM-DD)
@@ -91,8 +91,8 @@ class SupplierPerformanceCalculator:
         }
 
         return SupplierKPIReport(
-            supplier_id=supplier_id,
-            supplier_name=supplier_name,
+            vendor_id=vendor_id,
+            vendor_name=vendor_name,
             period=period,
             kpis=kpis,
         )

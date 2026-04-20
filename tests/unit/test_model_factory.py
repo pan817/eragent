@@ -480,7 +480,7 @@ class TestBuildMemoryMetadata:
         self._fn = _build_memory_metadata
 
     def _anomaly(self, supplier: str = "", po: str = "") -> dict:
-        return {"documents": {"supplier_name": supplier, "po_number": po}}
+        return {"documents": {"vendor_name": supplier, "po_number": po}}
 
     def test_basic_fields(self) -> None:
         meta = self._fn("q", "three_way_match", [], {}, 30)

@@ -48,6 +48,28 @@ neo4j:
   database: "neo4j"
   max_connection_pool_size: 10
 
+graphiti_etl:
+  enabled: true
+  query_backend: "graphiti"             # graphiti / postgresql / hybrid
+  sync_interval_seconds: 600
+  full_sync_on_startup: true
+  batch_size: 500
+  max_concurrent_domains: 3
+  sync_timeout_seconds: 3600
+  incremental_timeout_seconds: 300
+  retry_max_attempts: 3
+  retry_backoff_seconds: 5.0
+  llm_extraction_enabled: false
+  llm_extraction_batch_size: 20
+  search_default_top_k: 10
+  search_timeout_seconds: 30
+  context_enrichment_enabled: true
+  episode_batch_size: 50                 # rows merged into one Graphiti episode
+  max_load_concurrency: 3               # concurrent episode writes (lower = fewer Neo4j tx conflicts)
+  max_rows_per_table: 20                # per-table row cap (0=unlimited, >0 for testing/validation)
+  max_nodes_per_sync: 50000
+  max_edges_per_sync: 100000
+
 chroma:
   persist_directory: "./data/chroma"
   collection_name: "erp_ontology"      # 兼容字段（旧版默认 collection）
@@ -76,7 +98,7 @@ postgresql:
   max_overflow: 30
 
 mock_data:
-  record_count: 500              # 模拟数据生成条数（PO/发票/付款各 N 条）
+  record_count: 20               # 模拟数据生成条数（PO/发票/付款各 N 条）
   seed: 42                       # 随机种子，确保数据可重复
 
 analysis:
@@ -91,12 +113,12 @@ analysis:
     po_number:
       - 'PO-\d[\da-zA-Z_-]*\d'     # PO-2024-0001
       - 'PO-\d+'                     # PO-001
-    supplier_id:
+    vendor_id:
       - 'SUP-\d+'                    # SUP-001
-    invoice_number:
+    invoice_num:
       - 'INV-\d[\da-zA-Z_-]*\d'     # INV-2024-0001
       - 'INV-\d+'                    # INV-001
-    payment_number:
+    check_number:
       - 'PAY-\d[\da-zA-Z_-]*\d'     # PAY-2024-0001
       - 'PAY-\d+'                    # PAY-001
     receipt_number:
@@ -272,12 +294,12 @@ intent_routing:
   l2_length_ratio_penalty: 0.7
   l2_topk: 1
   # L3 LLM classification confidence tiers
-  l3_dag_min_confidence: 0.5
+  l3_dag_min_confidence: 0.99       # 强制走 ReAct（几乎所有查询不满足 DAG 置信度）
   l3_react_min_confidence: 0.3
   # Feature flags
   l25_enabled: false
-  generic_template_enabled: true
-  lookup_shortcut_enabled: true    # DATA_LOOKUP shortcut: true=direct tool call, false=ReAct
+  generic_template_enabled: false   # 关闭通用 DAG 模板，让 Agent 自主选工具
+  lookup_shortcut_enabled: false    # 关闭 lookup 快捷路径，不跳过 ReAct
 
 logging:
   level: "INFO"

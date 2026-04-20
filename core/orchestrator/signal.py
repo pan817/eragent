@@ -53,7 +53,7 @@ class QuerySignal:
             以保持向后兼容——旧路径只关心 analysis_type。
         keywords: 提取的业务关键词列表（intent_kind=ANALYSIS 时为
             AnalysisType 的字符串值；其他 kind 时为对应 sentinel）。
-        entities: 识别的业务实体（supplier_id / po_number 等）。
+        entities: 识别的业务实体（vendor_id / po_number 等）。
         missing_params: 历史字段，CLARIFICATION 废弃后不再主动填充。
             保留以兼容旧 trace 数据反序列化。
         time_range_days: 提取的时间范围（天），None 表示未识别。

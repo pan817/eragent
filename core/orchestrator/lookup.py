@@ -4,7 +4,7 @@
 直接调用对应 query_* 工具，跳过 ReAct Agent，实现零 LLM 消耗的事实查询。
 
 两条路径（共享 lookup_shortcut_enabled 开关）：
-- 路径 A：有实体编号（po_number / invoice_number 等）→ 精确查询
+- 路径 A：有实体编号（po_number / invoice_num 等）→ 精确查询
 - 路径 B：无编号但有实体类型关键词（"查最新PO"）→ 默认参数查询
 - 两者均未命中 → 返回 None，由 orchestrator 降级到 ReAct
 """
@@ -62,10 +62,10 @@ def _parse_query_constraints(query: str) -> tuple[int, str]:
 _ENTITY_TOOL_MAP: list[tuple[str, str, dict[str, str]]] = [
     # (实体字段, 工具名, {工具参数名: 实体字段名})
     ("po_number", "query_purchase_orders", {"po_number": "po_number"}),
-    ("invoice_number", "query_invoices", {"invoice_number": "invoice_number"}),
-    ("payment_number", "query_payments", {"payment_number": "payment_number"}),
+    ("invoice_num", "query_invoices", {"invoice_num": "invoice_num"}),
+    ("check_number", "query_payments", {"check_number": "check_number"}),
     # receipt_number 不支持直调（query_receipts 无此参数），跳过
-    # supplier_id 需特殊处理（双工具调用），见 _resolve_supplier_lookup
+    # vendor_id 需特殊处理（双工具调用），见 _resolve_supplier_lookup
 ]
 
 
@@ -116,11 +116,11 @@ def resolve_lookup_tool(
                 kwargs[tool_param] = params[source_field]
             return tool_name, _with_constraints(kwargs)
 
-    # 路径 A 特殊分支：supplier_id（双工具调用）→ 不限时间
-    supplier_id = params.get("supplier_id")
-    if supplier_id:
+    # 路径 A 特殊分支：vendor_id（双工具调用）→ 不限时间
+    vendor_id = params.get("vendor_id")
+    if vendor_id:
         return "__supplier_combo__", _with_constraints({
-            "supplier_id": supplier_id,
+            "vendor_id": vendor_id,
             "days": 0,
         })
 
@@ -178,10 +178,10 @@ async def _execute_supplier_combo(
     kwargs: dict[str, Any],
     registry: Any,
 ) -> str | None:
-    """supplier_id 双工具调用：vendor_master + purchase_orders。"""
+    """vendor_id 双工具调用：vendor_master + purchase_orders。"""
     import asyncio
 
-    supplier_id = kwargs["supplier_id"]
+    vendor_id = kwargs["vendor_id"]
     days = kwargs.get("days", 30)
     limit = kwargs.get("limit", 0)
     order_by = kwargs.get("order_by", "")
@@ -193,13 +193,13 @@ async def _execute_supplier_combo(
         _logger.warning("lookup shortcut: supplier combo tools not registered")
         return None
 
-    po_kwargs: dict[str, Any] = {"supplier_id": supplier_id, "days": days}
+    po_kwargs: dict[str, Any] = {"vendor_id": vendor_id, "days": days}
     if limit:
         po_kwargs["limit"] = limit
     if order_by:
         po_kwargs["order_by"] = order_by
 
-    vendor_task = vendor_fn.ainvoke({"vendor_ids": supplier_id})
+    vendor_task = vendor_fn.ainvoke({"vendor_ids": vendor_id})
     po_task = po_fn.ainvoke(po_kwargs)
     vendor_json, po_json = await asyncio.gather(vendor_task, po_task)
 
@@ -219,24 +219,24 @@ async def _execute_supplier_combo(
 _COLUMN_DEFS: dict[str, list[tuple[str, str]]] = {
     "query_purchase_orders": [
         ("PO 编号", "po_number"),
-        ("供应商", "supplier_name"),
+        ("供应商", "vendor_name"),
         ("金额", "total_amount"),
         ("状态", "status"),
         ("日期", "order_date"),
     ],
     "query_invoices": [
-        ("发票号", "invoice_number"),
+        ("发票号", "invoice_num"),
         ("PO 编号", "po_number"),
         ("金额", "total_amount"),
         ("状态", "status"),
         ("日期", "invoice_date"),
     ],
     "query_payments": [
-        ("付款单号", "payment_number"),
-        ("发票号", "invoice_number"),
+        ("付款单号", "check_number"),
+        ("发票号", "invoice_num"),
         ("金额", "amount"),
         ("状态", "status"),
-        ("日期", "payment_date"),
+        ("日期", "check_date"),
     ],
     "query_receipts": [
         ("收货单号", "receipt_number"),
@@ -246,11 +246,11 @@ _COLUMN_DEFS: dict[str, list[tuple[str, str]]] = {
         ("日期", "receipt_date"),
     ],
     "query_vendor_master": [
-        ("供应商 ID", "supplier_id"),
-        ("名称", "supplier_name"),
+        ("供应商 ID", "vendor_id"),
+        ("名称", "vendor_name"),
         ("站点", "site"),
-        ("付款条款", "payment_terms"),
-        ("状态", "status"),
+        ("付款条款", "terms_id"),
+        ("状态", "enabled_flag"),
     ],
 }
 

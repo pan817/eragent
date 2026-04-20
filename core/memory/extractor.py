@@ -87,25 +87,25 @@ class MemoryExtractor:
             po = getattr(docs, "po_number", "")
             if po:
                 entities[("po", po)] = None
-            supplier = getattr(docs, "supplier_name", "")
+            supplier = getattr(docs, "vendor_name", "")
             if supplier:
                 entities[("supplier", supplier)] = None
-            inv = getattr(docs, "invoice_number", "")
+            inv = getattr(docs, "invoice_num", "")
             if inv:
                 entities[("invoice", inv)] = None
 
         # 从 supplier_kpis 中提取
         for kpi in getattr(result, "supplier_kpis", []):
-            sid = getattr(kpi, "supplier_id", "")
+            sid = getattr(kpi, "vendor_id", "")
             if sid:
                 entities[("supplier", sid)] = None
 
         # 从 summary 中提取
         summary = getattr(result, "summary", {}) or {}
-        for key in ("supplier_id", "po_number"):
+        for key in ("vendor_id", "po_number"):
             val = summary.get(key)
             if val:
-                etype = "supplier" if "supplier" in key else "po"
+                etype = "supplier" if "vendor" in key else "po"
                 entities[(etype, val)] = None
 
         return list(entities.keys())
@@ -141,7 +141,7 @@ class MemoryExtractor:
 
             # 从 supplier_kpis 补充指标
             for kpi in getattr(result, "supplier_kpis", []):
-                sid = getattr(kpi, "supplier_id", "")
+                sid = getattr(kpi, "vendor_id", "")
                 if sid == entity_id:
                     kpi_values = getattr(kpi, "kpis", [])
                     if kpi_values:

@@ -138,7 +138,7 @@ Index(
 
 
 # ── 会话实体上下文 ───────────────────────────────────────────────────
-# 结构化存储每个 session 当前讨论的业务实体（po_number / supplier_id 等），
+# 结构化存储每个 session 当前讨论的业务实体（po_number / vendor_id 等），
 # 不依赖从消息文本正则提取。每轮分析后 upsert 更新。
 
 session_entities_table = Table(

@@ -1,18 +1,22 @@
-"""P2P 数据查询工具（4 个）。"""
+"""P2P 数据查询工具（4 个）。
+
+根据 ``graphiti_etl.query_backend`` 配置自动选择查询后端：
+- ``postgresql``：直接查 P2PRepository（默认降级）
+- ``graphiti``：查 Graphiti 知识图谱
+- ``hybrid``：图谱优先，失败降级到 SQL
+"""
 
 from __future__ import annotations
 
-import asyncio
-
 from langchain.tools import tool
 
-from modules.p2p.tools._inject import _get_repository
+from modules.p2p.tools._inject import _get_query_backend
 from modules.p2p.tools._output import _clip_and_dump
 
 
 @tool
 async def query_purchase_orders(
-    supplier_id: str = "",
+    vendor_id: str = "",
     status: str = "",
     po_number: str = "",
     days: int = 30,
@@ -24,7 +28,7 @@ async def query_purchase_orders(
     根据供应商 ID、订单状态、采购订单号等条件筛选采购订单列表。
 
     Args:
-        supplier_id: 供应商 ID，为空则返回全部。
+        vendor_id: 供应商 ID，为空则返回全部。
         status: 订单状态过滤，如 approved、pending，为空则不过滤。
         po_number: 采购订单号，为空则不按 PO 过滤。
         days: 查询最近 N 天内的订单，默认 30 天。
@@ -34,10 +38,9 @@ async def query_purchase_orders(
     Returns:
         JSON 格式的采购订单列表字符串。
     """
-    repo = _get_repository()
-    pos = await asyncio.to_thread(
-        repo.query_purchase_orders,
-        supplier_id=supplier_id,
+    backend = _get_query_backend()
+    pos = await backend.query_purchase_orders(
+        vendor_id=vendor_id,
         status=status,
         po_number=po_number,
         days=days,
@@ -50,7 +53,7 @@ async def query_purchase_orders(
 @tool
 async def query_receipts(
     po_number: str = "",
-    supplier_id: str = "",
+    vendor_id: str = "",
     days: int = 30,
     limit: int = 0,
     order_by: str = "",
@@ -61,7 +64,7 @@ async def query_receipts(
 
     Args:
         po_number: 采购订单号，为空则不按 PO 过滤。
-        supplier_id: 供应商 ID，为空则不按供应商过滤。
+        vendor_id: 供应商 ID，为空则不按供应商过滤。
         days: 查询最近 N 天内的记录，默认 30 天。
         limit: 返回结果数量上限，0 表示不限制。
         order_by: 排序方式（date_desc/date_asc），为空则不排序。
@@ -69,11 +72,10 @@ async def query_receipts(
     Returns:
         JSON 格式的收货记录列表字符串。
     """
-    repo = _get_repository()
-    receipts = await asyncio.to_thread(
-        repo.query_receipts,
+    backend = _get_query_backend()
+    receipts = await backend.query_receipts(
         po_number=po_number,
-        supplier_id=supplier_id,
+        vendor_id=vendor_id,
         days=days,
         limit=limit,
         order_by=order_by,
@@ -84,9 +86,9 @@ async def query_receipts(
 @tool
 async def query_invoices(
     po_number: str = "",
-    supplier_id: str = "",
+    vendor_id: str = "",
     status: str = "",
-    invoice_number: str = "",
+    invoice_num: str = "",
     days: int = 30,
     limit: int = 0,
     order_by: str = "",
@@ -97,9 +99,9 @@ async def query_invoices(
 
     Args:
         po_number: 采购订单号，为空则不按 PO 过滤。
-        supplier_id: 供应商 ID，为空则不按供应商过滤。
+        vendor_id: 供应商 ID，为空则不按供应商过滤。
         status: 发票状态过滤，如 pending、paid，为空则不过滤。
-        invoice_number: 发票号，为空则不按发票过滤。
+        invoice_num: 发票号，为空则不按发票过滤。
         days: 查询最近 N 天内的发票，默认 30 天。
         limit: 返回结果数量上限，0 表示不限制。
         order_by: 排序方式（date_desc/date_asc/amount_desc/amount_asc），为空则不排序。
@@ -107,13 +109,12 @@ async def query_invoices(
     Returns:
         JSON 格式的发票列表字符串。
     """
-    repo = _get_repository()
-    invoices = await asyncio.to_thread(
-        repo.query_invoices,
+    backend = _get_query_backend()
+    invoices = await backend.query_invoices(
         po_number=po_number,
-        supplier_id=supplier_id,
+        vendor_id=vendor_id,
         status=status,
-        invoice_number=invoice_number,
+        invoice_num=invoice_num,
         days=days,
         limit=limit,
         order_by=order_by,
@@ -123,9 +124,9 @@ async def query_invoices(
 
 @tool
 async def query_payments(
-    invoice_number: str = "",
-    supplier_id: str = "",
-    payment_number: str = "",
+    invoice_num: str = "",
+    vendor_id: str = "",
+    check_number: str = "",
     days: int = 30,
     limit: int = 0,
     order_by: str = "",
@@ -135,9 +136,9 @@ async def query_payments(
     根据发票号、供应商 ID 或付款单号筛选付款记录。
 
     Args:
-        invoice_number: 发票号，为空则不按发票过滤。
-        supplier_id: 供应商 ID，为空则不按供应商过滤。
-        payment_number: 付款单号，为空则不按付款单过滤。
+        invoice_num: 发票号，为空则不按发票过滤。
+        vendor_id: 供应商 ID，为空则不按供应商过滤。
+        check_number: 付款单号，为空则不按付款单过滤。
         days: 查询最近 N 天内的付款，默认 30 天。
         limit: 返回结果数量上限，0 表示不限制。
         order_by: 排序方式（date_desc/date_asc/amount_desc/amount_asc），为空则不排序。
@@ -145,12 +146,11 @@ async def query_payments(
     Returns:
         JSON 格式的付款记录列表字符串。
     """
-    repo = _get_repository()
-    payments = await asyncio.to_thread(
-        repo.query_payments,
-        invoice_number=invoice_number,
-        supplier_id=supplier_id,
-        payment_number=payment_number,
+    backend = _get_query_backend()
+    payments = await backend.query_payments(
+        invoice_num=invoice_num,
+        vendor_id=vendor_id,
+        check_number=check_number,
         days=days,
         limit=limit,
         order_by=order_by,

@@ -159,8 +159,8 @@ class LLMFastSettings(LLMSettings):
 class Neo4jSettings(BaseSettings):
     """Neo4j 图数据库配置。"""
 
-    # 总开关：关闭后服务启动不依赖 Neo4j，相关功能短路返回，不影响其他业务。
-    enabled: bool = False
+    # 总开关：关闭后服务启动不依赖 Neo4j，ETL 和图查询功能短路返回。
+    enabled: bool = True
     uri: str = "bolt://localhost:7687"
     username: str = "neo4j"
     password: str = Field(default="", alias="NEO4J_PASSWORD")
@@ -269,9 +269,9 @@ class AnalysisSettings(BaseSettings):
     # 实体编号正则模式（按客户 EBS 编号规则配置）
     entity_patterns: dict[str, list[str]] = Field(default_factory=lambda: {
         "po_number": [r"PO-\d[\da-zA-Z_-]*\d", r"PO-\d+"],
-        "supplier_id": [r"SUP-\d+"],
-        "invoice_number": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
-        "payment_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
+        "vendor_id": [r"SUP-\d+"],
+        "invoice_num": [r"INV-\d[\da-zA-Z_-]*\d", r"INV-\d+"],
+        "check_number": [r"PAY-\d[\da-zA-Z_-]*\d", r"PAY-\d+"],
         "receipt_number": [r"RCV-\d[\da-zA-Z_-]*\d", r"RCV-\d+", r"GR-\d+"],
         "days": [r"(?:最近|过去|近)\s*(\d+)\s*天", r"(?:past|last|recent)\s+(\d+)\s*days?"],
     })
@@ -624,6 +624,18 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     intent_routing: IntentRoutingSettings = Field(default_factory=IntentRoutingSettings)
+    graphiti_etl: Any = Field(default_factory=dict)
+
+    @field_validator("graphiti_etl", mode="before")
+    @classmethod
+    def _coerce_etl_settings(cls, v: Any) -> Any:
+        from core.etl.config import GraphitiETLSettings
+
+        if isinstance(v, GraphitiETLSettings):
+            return v
+        if isinstance(v, dict):
+            return GraphitiETLSettings(**v)
+        return GraphitiETLSettings()
 
     model_config = {"env_prefix": "APP_", "env_file": ".env", "extra": "ignore"}
 
