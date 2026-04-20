@@ -46,7 +46,7 @@ class DAGCaseStore:
             return self._session_factory
         from core.database.engine import get_session_factory, get_engine
 
-        engine = get_engine()
+        engine = get_engine(self._settings.postgresql)
         self._session_factory = get_session_factory(engine)
         return self._session_factory
 

@@ -664,7 +664,7 @@ class Orchestrator:
             # - RECALL / 低置信度 ANALYSIS → 强制 ReAct
             # - DATA_LOOKUP + 开关开启 + 实体/关键词可推断 → Lookup 快捷路径（零 LLM）
             # - DATA_LOOKUP 其余情况 → ReAct 兜底
-            # - L1/L2 命中且非 COMPREHENSIVE → DAG 执行
+            # - 具体 analysis_type（非 COMPREHENSIVE）→ DAG 执行
             # - COMPREHENSIVE + 有具体实体 → 实体维度 DAG
             # - 其余 → ReAct 兜底
             from core.orchestrator.signal import IntentKind as _IntentKindRoute
@@ -672,7 +672,6 @@ class Orchestrator:
             is_data_lookup = signal.intent_kind == _IntentKindRoute.DATA_LOOKUP
             low_confidence = (
                 signal.intent_kind == _IntentKindRoute.ANALYSIS
-                and signal.route_level == 3
                 and signal.confidence < self._settings.intent_routing.l3_dag_min_confidence
             )
 
@@ -737,7 +736,7 @@ class Orchestrator:
                 use_dag = (
                     generic_template_key is not None
                     or signal.route_level == 25  # L2.5 案例命中
-                    or (signal.route_level in (1, 2) and analysis_type != AnalysisType.COMPREHENSIVE)
+                    or analysis_type != AnalysisType.COMPREHENSIVE
                     or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
                 )
 

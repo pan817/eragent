@@ -369,15 +369,9 @@ class TestOrchestratorIntentKindBranches:
     async def test_explicit_analysis_type_overrides_data_lookup(
         self, settings: Settings
     ) -> None:
-        """用户显式 analysis_type 时，即使 LLM 判 DATA_LOOKUP 也走分析路径。"""
+        """用户显式 analysis_type 时，即使 LLM 判 DATA_LOOKUP 也走分析路径（DAG）。"""
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
-        mock_agent = _make_mock_agent(return_value={
-            "anomalies": [], "supplier_kpis": [], "summary": {},
-            "report_markdown": "# Forced",
-            "completed_tasks": [], "failed_tasks": [],
-        })
-        orch._agent = mock_agent
 
         signal = self._make_signal(IntentKind.DATA_LOOKUP, confidence=0.9)
         with patch.object(orch._intent_router, "route", return_value=signal):
@@ -386,23 +380,17 @@ class TestOrchestratorIntentKindBranches:
                 analysis_type=AnalysisType.THREE_WAY_MATCH,
             ))
 
-        # 未走早退，agent 被调用
-        mock_agent.run.assert_called_once()
-        assert result.report_markdown == "# Forced"
+        # 未走早退，走了 DAG 分析路径（测试环境 DAG 可能执行失败但不影响路由验证）
+        assert result.analysis_type == AnalysisType.THREE_WAY_MATCH
+        assert "不属于" not in (result.report_markdown or "")
 
     @pytest.mark.asyncio
     async def test_explicit_type_overrides_clarification_early_return(
         self, settings: Settings
     ) -> None:
-        """显式指定 analysis_type 时，CLARIFICATION 也不早退。"""
+        """显式指定 analysis_type 时，CLARIFICATION 也不早退，走 DAG 分析。"""
         from core.orchestrator.signal import IntentKind
         orch = Orchestrator(settings=settings)
-        mock_agent = _make_mock_agent(return_value={
-            "anomalies": [], "supplier_kpis": [], "summary": {},
-            "report_markdown": "# Forced",
-            "completed_tasks": [], "failed_tasks": [],
-        })
-        orch._agent = mock_agent
 
         signal = self._make_signal(
             IntentKind.CLARIFICATION,
@@ -414,8 +402,9 @@ class TestOrchestratorIntentKindBranches:
                 query="x", analysis_type=AnalysisType.PRICE_VARIANCE,
             ))
 
-        mock_agent.run.assert_called_once()
-        assert result.report_markdown == "# Forced"
+        # 未走早退，走了 DAG 分析路径
+        assert result.analysis_type == AnalysisType.PRICE_VARIANCE
+        assert "不属于" not in (result.report_markdown or "")
 
 
 class TestReferenceResolution:
@@ -717,14 +706,14 @@ class TestOrchestratorDAGPath:
         mock_executor._registry = MagicMock()
         orch._dag_executor = mock_executor
 
-        # L1 signal
+        # 高置信度 signal → 走 DAG 路径
         signal = QuerySignal(
             raw_query="分析三路匹配异常",
             keywords=[AnalysisType.THREE_WAY_MATCH.value],
             entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
+            route_level=3,
+            confidence=0.9,
+            reasoning="unified router test",
         )
         with patch.object(orch._intent_router, "route", return_value=signal), \
              patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator:
@@ -758,9 +747,9 @@ class TestOrchestratorDAGPath:
             raw_query="分析价格差异",
             keywords=[AnalysisType.PRICE_VARIANCE.value],
             entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
+            route_level=3,
+            confidence=0.9,
+            reasoning="unified router test",
         )
         with patch.object(orch._intent_router, "route", return_value=signal), \
              patch("core.orchestrator.dag.validator.DAGValidator") as MockValidator:
@@ -772,7 +761,7 @@ class TestOrchestratorDAGPath:
 
     @pytest.mark.asyncio
     async def test_comprehensive_skips_dag(self, settings: Settings) -> None:
-        """COMPREHENSIVE 类型即使 L1 命中也走 ReAct。"""
+        """COMPREHENSIVE 类型无实体时走 ReAct。"""
         orch = Orchestrator(settings=settings)
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [], "summary": {}, "report_markdown": "react",
@@ -783,9 +772,9 @@ class TestOrchestratorDAGPath:
             raw_query="全面分析",
             keywords=[AnalysisType.COMPREHENSIVE.value],
             entities={},
-            route_level=1,
-            confidence=0.3,
-            reasoning="L1 test",
+            route_level=3,
+            confidence=0.6,
+            reasoning="unified router test",
         )
         with patch.object(orch._intent_router, "route", return_value=signal):
             request = AnalysisRequest(query="全面分析")

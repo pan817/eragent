@@ -37,29 +37,6 @@ ANALYSIS_KEYWORDS: set[str] = {
     "重复", "周期", "集中度", "风险",
 }
 
-# L1 lookup 动词
-LOOKUP_VERBS: set[str] = {
-    "查", "查询", "查看", "查一下", "看下", "看看", "列出", "列一下", "拉一下",
-    "显示", "show", "list", "get", "find", "fetch", "lookup", "search",
-}
-
-# L1 lookup 业务实体
-LOOKUP_ENTITIES: set[str] = {
-    "po", "po号", "采购单", "采购订单", "订单",
-    "发票", "invoice", "inv",
-    "付款", "付款单", "payment", "支付单", "支付", "付款记录", "应付",
-    "收货", "收货单", "receipt", "rcv", "gr",
-    "供应商", "supplier", "sup",
-    "合同", "contract",
-    "物料", "material", "item",
-}
-
-# lookup 修饰词
-LOOKUP_MODIFIERS: set[str] = {
-    "最新", "最近的", "最后", "最后一", "全部", "所有", "前", "后",
-    "latest", "recent", "newest", "all", "first", "last",
-}
-
 # DATA_LOOKUP 关键词 → query 工具映射（路径 B：无实体编号时按关键词推断工具）
 # 每个条目：(关键词集合, 工具名, 默认参数)
 # 匹配优先级按列表顺序，首个命中即返回
