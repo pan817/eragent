@@ -1,0 +1,162 @@
+// ERP Agent - Memory Subsystem Architecture
+// 三条主数据流：分析前检索注入 / 分析后提取整合 / 每轮反馈检测
+// Render: dot -Tpng -Gdpi=150 arch_memory.dot -o arch_memory.png
+digraph eragent_memory {
+    rankdir=TB;
+    nodesep=0.35;
+    ranksep=0.55;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent — Memory 子系统架构"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── ① 调用方 ────────────────────────────────────────────────
+    subgraph cluster_caller {
+        label="① 调用方"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+        caller_pre  [label="Orchestrator\n分析前: build_context()",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+        caller_post [label="Orchestrator\n分析后: on_analysis_complete()",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+        caller_msg  [label="Orchestrator\n每轮: on_user_message()",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+    }
+
+    // ── ② MemoryManager 门面 ────────────────────────────────────
+    subgraph cluster_facade {
+        label="② MemoryManager (唯一入口)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FCE4EC"; color="#C48B9F";
+        mgr [label="MemoryManager\n协调所有记忆组件\n异步操作 fire-and-forget",
+             shape=box, fontsize=12, fillcolor="#F8BBD0"];
+    }
+
+    // ── ③ 分析前：检索 + 注入 ───────────────────────────────────
+    subgraph cluster_read_path {
+        label="③ 分析前：检索 → 注入"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E3F2FD"; color="#7FA7D4";
+        r_search   [label="LongTermMemory\n.search_by_type()\n按 user_id + entity_ids\n+ query 向量相似度检索",
+                    shape=box, fontsize=10];
+        r_bucket   [label="分桶结果\n{type: [记忆列表]}",
+                    shape=note, fontsize=9];
+        r_inject   [label="format_memory_injection()\n按优先级排序注入 Prompt",
+                    shape=box, fontsize=10, fillcolor="#BBDEFB"];
+        r_output   [label="prompt 注入文本\n(correction > domain_fact\n> entity_profile\n> analysis_insight)",
+                    shape=note, fontsize=9, fillcolor="#E8EAF6"];
+    }
+
+    // ── ④ 分析后：提取 + 整合 ───────────────────────────────────
+    subgraph cluster_write_path {
+        label="④ 分析后：提取 → 写入 → 整合"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E8F5E9"; color="#6FA87C";
+        w_extract  [label="MemoryExtractor\n从 AnalysisResult 提取\n各类型独立 try/except",
+                    shape=box, fontsize=10, fillcolor="#C8E6C9"];
+        w_ep       [label="entity_profile\n实体累积画像", shape=box, fontsize=9];
+        w_ai       [label="analysis_insight\n跨次趋势发现", shape=box, fontsize=9];
+        w_save     [label="LongTermMemory\n.save()\n写入 memories 表",
+                    shape=box, fontsize=10];
+        w_consol   [label="ConsolidationEngine\n触发判定 → per-user 锁\n→ 合并 / 归纳 / TTL 淘汰",
+                    shape=box, fontsize=10, fillcolor="#A5D6A7"];
+        w_summary  [label="ShortTermMemory\n.save_dag_result()\n超长结果 LLM 摘要",
+                    shape=box, fontsize=9];
+    }
+
+    // ── ⑤ 每轮：反馈检测 ────────────────────────────────────────
+    subgraph cluster_feedback_path {
+        label="⑤ 每轮：用户反馈检测"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF3E0"; color="#E6A23C";
+        f_keyword  [label="FeedbackDetector\n关键词预筛 (<1ms)\ncorrection / preference / fact",
+                    shape=box, fontsize=10];
+        f_llm      [label="LLM 精确分类\n(仅预筛通过时调用)",
+                    shape=box, fontsize=10, fillcolor="#FFE0B2"];
+        f_result   [label="反馈写入长期记忆\ncorrection / user_preference\n/ domain_fact",
+                    shape=box, fontsize=9];
+    }
+
+    // ── ⑥ 短期记忆 ──────────────────────────────────────────────
+    subgraph cluster_short {
+        label="⑥ 短期记忆 (会话级)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#F3E5F5"; color="#B8A9D1";
+        s_stm      [label="ShortTermMemory\n(PostgresSaver checkpointer)\n对话历史 + 实体上下文",
+                    shape=box, fontsize=10, fillcolor="#E1BEE7"];
+        s_ops      [label="load_session()\nsave_entity_context()\nclear()",
+                    shape=box, fontsize=9];
+    }
+
+    // ── ⑦ 类型系统 ──────────────────────────────────────────────
+    subgraph cluster_types {
+        label="⑦ MemoryType (5 种封闭枚举)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#ECEFF1"; color="#90A4AE";
+        t_corr [label="correction\n用户修正 | 180天", shape=box, fontsize=9, fillcolor="#FFCDD2"];
+        t_fact [label="domain_fact\n业务规则 | 不过期", shape=box, fontsize=9, fillcolor="#DCEDC8"];
+        t_pref [label="user_preference\n分析偏好 | 不过期", shape=box, fontsize=9, fillcolor="#FFF9C4"];
+        t_ep2  [label="entity_profile\n实体画像 | 90天", shape=box, fontsize=9, fillcolor="#B3E5FC"];
+        t_ai2  [label="analysis_insight\n趋势发现 | 60天", shape=box, fontsize=9, fillcolor="#D1C4E9"];
+    }
+
+    // ── ⑧ 外部存储 ──────────────────────────────────────────────
+    subgraph cluster_ext {
+        label="⑧ 外部存储"; fontsize=10;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+        e_pg       [label="PostgreSQL\nmemories 表\nconsolidation_log 表\ncheckpoints 表",
+                    shape=cylinder, fontsize=9];
+        e_chroma   [label="Chroma\n向量检索\n(语义相似度)", shape=cylinder, fontsize=9];
+        e_llm      [label="LLM 小模型\n(反馈分类 / 语义合并)",
+                    shape=component, fillcolor="#F3E5F5", fontsize=9];
+    }
+
+    // ── 图例 ────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        lg_a [label="", shape=plain]; lg_b [label="", shape=plain];
+        lg_c [label="", shape=plain]; lg_d [label="", shape=plain];
+        lg_e [label="", shape=plain]; lg_f [label="", shape=plain];
+        lg_a -> lg_b [label="异步 await", color="#1976D2", penwidth=2.2];
+        lg_c -> lg_d [label="异步 fire-and-forget", color="#1976D2", style="dashed"];
+        lg_e -> lg_f [label="存储", color="#444444"];
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //                       边
+    // ─────────────────────────────────────────────────────────────
+
+    // 调用方 → 门面
+    caller_pre  -> mgr [color="#1976D2", penwidth=2.2, weight=10, label="await build_context()"];
+    caller_post -> mgr [color="#1976D2", style="dashed", weight=8, label="on_analysis_complete()"];
+    caller_msg  -> mgr [color="#1976D2", style="dashed", weight=8, label="on_user_message()"];
+
+    // ── 流程 A: 分析前检索注入（同步，红粗线）──────────────────
+    mgr       -> r_search [color="#1976D2", penwidth=2.2, weight=10, label="async + 超时保护"];
+    r_search  -> r_bucket [color="#1976D2", penwidth=2.2, weight=10];
+    r_bucket  -> r_inject [color="#1976D2", penwidth=2.2, weight=10];
+    r_inject  -> r_output [color="#1976D2", penwidth=2.2, weight=10];
+
+    // ── 流程 B: 分析后提取整合（异步，蓝虚线）────────────────
+    mgr        -> w_extract [color="#1976D2", style="dashed", weight=5, label="asyncio.create_task"];
+    w_extract  -> w_ep      [color="#444444"];
+    w_extract  -> w_ai      [color="#444444"];
+    w_ep       -> w_save    [color="#444444"];
+    w_ai       -> w_save    [color="#444444"];
+    mgr        -> w_consol  [color="#1976D2", style="dashed", weight=3, label="maybe_consolidate"];
+    mgr        -> w_summary [color="#1976D2", style="dashed", weight=3, label="超长结果摘要"];
+
+    // ── 流程 C: 每轮反馈检测（异步，蓝虚线）────────────────
+    mgr        -> f_keyword [color="#1976D2", style="dashed", weight=5, label="detect_signal()"];
+    f_keyword  -> f_llm     [color="#444444", label="预筛通过"];
+    f_llm      -> f_result  [color="#444444"];
+    f_result   -> w_save    [color="#444444", label="写入"];
+
+    // ── 短期记忆 ──────────────────────────────────────────────
+    mgr -> s_stm [color="#444444", label="委托"];
+    s_stm -> s_ops [color="#444444"];
+
+    // ── 存储连接 ──────────────────────────────────────────────
+    r_search  -> e_pg     [color="#444444", label="SQL"];
+    r_search  -> e_chroma [color="#444444", label="向量检索"];
+    w_save    -> e_pg     [color="#444444", label="INSERT"];
+    w_consol  -> e_pg     [color="#444444", label="合并/淘汰"];
+    w_consol  -> e_llm    [color="#AAAAAA", style="dotted", label="语义合并\n(预留未启用)"];
+    f_llm     -> e_llm    [color="#444444", label="分类"];
+    s_stm     -> e_pg     [color="#444444", label="checkpoints"];
+}

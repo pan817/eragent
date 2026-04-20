@@ -42,14 +42,14 @@ digraph eragent_async {
         t_runner  [label="后台 runner\n并发 + 超时 + sweep",
                    shape=box, fontsize=12, fillcolor="#FFE0B2"];
         t_analyze [label="调用 Orchestrator.analyze()", shape=box, fontsize=11];
-        t_status  [label="get_status / get_result", shape=box];
+        t_status  [label="get(trace_id)\n→ TaskEntry", shape=box];
     }
 
     // ── ④ Orchestrator ────────────────────────────────────────
     subgraph cluster_orch {
         label="④ Orchestrator (后台执行)"; penwidth=1.5;
         style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
-        o_run   [label="Orchestrator.analyze()\n(同步路径共用实现)",
+        o_run   [label="Orchestrator.analyze()\n(同步路径共用实现)\n↓ MemoryManager 门面",
                  shape=box, fontsize=12, fillcolor="#FFF4B8"];
         o_stage [label="_publish_stage_safe()", shape=box];
         o_flush [label="trace_flush_barrier", shape=box, fontsize=9];
@@ -82,7 +82,7 @@ digraph eragent_async {
         style="rounded,filled"; fillcolor="#F5F5F5"; color="#AAAAAA";
         p_chat  [label="ChatRepository", shape=box, fontsize=9];
         p_trace [label="trace_store", shape=box, fontsize=9];
-        p_chkpt [label="PostgresSaver", shape=box, fontsize=9];
+        p_chkpt [label="ShortTermMemory\n(PostgresSaver)", shape=box, fontsize=9];
     }
 
     // ── ⑧ 外部 ─────────────────────────────────────────────────
@@ -152,7 +152,7 @@ digraph eragent_async {
     p_trace -> e_pg    [color="#888888", style="dotted"];
 
     // 8) 短期记忆 + chat 持久化
-    o_run   -> p_chkpt [color="#444444", label="短期记忆"];
+    o_run   -> p_chkpt [color="#444444", label="MemoryManager\n→ 短期记忆"];
     p_chkpt -> e_pg    [color="#444444"];
     p_chat  -> e_pg    [color="#444444"];
 

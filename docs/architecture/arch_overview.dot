@@ -29,6 +29,7 @@ digraph eragent_overview {
         api_sessions   [label="/sessions/*", shape=cds];
         api_traces     [label="/traces/*", shape=cds];
         api_health     [label="/health\n/init-data", shape=cds];
+        api_metrics    [label="/admin/metrics", shape=cds];
     }
 
     // ── ③ 异步基础设施 ─────────────────────────────────────────
@@ -44,13 +45,14 @@ digraph eragent_overview {
         label="④ Orchestrator 编排层"; penwidth=1.5;
         style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
         orch_core    [label="Orchestrator.analyze", shape=box, fontsize=12, fillcolor="#FFF4B8"];
-        orch_router  [label="IntentRouter\nL1 → L2 → L3", shape=box, fontsize=11];
-        orch_refres  [label="指代消解 +\n实体校验/补充", shape=box];
+        orch_router  [label="IntentRouter\nL0 bypass → UnifiedRouter\n(一次 LLM 意图+参数+消解)", shape=box, fontsize=11];
+        orch_entity  [label="Entity 管线\nresolve → validate\n→ enrich", shape=box];
+        orch_lookup  [label="Lookup 快捷路径\n(DATA_LOOKUP)", shape=box];
     }
 
     // ── ⑤ DAG 执行路径 ──────────────────────────────────────────
     subgraph cluster_dag {
-        label="⑤ DAG 执行路径 (L1/L2)"; penwidth=1.5;
+        label="⑤ DAG 执行路径 (高置信度)"; penwidth=1.5;
         style="rounded,filled"; fillcolor="#E8F5E9"; color="#6FA87C";
         dag_executor   [label="DAGExecutor\n并行调度", shape=box, fontsize=12, fillcolor="#C8E6C9"];
         dag_templates  [label="templates.py", shape=box];
@@ -61,28 +63,41 @@ digraph eragent_overview {
 
     // ── ⑥ ReAct 执行路径 ────────────────────────────────────────
     subgraph cluster_react {
-        label="⑥ ReAct 执行路径 (L3/兜底)"; penwidth=1.5;
+        label="⑥ ReAct 执行路径 (低置信度/兜底)"; penwidth=1.5;
         style="rounded,filled"; fillcolor="#F1F8E9"; color="#8EB56E";
         react_agent   [label="P2PAgent\ncreate_agent", shape=box, fontsize=12, fillcolor="#DCEDC8"];
         react_tools   [label="tools.py\n19 个 @tool", shape=box, fontsize=11];
         react_rules   [label="rules/\n4 条业务规则", shape=box];
     }
 
-    // ── ⑦ Core 基础设施 ─────────────────────────────────────────
+    // ── ⑦ Memory 子系统 ─────────────────────────────────────────
+    subgraph cluster_memory {
+        label="⑦ Memory 子系统"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FCE4EC"; color="#C48B9F";
+        mem_manager    [label="MemoryManager\n(门面)", shape=box, fontsize=12, fillcolor="#F8BBD0"];
+        mem_short      [label="ShortTermMemory\n(PostgresSaver)", shape=box, fontsize=9];
+        mem_long       [label="LongTermMemory\n(PostgreSQL + Chroma)", shape=box, fontsize=9];
+        mem_extractor  [label="MemoryExtractor\n(结论 → 记忆)", shape=box, fontsize=9];
+        mem_feedback   [label="FeedbackDetector\n(用户反馈识别)", shape=box, fontsize=9];
+        mem_consolidation [label="ConsolidationEngine\n(记忆整合/淘汰)", shape=box, fontsize=9];
+        mem_injection  [label="Injection\n(记忆 → Prompt)", shape=box, fontsize=9];
+    }
+
+    // ── ⑧ Core 基础设施 ─────────────────────────────────────────
     subgraph cluster_core {
-        label="⑦ Core 基础设施"; fontsize=10;
+        label="⑧ Core 基础设施"; fontsize=10;
         style="rounded,filled"; fillcolor="#F5F5F5"; color="#AAAAAA";
         core_db        [label="database", shape=box, fontsize=9];
-        core_memory    [label="memory\n(LongTermMemory)", shape=box, fontsize=9];
         core_obs       [label="observability\n(TimingMW + store)", shape=box, fontsize=9];
         core_knowledge [label="knowledge\n(embeddings / vector)", shape=box, fontsize=9];
         core_ontology  [label="ontology\n(reasoner)", shape=box, fontsize=9];
         core_chat      [label="chat", shape=box, fontsize=9];
+        core_llm       [label="llm\n(model_factory)", shape=box, fontsize=9];
     }
 
-    // ── ⑧ 外部系统 ─────────────────────────────────────────────
+    // ── ⑨ 外部系统 ─────────────────────────────────────────────
     subgraph cluster_ext {
-        label="⑧ 外部系统"; fontsize=10;
+        label="⑨ 外部系统"; fontsize=10;
         style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
         ext_pg        [label="PostgreSQL", shape=cylinder, fontsize=9];
         ext_redis     [label="Redis\n(可选)", shape=cylinder, fontsize=9];
@@ -118,15 +133,17 @@ digraph eragent_overview {
     api_app     -> api_sessions   [color="#444444"];
     api_app     -> api_traces     [color="#444444"];
     api_app     -> api_health     [color="#444444"];
+    api_app     -> api_metrics    [color="#444444"];
     api_analyze -> orch_core      [color="#D32F2F", penwidth=2.2, weight=10];
     api_async   -> async_registry [color="#D32F2F", penwidth=2.2, weight=5, label="提交"];
     async_registry -> orch_core   [color="#D32F2F", penwidth=2.2, weight=5, label="后台执行"];
-    orch_core   -> dag_executor   [color="#D32F2F", penwidth=2.2, weight=8, label="L1/L2"];
-    orch_core   -> react_agent    [color="#D32F2F", penwidth=2.2, weight=8, label="L3/兜底"];
+    orch_core   -> dag_executor   [color="#D32F2F", penwidth=2.2, weight=8, label="高置信度"];
+    orch_core   -> react_agent    [color="#D32F2F", penwidth=2.2, weight=8, label="低置信度/兜底"];
 
     // Orchestrator 内部
     orch_core -> orch_router [color="#444444"];
-    orch_core -> orch_refres [color="#444444"];
+    orch_core -> orch_entity [color="#444444"];
+    orch_core -> orch_lookup [color="#444444", style="dashed", label="DATA_LOOKUP"];
 
     // DAG 内部
     dag_executor -> dag_templates [color="#444444"];
@@ -138,14 +155,21 @@ digraph eragent_overview {
     react_agent -> react_tools [color="#444444"];
     react_tools -> react_rules [color="#444444"];
 
-    // 执行层 → Core (让 dot 自然把 core 拉到下方)
+    // Orchestrator → Memory 子系统
+    orch_core    -> mem_manager    [color="#444444", label="门面"];
+    mem_manager  -> mem_short      [color="#444444"];
+    mem_manager  -> mem_long       [color="#444444"];
+    mem_manager  -> mem_extractor  [color="#444444", label="分析完成"];
+    mem_manager  -> mem_feedback   [color="#444444", label="用户反馈"];
+    mem_manager  -> mem_consolidation [color="#444444", style="dashed", label="异步"];
+    mem_manager  -> mem_injection  [color="#444444", label="build_context"];
+
+    // 执行层 → Core
     react_tools  -> core_db        [color="#444444"];
-    react_agent  -> core_memory    [color="#444444", label="短期/长期"];
-    orch_core    -> core_memory    [color="#444444", label="save_report"];
     orch_core    -> core_obs       [color="#888888", style="dotted"];
     dag_executor -> core_obs       [color="#888888", style="dotted"];
     react_agent  -> core_obs       [color="#888888", style="dotted"];
-    orch_router  -> core_knowledge [color="#444444", label="L2"];
+    // orch_router 不再使用 L2 Chroma（已由 UnifiedRouter 替代）
     dag_casestore -> core_knowledge [color="#444444"];
     react_rules  -> core_ontology  [color="#444444", style="dashed"];
     api_sessions -> core_chat      [color="#444444"];
@@ -155,10 +179,15 @@ digraph eragent_overview {
     orch_core      -> async_bus [color="#1976D2", style="dashed", label="publish_stage"];
     async_bus      -> api_async [color="#1976D2", style="dashed", label="SSE"];
 
-    // Core → 外部 (让 dot 把 ext 进一步推到最底)
+    // Memory → 外部
+    mem_long       -> ext_pg     [color="#444444"];
+    mem_long       -> ext_chroma [color="#444444"];
+    mem_short      -> ext_pg     [color="#444444"];
+    mem_feedback   -> ext_llm_fast [color="#444444", label="分类"];
+    mem_consolidation -> ext_llm_fast [color="#AAAAAA", style="dotted", label="语义合并\n(预留未启用)"];
+
+    // Core → 外部
     core_db        -> ext_pg     [color="#444444"];
-    core_memory    -> ext_pg     [color="#444444"];
-    core_memory    -> ext_chroma [color="#444444"];
     core_obs       -> ext_pg     [color="#888888", style="dotted"];
     core_knowledge -> ext_chroma [color="#444444"];
     core_knowledge -> ext_neo4j  [color="#444444", style="dashed"];
@@ -169,5 +198,5 @@ digraph eragent_overview {
     // LLM (直接到外部 LLM 组件)
     react_agent -> ext_llm_main [color="#444444", label="tool calling"];
     dag_report  -> ext_llm_fast [color="#444444", label="报告"];
-    orch_router -> ext_llm_fast [color="#444444", label="L3"];
+    orch_router -> ext_llm_fast [color="#444444", label="UnifiedRouter"];
 }

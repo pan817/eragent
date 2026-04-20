@@ -3,7 +3,7 @@ rankdir=TB
 charset="utf-8"
 nodesep=0.4
 ranksep=0.7
-graph [fontname="Helvetica", fontsize=14, labelloc="t", label="eragent — pyreverse 聚合 (depth=1 顶层,4 包,88 import)"]
+graph [fontname="Helvetica", fontsize=14, labelloc="t", label="eragent — pyreverse 聚合 (depth=1 顶层,4 包,108 import)"]
 node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled"]
 edge [fontname="Helvetica", fontsize=9, color="#555555"]
 
@@ -13,13 +13,13 @@ edge [fontname="Helvetica", fontsize=9, color="#555555"]
   "modules" [fillcolor="#8EB56E"];
 
   "api" -> "config" [label="4", penwidth=2.0];
-  "api" -> "core" [label="20", penwidth=5.0];
-  "api" -> "modules" [label="1", penwidth=1.2];
+  "api" -> "core" [label="22", penwidth=5.0];
+  "api" -> "modules" [label="3", penwidth=1.8];
   "config" -> "core" [label="1", penwidth=1.2];
-  "core" -> "api" [label="6", penwidth=2.5];
-  "core" -> "config" [label="6", penwidth=2.5];
-  "core" -> "modules" [label="8", penwidth=3.0];
-  "modules" -> "api" [label="5", penwidth=2.2];
-  "modules" -> "config" [label="9", penwidth=3.2];
-  "modules" -> "core" [label="28", penwidth=5.0];
+  "core" -> "api" [label="8", penwidth=3.0];
+  "core" -> "config" [label="13", penwidth=4.2];
+  "core" -> "modules" [label="11", penwidth=3.8];
+  "modules" -> "api" [label="7", penwidth=2.8];
+  "modules" -> "config" [label="4", penwidth=2.0];
+  "modules" -> "core" [label="35", penwidth=5.0];
 }

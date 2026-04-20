@@ -1,9 +1,7 @@
-"""
-三级意图路由器。
+"""意图路由器。
 
-Level 1：关键词命中率评分（零延迟）
-Level 2：Chroma 种子库语义匹配（毫秒级）
-Level 3：LLM 分类 + 参数提取（0.5~2s）
+L0 bypass（正则匹配，零 LLM）+ UnifiedRouter（一次 LLM 调用完成
+意图分类 + 参数提取 + 指代消解 + 跨实体判断）。
 
 输出仍为 (AnalysisType, params)，与原 IntentParser 接口兼容，
 Orchestrator 无需感知内部路由层级。
@@ -11,46 +9,30 @@ Orchestrator 无需感知内部路由层级。
 
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 from typing import Any
-
-import yaml
 
 from api.schemas.domain import AnalysisType
 from config.settings import Settings, get_settings
 from core.logging_utils import get_logger
 from core.orchestrator.signal import IntentKind, QuerySignal
 
-# L2/L3 输出的 sentinel 字符串（写入 ``signal.keywords[0]``，与 AnalysisType
+# sentinel 字符串（写入 ``signal.keywords[0]``，与 AnalysisType
 # 枚举共用同一字段，便于 trace 展示与 orchestrator 分支判断）。
 _KW_DATA_LOOKUP = "data_lookup"
 _KW_META = "meta"
 _KW_CHITCHAT = "chitchat"
 _KW_OUT_OF_SCOPE = "out_of_scope"
-_KW_CLARIFICATION = "clarification"
 _KW_RECALL = "recall"
 
-# L1 / L2 / L3 默认置信度（用于 bypass 命中或 sentinel 信号）
+# bypass 默认置信度
 _BYPASS_CONFIDENCE = 0.95
-_LOOKUP_L1_CONFIDENCE = 0.7  # L1 命中 lookup 动词的固定置信度
 
 _logger = get_logger(__name__)
-
-# 种子库 YAML 路径
-_SEEDS_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "intent_seeds.yaml"
-
-# Chroma collection 名
-_SEEDS_COLLECTION = "intent_seeds"
 
 # ── P2P 规则常量（从 modules/p2p/intent_rules.py 导入） ──────────────
 from modules.p2p.intent_rules import (
     ANALYSIS_KEYWORDS as _ANALYSIS_KEYWORDS,
-    LOOKUP_ENTITIES as _LOOKUP_ENTITIES,
-    LOOKUP_MODIFIERS as _LOOKUP_MODIFIERS,
-    LOOKUP_VERBS as _LOOKUP_VERBS,
-    ROLE_DESCRIPTIONS as _ROLE_DESCRIPTIONS,
 )
 
 
@@ -212,119 +194,9 @@ def _is_non_analysis_query(query: str) -> bool:
     return _classify_bypass(query) is not None
 
 
-def _looks_like_data_lookup(query: str) -> bool:
-    """启发式判断：query 是否为 DATA_LOOKUP（纯事实查询）。
-
-    判定标准：同时包含 lookup 动词与业务实体；或者包含修饰词（最新/最近）
-    与业务实体（"最新的 PO 是哪一个"）。
-
-    注意：本函数仅在 query **未命中任何 analysis 规则**时被调用，所以
-    不需要担心和分析意图冲突——L1 优先做 analysis 判定。
-    """
-    q_lower = query.lower()
-    has_verb = any(v in q_lower for v in _LOOKUP_VERBS)
-    has_entity = any(e in q_lower for e in _LOOKUP_ENTITIES)
-    has_modifier = any(m in q_lower for m in _LOOKUP_MODIFIERS)
-    return (has_verb and has_entity) or (has_modifier and has_entity)
 
 
-# ── Level 1 规则库 ────────────────────────────────────────────────────
-
-_RULE_LIBRARY: list[dict[str, Any]] = [
-    {
-        "analysis_type": AnalysisType.THREE_WAY_MATCH,
-        "keywords": {
-            "三路匹配", "三单", "匹配", "three way", "three-way", "3way",
-            "发票", "收货", "invoice", "goods receipt", "mismatch",
-            "三单核对", "三方对账", "单据不一致", "数量不符", "金额不符",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.PRICE_VARIANCE,
-        "keywords": {
-            "价格差异", "价格", "price", "variance", "ppv",
-            "标准价", "合同价", "成本", "涨价", "单价",
-            "价差分析", "单价波动", "溢价", "成本偏高", "比上次贵",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.PAYMENT_COMPLIANCE,
-        "keywords": {
-            "付款", "逾期", "payment", "overdue", "到期",
-            "应付", "账期", "提前付款",
-            "拖欠", "欠款", "延迟付款", "付款违规", "应付未付", "付款超期",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.SUPPLIER_PERFORMANCE,
-        "keywords": {
-            "供应商", "绩效", "kpi", "supplier", "performance",
-            "准时交货", "交期", "质量", "评分", "scorecard", "otif",
-            "交期表现", "供货质量", "交付率", "供应商等级",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.SPEND_ANALYSIS,
-        "keywords": {
-            "支出", "spend", "采购金额", "花费", "费用",
-            "品类", "支出分布", "采购额", "开支",
-            "采购总额", "品类支出", "支出占比", "花销分布",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.RECEIPT_ANOMALY,
-        "keywords": {
-            "超量", "拒收", "退货", "延迟收货",
-            "receipt", "过量", "短缺", "入库异常",
-            "多收", "少收", "收货异常", "验收不合格", "验货失败",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.INVOICE_DUPLICATE,
-        "keywords": {
-            "重复发票", "duplicate", "重复", "相同发票",
-            "重复开票", "重复付款",
-            "双开", "一票两付", "重复入账", "付两次", "开重了",
-        },
-        "threshold": 0.20,
-    },
-    {
-        "analysis_type": AnalysisType.DISCOUNT_UTILIZATION,
-        "keywords": {
-            "折扣", "discount", "早付", "提前付款折扣",
-            "折扣利用", "现金折扣", "节省",
-            "折扣损失", "折扣利用率", "错过折扣", "应得折扣",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.PO_CYCLE_TIME,
-        "keywords": {
-            "周期", "cycle", "耗时", "时效",
-            "从下单到", "处理时间", "lead time", "效率",
-            "处理慢", "审批太久", "多久能到", "处理快慢",
-        },
-        "threshold": 0.15,
-    },
-    {
-        "analysis_type": AnalysisType.VENDOR_CONCENTRATION,
-        "keywords": {
-            "集中度", "依赖", "concentration", "单一来源",
-            "占比", "垄断", "多元化",
-            "太集中", "依赖度", "供应商太少", "单一供应商", "多元化不足",
-        },
-        "threshold": 0.20,
-    },
-]
-
-
-# ── 参数提取（复用原 IntentParser 逻辑） ─────────────────────────────
+# ── 参数提取 ─────────────────────────────────────────────────────────
 
 def _extract_params(
     query: str,
