@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from api.schemas.domain import AnalysisType
@@ -18,7 +19,13 @@ def _replace_params(tasks: list[dict[str, Any]], params: dict[str, Any]) -> list
     支持两种占位符：
     - 纯占位符："{days}" → 直接替换为 params["days"]
     - 嵌入占位符："近{days}天" → 字符串内插替换
+
+    未匹配的占位符会被清理为类型安全的默认值（"days" → 30，其余 → ""），
+    防止 "{vendor_id}" 等字面量字符串泄漏到工具参数中被当作 truthy 值。
     """
+    # 占位符名 → 未匹配时的安全默认值
+    _DEFAULTS: dict[str, Any] = {"days": 30}
+
     result = copy.deepcopy(tasks)
     for task in result:
         inputs = task.get("inputs", {})
@@ -27,17 +34,15 @@ def _replace_params(tasks: list[dict[str, Any]], params: dict[str, Any]) -> list
                 continue
             # 纯占位符
             stripped = val.strip()
-            if stripped.startswith("{") and stripped.endswith("}"):
+            if stripped.startswith("{") and stripped.endswith("}") and stripped.count("{") == 1:
                 param_name = stripped[1:-1]
-                if param_name in params:
-                    inputs[key] = params[param_name]
+                inputs[key] = params.get(param_name, _DEFAULTS.get(param_name, ""))
             else:
-                # 嵌入占位符
-                for pname, pval in params.items():
-                    placeholder = "{" + pname + "}"
-                    if placeholder in val:
-                        inputs[key] = val.replace(placeholder, str(pval))
-                        val = inputs[key]
+                # 嵌入占位符：用正则替换所有 {xxx}
+                def _sub(m: re.Match[str], _p: dict[str, Any] = params) -> str:
+                    name = m.group(1)
+                    return str(_p.get(name, _DEFAULTS.get(name, "")))
+                inputs[key] = re.sub(r"\{(\w+)\}", _sub, val)
     return result
 
 
@@ -122,5 +127,8 @@ def load_generic_template(
         "days": params.get("days", 30),
         "vendor_id": params.get("vendor_id", ""),
         "po_number": params.get("po_number", ""),
+        "invoice_num": params.get("invoice_num", ""),
+        "check_number": params.get("check_number", ""),
+        "receipt_number": params.get("receipt_number", ""),
     }
     return _replace_params(template, effective_params)

@@ -426,6 +426,7 @@ class ReportSettings(BaseSettings):
 class IntentRoutingSettings(BaseSettings):
     """意图路由配置（控制 L1/L2/L3 路由阈值与特性开关）。"""
 
+    # TECH-DEBT(#10): L1/L2 配置已无代码引用，路由已简化为 L0 bypass + Unified LLM
     # L1 关键词命中率门槛
     l1_threshold_default: float = Field(
         default=0.10,

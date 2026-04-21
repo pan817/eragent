@@ -46,62 +46,11 @@ class P2PModuleProvider:
         ]
 
     def get_tools(self) -> list[Any]:
-        from modules.p2p.tools import (
-            analyze_discount_utilization,
-            analyze_receipt_anomalies,
-            analyze_vendor_concentration,
-            calculate_po_cycle_time,
-            calculate_spend_analysis,
-            calculate_supplier_kpis,
-            check_approval_limits,
-            check_blacklist,
-            compare_entities,
-            detect_duplicate_invoices,
-            detect_graph_anomalies,
-            query_entity_relationships,
-            query_entity_timeline,
-            query_invoices,
-            query_material_master,
-            query_payments,
-            query_purchase_orders,
-            query_receipts,
-            query_supplier_profile,
-            query_vendor_master,
-            run_payment_compliance_check,
-            run_price_variance_analysis,
-            run_three_way_match,
-            run_vendor_risk_scoring,
-            search_knowledge_graph,
-        )
+        from config.settings import get_settings
+        from modules.p2p.tools import get_tools_for_mode
 
-        return [
-            query_purchase_orders,
-            query_receipts,
-            query_invoices,
-            query_payments,
-            run_three_way_match,
-            run_price_variance_analysis,
-            run_payment_compliance_check,
-            calculate_supplier_kpis,
-            query_vendor_master,
-            calculate_spend_analysis,
-            analyze_receipt_anomalies,
-            detect_duplicate_invoices,
-            analyze_discount_utilization,
-            analyze_vendor_concentration,
-            calculate_po_cycle_time,
-            query_material_master,
-            run_vendor_risk_scoring,
-            check_approval_limits,
-            check_blacklist,
-            # graph (6)
-            search_knowledge_graph,
-            query_entity_timeline,
-            query_entity_relationships,
-            query_supplier_profile,
-            compare_entities,
-            detect_graph_anomalies,
-        ]
+        mode = get_settings().graphiti_etl.query_backend
+        return get_tools_for_mode(mode)
 
     def get_dag_templates(self) -> dict[str, list[dict[str, Any]]]:
         from modules.p2p.dag_templates import get_entity_template_map, get_template_map

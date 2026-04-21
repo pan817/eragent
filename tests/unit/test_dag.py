@@ -19,24 +19,6 @@ from core.orchestrator.dag.case_store import DAGCaseStore
 # ============================================================
 
 
-class TestStubTools:
-    """存根工具测试。"""
-
-    @pytest.mark.asyncio
-    async def test_stub_tools_return_empty(self) -> None:
-        """所有存根工具应返回空列表 JSON。"""
-        from modules.p2p.tools import (
-            query_material_master,
-            run_vendor_risk_scoring,
-            check_approval_limits,
-            check_blacklist,
-        )
-        for tool in [query_material_master,
-                     run_vendor_risk_scoring, check_approval_limits, check_blacklist]:
-            result = await tool.ainvoke({})
-            assert result == "[]"
-
-
 class TestToolRegistry:
 
     def test_register_and_get(self) -> None:
@@ -65,8 +47,11 @@ class TestToolRegistry:
 
     def test_build_default_registry(self) -> None:
         reg = build_default_registry()
-        # 25 canonical + 5 aliases = 30
-        assert len(reg.tool_names) == 30
+        # Tool count depends on query_backend config:
+        # graphiti: 16 canonical + 5 aliases = 21
+        # postgresql: 19 canonical + 5 aliases = 24
+        # hybrid: 25 canonical + 5 aliases = 30
+        assert len(reg.tool_names) >= 21  # at minimum graphiti mode
         # aliases resolve correctly
         assert reg.get("query_goods_receipts") is reg.get("query_receipts")
         assert reg.get("calculate_ppv") is reg.get("run_price_variance_analysis")

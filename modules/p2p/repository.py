@@ -351,6 +351,28 @@ class P2PRepository:
                 for r in rows
             ]
 
+    def query_suppliers(
+        self,
+        vendor_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """查询供应商主数据。"""
+        with self._session_factory() as session:
+            stmt = select(ApSupplier)
+            if vendor_id:
+                stmt = stmt.where(ApSupplier.vendor_id == vendor_id)
+            rows = session.scalars(stmt).all()
+            return [
+                {
+                    "vendor_id": r.vendor_id,
+                    "vendor_name": r.vendor_name,
+                    "segment1": r.segment1,
+                    "vendor_type": getattr(r, "vendor_type_lookup_code", ""),
+                    "terms_id": str(getattr(r, "terms_id", "")),
+                    "enabled_flag": getattr(r, "enabled_flag", "Y"),
+                }
+                for r in rows
+            ]
+
     def get_contract_prices(self) -> dict[str, float]:
         """获取物料合同价格映射（item_id -> standard_price）。
 

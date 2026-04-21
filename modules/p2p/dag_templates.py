@@ -11,35 +11,6 @@ from typing import Any
 from api.schemas.domain import AnalysisType
 
 
-def _replace_params(tasks: list[dict[str, Any]], params: dict[str, Any]) -> list[dict[str, Any]]:
-    """将 DAG 模板中的参数占位符替换为实际值。
-
-    支持两种占位符：
-    - 纯占位符："{days}" → 直接替换为 params["days"]
-    - 嵌入占位符："近{days}天" → 字符串内插替换
-    """
-    import copy
-    import re
-    result = []
-    for task in tasks:
-        t = copy.deepcopy(task)
-        inputs = t.get("inputs", {})
-        for key, val in inputs.items():
-            if not isinstance(val, str) or "{" not in val:
-                continue
-            if val.startswith("{") and val.endswith("}") and val.count("{") == 1:
-                # 纯占位符
-                param_name = val[1:-1]
-                inputs[key] = params.get(param_name, val)
-            else:
-                # 嵌入占位符：用正则替换所有 {xxx}
-                def _sub(m: re.Match) -> str:
-                    return str(params.get(m.group(1), m.group(0)))
-                inputs[key] = re.sub(r"\{(\w+)\}", _sub, val)
-        result.append(t)
-    return result
-
-
 # ── 三路匹配 DAG ────────────────────────────────────────────────────
 
 _THREE_WAY_MATCH_DAG = [

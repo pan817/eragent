@@ -1,4 +1,8 @@
-"""P2P 工具包：统一导出全部 25 个 @tool + 注入管理。"""
+"""P2P 工具包：按模式返回对应工具集。
+
+- postgresql 模式：15 个 PG 工具（SQL 查询 + 规则检测 + 聚合分析）
+- hybrid 模式：15 个 PG 工具 + 12 个 Graph 工具 = 27 个
+"""
 
 from modules.p2p.tools._inject import (
     _get_graphiti_client,
@@ -8,13 +12,14 @@ from modules.p2p.tools._inject import (
     set_query_backend,
     set_repository,
 )
-from modules.p2p.tools.query import (
+from modules.p2p.tools.pg import PG_TOOLS
+from modules.p2p.tools.pg.query import (
     query_invoices,
     query_payments,
     query_purchase_orders,
     query_receipts,
 )
-from modules.p2p.tools.analysis import (
+from modules.p2p.tools.pg.analysis import (
     calculate_spend_analysis,
     calculate_supplier_kpis,
     query_vendor_master,
@@ -22,27 +27,50 @@ from modules.p2p.tools.analysis import (
     run_price_variance_analysis,
     run_three_way_match,
 )
-from modules.p2p.tools.advanced import (
+from modules.p2p.tools.pg.advanced import (
     analyze_discount_utilization,
     analyze_receipt_anomalies,
     analyze_vendor_concentration,
     calculate_po_cycle_time,
     detect_duplicate_invoices,
 )
-from modules.p2p.tools.stub import (
-    check_approval_limits,
-    check_blacklist,
-    query_material_master,
-    run_vendor_risk_scoring,
-)
-from modules.p2p.tools.graph import (
-    compare_entities,
-    detect_graph_anomalies,
+from modules.p2p.tools.graph import GRAPH_TOOLS
+from modules.p2p.tools.graph.search import search_knowledge_graph
+from modules.p2p.tools.graph.entity import (
+    get_entity_detail,
     query_entity_relationships,
     query_entity_timeline,
-    query_supplier_profile,
-    search_knowledge_graph,
 )
+from modules.p2p.tools.graph.traversal import (
+    find_path_between,
+    query_supplier_profile,
+    trace_procurement_chain,
+)
+from modules.p2p.tools.graph.anomaly import (
+    detect_graph_anomalies,
+    query_risk_impact,
+)
+from modules.p2p.tools.graph.comparison import (
+    compare_entities,
+    find_competing_suppliers,
+    find_contract_coverage,
+)
+
+
+def get_tools_for_mode(mode: str) -> list:
+    """根据 query_backend 模式返回对应工具集。
+
+    Args:
+        mode: "postgresql"、"hybrid" 或 "graphiti"（向后兼容，等同 hybrid）。
+
+    Returns:
+        工具函数列表。postgresql 模式返回 15 个 PG 工具，其余返回 27 个（15 PG + 12 Graph）。
+    """
+    if mode == "postgresql":
+        return list(PG_TOOLS)
+    else:  # hybrid / graphiti (backward compat)
+        return list(PG_TOOLS) + list(GRAPH_TOOLS)
+
 
 __all__ = [
     # inject
@@ -52,34 +80,8 @@ __all__ = [
     "_get_graphiti_client",
     "set_query_backend",
     "_get_query_backend",
-    # query (4)
-    "query_purchase_orders",
-    "query_receipts",
-    "query_invoices",
-    "query_payments",
-    # analysis (6)
-    "run_three_way_match",
-    "run_price_variance_analysis",
-    "run_payment_compliance_check",
-    "calculate_supplier_kpis",
-    "query_vendor_master",
-    "calculate_spend_analysis",
-    # advanced (5)
-    "analyze_receipt_anomalies",
-    "detect_duplicate_invoices",
-    "analyze_discount_utilization",
-    "analyze_vendor_concentration",
-    "calculate_po_cycle_time",
-    # stub (4)
-    "query_material_master",
-    "run_vendor_risk_scoring",
-    "check_approval_limits",
-    "check_blacklist",
-    # graph (6)
-    "search_knowledge_graph",
-    "query_entity_timeline",
-    "query_entity_relationships",
-    "query_supplier_profile",
-    "compare_entities",
-    "detect_graph_anomalies",
+    # mode-based tool set
+    "get_tools_for_mode",
+    "PG_TOOLS",
+    "GRAPH_TOOLS",
 ]

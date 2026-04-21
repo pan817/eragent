@@ -488,7 +488,7 @@ def reset_and_seed(engine: Engine, seed: int = 42, count: int = 500) -> dict[str
         return counts
 
 
-def init_database(engine: Engine, seed: int = 42, count: int = 50) -> None:
+def init_database(engine: Engine, seed: int = 42, count: int = 500) -> None:
     """建表 + 灌入种子数据（向后兼容，测试用）。
 
     Args:

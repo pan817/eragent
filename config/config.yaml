@@ -66,7 +66,7 @@ graphiti_etl:
   context_enrichment_enabled: true
   episode_batch_size: 50                 # rows merged into one Graphiti episode
   max_load_concurrency: 3               # concurrent episode writes (lower = fewer Neo4j tx conflicts)
-  max_rows_per_table: 20                # per-table row cap (0=unlimited, >0 for testing/validation)
+  max_rows_per_table: 0                 # per-table row cap (0=unlimited, sync all 500 mock records)
   max_nodes_per_sync: 50000
   max_edges_per_sync: 100000
 
@@ -98,7 +98,7 @@ postgresql:
   max_overflow: 30
 
 mock_data:
-  record_count: 20               # 模拟数据生成条数（PO/发票/付款各 N 条）
+  record_count: 500              # 模拟数据生成条数（PO/发票/付款各 N 条）
   seed: 42                       # 随机种子，确保数据可重复
 
 analysis:
@@ -285,6 +285,7 @@ memory:
     min_confidence: 0.6             # LLM 提取最低置信度
 
 intent_routing:
+  # TECH-DEBT(#10): L1/L2 configs below are dead code — routing uses L0 bypass + Unified LLM only
   # L1 keyword hit-rate thresholds
   l1_threshold_default: 0.10
   l1_threshold_strict: 0.14
@@ -294,12 +295,12 @@ intent_routing:
   l2_length_ratio_penalty: 0.7
   l2_topk: 1
   # L3 LLM classification confidence tiers
-  l3_dag_min_confidence: 0.99       # 强制走 ReAct（几乎所有查询不满足 DAG 置信度）
+  l3_dag_min_confidence: 0.75       # confidence >= 0.75 走 DAG，< 0.75 走 ReAct
   l3_react_min_confidence: 0.3
   # Feature flags
   l25_enabled: false
-  generic_template_enabled: false   # 关闭通用 DAG 模板，让 Agent 自主选工具
-  lookup_shortcut_enabled: false    # 关闭 lookup 快捷路径，不跳过 ReAct
+  generic_template_enabled: true    # 开启通用 DAG 模板（概览类查询走 DAG 并行）
+  lookup_shortcut_enabled: true     # 开启 lookup 快捷路径（纯数据查询跳过 ReAct）
 
 logging:
   level: "INFO"

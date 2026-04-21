@@ -298,3 +298,91 @@ def build_report_prompt(
             f"若与上文\"报告要求\"的结构或字数规定冲突，以本节为准。"
         )
     return prompt
+
+
+# ── 工具策略指引 ──────────────────────────────────────────────
+
+_PG_STRATEGY_PROMPT = """
+## 分析策略
+你拥有 15 个基于 SQL 的查询和分析工具。推荐分析路径：
+1. 先用 query_* 工具精确查询相关数据
+2. 用规则工具（run_three_way_match 等）检测异常
+3. 用聚合工具（calculate_spend_analysis 等）做统计分析
+4. 综合以上结果给出结论
+
+数据特点：返回的是精确的结构化记录，可直接用于数值比对和统计。
+
+## 工具分类速查
+### 精确查询（已知条件查具体记录）
+query_purchase_orders / query_receipts / query_invoices / query_payments / query_vendor_master
+
+### 规则检测（检查合规性）
+run_three_way_match / run_price_variance_analysis / run_payment_compliance_check / calculate_supplier_kpis
+
+### 聚合统计（汇总分析）
+calculate_spend_analysis / analyze_vendor_concentration / calculate_po_cycle_time / detect_duplicate_invoices / analyze_discount_utilization
+""".strip()
+
+_HYBRID_STRATEGY_PROMPT = """
+## 分析策略
+你拥有两类工具：
+- 结构化工具（15个）：精确查询、规则检测、聚合统计
+- 图工具（12个）：关系遍历、路径查找、模式匹配、异常检测
+
+推荐分析路径：
+1. 探索阶段：用 get_entity_detail / search_knowledge_graph 定位实体
+2. 关系分析：用 query_entity_relationships / find_path_between 发现关联
+3. 精确验证：用结构化工具（query_purchase_orders 等）获取详细数据
+4. 异常检测：用 detect_graph_anomalies（支持 scope：missing_receipt / missing_invoice / orphan_payment / orphan_node / process_skip / invoice_without_po / unauthorized_payment / split_order / related_party / suspicious_supplier）
+5. 风险评估：用 query_risk_impact 评估影响面
+
+工具选择原则：
+- 需要精确数值/聚合统计 → 用结构化工具
+- 需要发现关联/追踪路径/检测结构异常 → 用图工具
+- 查询结果中 has_receipt/has_invoice/has_payment 字段表示该 PO 行的履约状态
+
+【强制规则】搜索后必须执行图遍历：
+- search_knowledge_graph 只能搜索实体的属性文本，无法发现实体之间的关系（关系存储在图的边中，不在属性里）
+- 因此，当你搜索到任何实体后（即使只找到一个），你必须至少调用以下工具之一来探索其关联：
+  · get_entity_detail(entity_type, entity_id) — 查看实体详情 + 直接关联
+  · query_entity_relationships(entity_type, entity_id, depth=2) — 多跳关系网络
+  · trace_procurement_chain(entity_type, entity_id) — 完整采购链路
+- 如果搜索返回空结果，也不能直接下结论。尝试用 get_entity_detail 直接按类型+ID 查找（搜索可能因属性文本不匹配而遗漏）
+- 禁止仅凭 search_knowledge_graph 的结果就回复"没有关联实体"
+
+数据特点：结构化工具返回的数据包含关系状态增强字段，图工具返回关系网络和路径信息。
+两类工具可以组合使用：先用图工具发现问题，再用结构化工具精确验证。
+
+## 工具分类速查
+### 精确查询（已知条件查具体记录）
+query_purchase_orders / query_receipts / query_invoices / query_payments / query_vendor_master
+
+### 规则检测（检查合规性）
+run_three_way_match / run_price_variance_analysis / run_payment_compliance_check / calculate_supplier_kpis
+
+### 聚合统计（汇总分析）
+calculate_spend_analysis / analyze_vendor_concentration / calculate_po_cycle_time / detect_duplicate_invoices / analyze_discount_utilization
+
+### 实体探索（定位和了解实体）
+get_entity_detail / search_knowledge_graph
+
+### 关系发现（探索关联和路径）
+query_entity_relationships / find_path_between / trace_procurement_chain / query_entity_timeline
+
+### 异常检测（发现结构性问题）
+detect_graph_anomalies / query_risk_impact
+
+### 对比与画像（多维度分析）
+compare_entities / query_supplier_profile / find_contract_coverage / find_competing_suppliers
+""".strip()
+
+
+def get_tool_strategy_prompt() -> str:
+    """根据 query_backend 模式返回对应的工具策略指引。"""
+    from config.settings import get_settings
+
+    mode = get_settings().graphiti_etl.query_backend
+    if mode == "postgresql":
+        return _PG_STRATEGY_PROMPT
+    else:  # hybrid / graphiti
+        return _HYBRID_STRATEGY_PROMPT

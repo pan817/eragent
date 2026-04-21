@@ -1359,7 +1359,17 @@ class TestValidateEntities:
 
 
 class TestEnrichEntities:
-    """实体关联补充测试。"""
+    """实体关联补充测试。
+
+    这些测试验证 PG 模式下的实体校验和级联补充逻辑。
+    需要 patch query_backend 为 postgresql（hybrid 模式会跳过 PG 验证）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _force_pg_mode(self):
+        with patch("config.settings.get_settings") as mock:
+            mock.return_value.graphiti_etl.query_backend = "postgresql"
+            yield
 
     @pytest.mark.asyncio
     async def test_payment_to_invoice(self, settings: Settings) -> None:

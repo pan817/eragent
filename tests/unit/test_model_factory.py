@@ -203,7 +203,7 @@ class TestP2PAgentBuild:
             agent = P2PAgent(settings=settings)
 
         tools = agent._build_tools()
-        assert len(tools) == 8
+        assert len(tools) == 27  # hybrid mode: 15 PG + 12 Graph tools
 
     def test_get_system_prompt(self) -> None:
         """build_system_prompt 应返回包含角色定义的字符串。"""
@@ -305,6 +305,7 @@ class TestP2PAgentAnalyze:
     async def test_analyze_with_json_content(self) -> None:
         """Agent 返回 JSON 内容时应解析结构化数据。"""
         settings = Settings()
+        settings.memory.long_term_enabled = False  # skip zero-tool guard
         with patch("modules.p2p.agent.get_settings", return_value=settings):
             from modules.p2p.agent import P2PAgent
             agent = P2PAgent(settings=settings)

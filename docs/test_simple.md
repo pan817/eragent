@@ -149,3 +149,64 @@
 | 65 | 分析三路匹配 | `time_range_days=0` | 422 | 时间范围下界校验 |
 | 66 | 分析三路匹配 | `time_range_days=999` | 422 | 时间范围上界校验 |
 | 67 | *(超长 query，200+ 字)* | — | L1/DAG | 超长文本仍应正常路由，命中"三路匹配""价格差异""付款""供应商""绩效" |
+
+---
+
+## 十五、知识图谱搜索与实体查询
+
+> 以下用例依赖 Neo4j 图数据库（hybrid 模式），路径标记为 **Graph**。对应工具：`search_knowledge_graph`、`get_entity_detail`、`query_entity_timeline`、`query_entity_relationships`。
+
+| # | 查询 | 路由 | 路径 | 说明 |
+|---|------|------|------|------|
+| 68 | 在知识图谱中搜索"华为"相关的采购实体 | L1 | **Graph** | 命中"知识图谱""搜索"；调用 search_knowledge_graph(query="华为") |
+| 69 | 图谱里有哪些供应商节点 | L2 | **Graph** | 语义匹配图谱查询种子；调用 search_knowledge_graph(entity_types=["Supplier"]) |
+| 70 | 搜索与 PO-2024-0035 相关的所有图谱节点 | L1 | **Graph** | 命中"图谱""搜索"；提取 po_number → search_knowledge_graph 双路径检索 |
+| 71 | 查看供应商 SUP-001 在图谱中的详细信息 | L1 | **Graph** | 命中"图谱""详细信息"；调用 get_entity_detail(entity_id="SUP-001") |
+| 72 | SUP-002 的图谱节点有哪些关联 | L2 | **Graph** | 语义匹配；调用 get_entity_detail 返回节点属性+连接 |
+| 73 | 查询供应商 SUP-001 最近的时间线变化 | L1 | **Graph** | 命中"时间线"；调用 query_entity_timeline(entity_id="SUP-001") |
+| 74 | SUP-003 的采购事件时间轴 | L2 | **Graph** | 语义匹配时间线种子；调用 query_entity_timeline |
+| 75 | 查看 SUP-001 在图谱中的关联关系 | L1 | **Graph** | 命中"关联关系""图谱"；调用 query_entity_relationships(entity_id="SUP-001") |
+| 76 | SUP-002 和哪些采购订单有关系，深度查 3 层 | L2 | **Graph** | 调用 query_entity_relationships(depth=3)；depth 上限截断 |
+
+## 十六、图谱路径追踪与供应商画像
+
+> 对应工具：`find_path_between`、`trace_procurement_chain`、`query_supplier_profile`。
+
+| # | 查询 | 路由 | 路径 | 说明 |
+|---|------|------|------|------|
+| 77 | 找出 SUP-001 到 INV-2024-0100 之间的图谱路径 | L1 | **Graph** | 命中"路径""图谱"；调用 find_path_between(from="SUP-001", to="INV-2024-0100") |
+| 78 | PO-2024-0035 和 PAY-2024-0050 之间怎么关联的 | L2 | **Graph** | 语义匹配路径查询；调用 find_path_between |
+| 79 | 追踪采购订单 PO-2024-0035 的完整采购链路 | L1 | **Graph** | 命中"追踪""采购链路"；调用 trace_procurement_chain(po_number="PO-2024-0035") |
+| 80 | PO-2024-0010 从下单到付款经过了哪些节点 | L2 | **Graph** | 语义匹配链路追踪；调用 trace_procurement_chain |
+| 81 | 查看供应商 SUP-001 的图谱画像 | L1 | **Graph** | 命中"画像""供应商"；调用 query_supplier_profile(supplier_id="SUP-001") |
+| 82 | SUP-002 在图谱中的全貌是什么 | L2 | **Graph** | 语义匹配供应商画像；调用 query_supplier_profile |
+
+## 十七、图谱异常检测与风险分析
+
+> 对应工具：`detect_graph_anomalies`、`query_risk_impact`。
+
+| # | 查询 | 路由 | 路径 | 说明 |
+|---|------|------|------|------|
+| 83 | 检测图谱中的所有异常模式 | L1 | **Graph** | 命中"图谱""异常"；调用 detect_graph_anomalies(scope="all") |
+| 84 | 图谱里有没有孤立节点或断裂关系 | L2 | **Graph** | 语义匹配异常检测种子；调用 detect_graph_anomalies(scope="orphan") |
+| 85 | 检测供应商维度的图谱异常 | L1 | **Graph** | 命中"异常""供应商"；调用 detect_graph_anomalies(scope="supplier") |
+| 86 | 非法 scope 参数的图谱异常检测 | — | **Graph** | 传入 scope="invalid_xxx"，预期返回错误提示 |
+| 87 | 分析供应商 SUP-001 的风险影响链 | L1 | **Graph** | 命中"风险""影响"；调用 query_risk_impact(entity_id="SUP-001", risk_type="supplier") |
+| 88 | 如果某物料断供会影响哪些订单 | L2 | **Graph** | 语义匹配风险分析；调用 query_risk_impact(risk_type="material_disruption") |
+| 89 | 分析付款链路上的风险传导 | L2 | **Graph** | 语义匹配；调用 query_risk_impact(risk_type="payment_chain") |
+| 90 | 传入非法 risk_type 的风险分析 | — | **Graph** | 传入 risk_type="invalid"，预期返回错误提示 |
+
+## 十八、图谱对比与竞争分析
+
+> 对应工具：`compare_entities`、`find_contract_coverage`、`find_competing_suppliers`。
+
+| # | 查询 | 路由 | 路径 | 说明 |
+|---|------|------|------|------|
+| 91 | 对比供应商 SUP-001 和 SUP-002 的图谱属性 | L1 | **Graph** | 命中"对比""供应商""图谱"；调用 compare_entities(entity_a="SUP-001", entity_b="SUP-002") |
+| 92 | 华为和中兴在图谱中有什么差异 | L2 | **Graph** | 语义匹配对比分析；实体消解后调用 compare_entities |
+| 93 | 查看所有合同的覆盖情况 | L1 | **Graph** | 命中"合同""覆盖"；调用 find_contract_coverage() |
+| 94 | SUP-001 的合同覆盖了哪些采购 | L1 | **Graph** | 命中"合同""覆盖"；调用 find_contract_coverage(vendor_id="SUP-001") |
+| 95 | 哪些采购没有合同保障 | L2 | **Graph** | 语义匹配合同覆盖种子；调用 find_contract_coverage 筛选未覆盖项 |
+| 96 | 找出 SUP-001 的竞争供应商 | L1 | **Graph** | 命中"竞争""供应商"；调用 find_competing_suppliers(vendor_id="SUP-001") |
+| 97 | 有哪些供应商通过竞标争夺同一品类 | L2 | **Graph** | 语义匹配竞争分析；调用 find_competing_suppliers(by_auction=True) |
+| 98 | 调用 find_competing_suppliers 不传任何参数 | — | **Graph** | vendor_id 和 by_auction 均为空，预期返回错误提示 |

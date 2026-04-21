@@ -1,11 +1,12 @@
 ### ============================================================
 ### Graph Query Tools - HTTP test cases
-### These queries are designed to trigger the 6 Graphiti graph tools
-### via the ReAct Agent path.
-### Prerequisite:
+### Prerequisites:
 ###   1. NEO4J_ENABLED=true, Neo4j running
-###   2. ETL full sync completed (POST /admin/etl/trigger {"sync_type":"full"})
-###   3. uvicorn api.main:app --workers 4 --port 8080
+###   2. ETL full sync completed (POST /admin/etl/trigger)
+###   3. config.yaml: query_backend=graphiti, lookup_shortcut_enabled=false,
+###      generic_template_enabled=false, l3_dag_min_confidence=0.99
+###   4. uvicorn api.main:app --workers 4 --port 8080
+### NOTE: Each test uses $timestamp in session_id to avoid history pollution
 ### ============================================================
 
 @host = http://127.0.0.1:8080
@@ -13,197 +14,256 @@
 
 
 ### ============================================================
-### 1. search_knowledge_graph — 自然语言图谱搜索
+### 1. search_knowledge_graph
 ### ============================================================
 
-### 1a. 搜索供应商相关信息
+### 1a. search supplier
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
-    "query": "在知识图谱中搜索华为科技的所有相关信息，包括采购订单、发票和合同",
+    "query": "用 search_knowledge_graph 工具搜索 SUP-001 的所有关联实体",
     "user_id": "graph_test",
-    "session_id": "graph-session-001"
+    "session_id": "search-{{$timestamp}}"
 }
 
-### 1b. 搜索物料关联
+### 1b. search material
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
-    "query": "搜索钢板（MAT-001）在图谱中的所有关联关系，看它被哪些订单采购过",
+    "query": "用 search_knowledge_graph 工具搜索物料 MAT-001 的所有采购记录",
     "user_id": "graph_test",
-    "session_id": "graph-session-001"
+    "session_id": "search-mat-{{$timestamp}}"
 }
 
 
 ### ============================================================
-### 2. query_entity_timeline — 实体时间线
+### 2. query_entity_timeline
 ### ============================================================
 
-### 2a. PO 完整生命周期
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "查看采购订单 PO-2024-0001 的完整时间线，从创建到收货、开票、付款的全过程",
-    "user_id": "graph_test",
-    "session_id": "graph-session-002"
-}
-
-### 2b. 供应商历史
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "展示供应商 SUP-001 的业务时间线，看它在过去半年的所有业务活动",
-    "user_id": "graph_test",
-    "session_id": "graph-session-002"
-}
-
-
-### ============================================================
-### 3. query_entity_relationships — 关系网络
-### ============================================================
-
-### 3a. 供应商关系网络
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "查询供应商 SUP-002（中兴通讯）的关系网络，看它关联了哪些采购订单、发票和合同",
-    "user_id": "graph_test",
-    "session_id": "graph-session-003"
-}
-
-### 3b. 发票关系溯源
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "查看发票 INV-2024-0001 的完整关系链路，包括关联的PO、收货单和付款记录",
-    "user_id": "graph_test",
-    "session_id": "graph-session-003"
-}
-
-
-### ============================================================
-### 4. query_supplier_profile — 供应商全景画像
-### ============================================================
-
-### 4a. 单个供应商画像
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "生成供应商 SUP-001（华为科技）的全景画像，聚合采购、交付、发票、付款、合同等多维度信息",
-    "user_id": "graph_test",
-    "session_id": "graph-session-004"
-}
-
-
-### ============================================================
-### 5. compare_entities — 实体对比
-### ============================================================
-
-### 5a. 供应商对比
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "对比供应商 SUP-001（华为科技）和 SUP-002（中兴通讯）在交付、定价、合规方面的表现差异",
-    "user_id": "graph_test",
-    "session_id": "graph-session-005"
-}
-
-
-### ============================================================
-### 6. detect_graph_anomalies — 图结构异常检测
-### ============================================================
-
-### 6a. 全面异常检测
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "基于图谱结构检测采购流程中的异常模式，包括无收货的PO、无关联PO的发票、孤立付款等",
-    "user_id": "graph_test",
-    "session_id": "graph-session-006"
-}
-
-### 6b. 特定异常检测
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "检测最近30天内有哪些采购订单没有收货记录，可能存在交付风险",
-    "user_id": "graph_test",
-    "session_id": "graph-session-006"
-}
-
-
-### ============================================================
-### 强制走 ReAct Agent 路径的查询（不命中任何 DAG 模板）
-### 通过 analysis_type=comprehensive 但不包含标准分析关键词，
-### 或使用明确要求图谱工具的措辞，触发 Agent 自主选择图查询工具。
-### ============================================================
-
-### ★ 推荐测试：直接要求搜索图谱（最可能触发图查询）
-POST {{prefix}}/analyze
-Content-Type: application/json
-
-{
-    "query": "请在知识图谱中搜索华为科技（SUP-001）的所有关联实体和关系，用 search_knowledge_graph 工具",
-    "user_id": "graph_test",
-    "session_id": "graph-session-react-1"
-}
-
-### ★ 推荐测试：查询时间线
+### 2a. PO timeline
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
     "query": "用 query_entity_timeline 工具查看 PurchaseOrder 1 的完整事件时间线",
     "user_id": "graph_test",
-    "session_id": "graph-session-react-2"
+    "session_id": "timeline-po-{{$timestamp}}"
 }
 
-### ★ 推荐测试：查询关系网络
+### 2b. Supplier timeline
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 query_entity_timeline 工具查看 Supplier SUP-001 的业务时间线",
+    "user_id": "graph_test",
+    "session_id": "timeline-sup-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 3. query_entity_relationships
+### ============================================================
+
+### 3a. Supplier relationship network
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
     "query": "用 query_entity_relationships 工具查询 Supplier SUP-002 的关系网络，遍历深度2",
     "user_id": "graph_test",
-    "session_id": "graph-session-react-3"
+    "session_id": "rel-sup-{{$timestamp}}"
 }
 
-### ★ 推荐测试���供应商画像（图谱版）
+### 3b. Invoice relationship trace
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 query_entity_relationships 工具查询 Invoice 1 的关联关系",
+    "user_id": "graph_test",
+    "session_id": "rel-inv-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 4. get_entity_detail
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 get_entity_detail 工具查看 Supplier SUP-001 的详细信息和直接关联",
+    "user_id": "graph_test",
+    "session_id": "detail-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 5. find_path_between
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 find_path_between 工具查看 Supplier SUP-001 和 Invoice 1 之间的路径",
+    "user_id": "graph_test",
+    "session_id": "path-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 6. trace_procurement_chain
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 trace_procurement_chain 工具追踪 PurchaseOrder 1 的完整采购链路",
+    "user_id": "graph_test",
+    "session_id": "chain-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 7. query_supplier_profile
+### ============================================================
+
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
     "query": "用 query_supplier_profile 工具获取 SUP-001 的图谱全景画像",
     "user_id": "graph_test",
-    "session_id": "graph-session-react-4"
+    "session_id": "profile-{{$timestamp}}"
 }
 
-### ★ 推荐测试：图谱异常检测
+
+### ============================================================
+### 8. compare_entities
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 compare_entities 工具对比 Supplier SUP-001 和 SUP-002 的表现",
+    "user_id": "graph_test",
+    "session_id": "compare-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 9. detect_graph_anomalies
+### ============================================================
+
+### 9a. All scopes
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
     "query": "用 detect_graph_anomalies 工具检测所有图谱结构异常",
     "user_id": "graph_test",
-    "session_id": "graph-session-react-5"
+    "session_id": "anomaly-all-{{$timestamp}}"
 }
 
-### ★ 推荐测试：实体对比（图谱版）
+### 9b. Specific scope
 POST {{prefix}}/analyze
 Content-Type: application/json
 
 {
-    "query": "用 compare_entities 工具对比 Supplier SUP-001 和 SUP-002",
+    "query": "用 detect_graph_anomalies 工具检测 missing_receipt 类型的异常",
     "user_id": "graph_test",
-    "session_id": "graph-session-react-6"
+    "session_id": "anomaly-mr-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 10. query_risk_impact
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 query_risk_impact 工具评估供应商 SUP-001 的风险影响面，类型为 supplier_risk",
+    "user_id": "graph_test",
+    "session_id": "risk-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 11. find_contract_coverage
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 find_contract_coverage 工具查看采购行的合同覆盖情况",
+    "user_id": "graph_test",
+    "session_id": "contract-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 12. find_competing_suppliers
+### ============================================================
+
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "用 find_competing_suppliers 工具查看 SUP-001 的竞争供应商",
+    "user_id": "graph_test",
+    "session_id": "compete-{{$timestamp}}"
+}
+
+
+### ============================================================
+### 13. Structured query (verify Neo4j backend)
+### ============================================================
+
+### 13a. PO query via Neo4jStructuredBackend
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "查询供应商 SUP-001 的所有采购订单",
+    "user_id": "graph_test",
+    "session_id": "struct-po-{{$timestamp}}"
+}
+
+### 13b. Three-way match (rule engine + Neo4j data)
+POST {{prefix}}/analyze
+Content-Type: application/json
+
+{
+    "query": "对 PO-2024-0001 执行三路匹配分析",
+    "user_id": "graph_test",
+    "session_id": "struct-3way-{{$timestamp}}"
+}
+
+
+### ============================================================
+### Utility endpoints
+### ============================================================
+
+### Health check
+GET {{host}}/health
+
+### ETL status
+GET {{prefix}}/admin/etl/status
+
+### ETL trigger full sync
+POST {{prefix}}/admin/etl/trigger
+Content-Type: application/json
+
+{
+    "sync_type": "full"
 }

@@ -896,11 +896,34 @@ class TimingMiddleware(AgentMiddleware):
                 error=error,
             )
 
-    @staticmethod
-    def _tool_attrs(request: ToolCallRequest) -> dict[str, Any]:
+    # Tool name sets for span prefix tagging
+    _GRAPH_TOOL_NAMES: set[str] = {
+        "search_knowledge_graph", "get_entity_detail", "query_entity_timeline",
+        "query_entity_relationships", "find_path_between", "trace_procurement_chain",
+        "query_supplier_profile", "detect_graph_anomalies", "query_risk_impact",
+        "compare_entities", "find_contract_coverage", "find_competing_suppliers",
+    }
+    _PG_TOOL_NAMES: set[str] = {
+        "query_purchase_orders", "query_receipts", "query_invoices", "query_payments",
+        "query_vendor_master", "run_three_way_match", "run_price_variance_analysis",
+        "run_payment_compliance_check", "calculate_supplier_kpis",
+        "calculate_spend_analysis", "analyze_receipt_anomalies",
+        "detect_duplicate_invoices", "analyze_discount_utilization",
+        "analyze_vendor_concentration", "calculate_po_cycle_time",
+    }
+
+    @classmethod
+    def _tool_attrs(cls, request: ToolCallRequest) -> dict[str, Any]:
         call = request.tool_call or {}
+        tool_name = call.get("name", "unknown")
+        if tool_name in cls._GRAPH_TOOL_NAMES:
+            span_name = f"graph:{tool_name}"
+        elif tool_name in cls._PG_TOOL_NAMES:
+            span_name = f"pg:{tool_name}"
+        else:
+            span_name = tool_name
         return {
-            "tool": call.get("name", "unknown"),
+            "tool": span_name,
             "tool_call_id": call.get("id"),
             "args": _safe_jsonable(call.get("args")),
         }

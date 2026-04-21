@@ -54,6 +54,7 @@ _UNIFIED_PROMPT = """\
 3. 缺少时间/实体参数不影响判定，系统有默认参数可执行。
 4. analysis_type 选最具体的；实在无法确定具体类型时填 comprehensive，让系统自行分析。
 5. **禁止返回 clarification**——任何涉及采购业务的查询都归 analysis 或 data_lookup。
+6. **链路追踪/关系追溯**："追踪链路""上下游关联""关系图""对应的XX""关联单据"等涉及实体间关系遍历的查询，归 comprehensive（系统会使用图查询工具），**不要归 po_cycle_time**（后者仅用于时间周期统计）。
 
 ## 跨实体判断（is_cross_entity）
 当查询涉及从一种实体跳转到另一种时为 true：

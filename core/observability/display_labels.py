@@ -30,18 +30,12 @@ _TOOL_LABELS: dict[str, str] = {
     "query_vendor_invoices": "查询供应商发票",
     "query_payments": "查询付款记录",
     "query_vendor_master": "查询供应商主数据",
-    "query_material_master": "查询物料主数据",
     # 核对 / 合规
     "run_three_way_match": "三路匹配核对",
     "run_price_variance_analysis": "价格差异分析",
-    "calculate_ppv": "价格差异分析",
     "run_payment_compliance_check": "付款合规检查",
-    "validate_compliance": "付款合规检查",
-    "check_approval_limits": "审批权限校验",
-    "check_blacklist": "供应商黑名单核对",
     # 指标 / 绩效
     "calculate_supplier_kpis": "供应商绩效测算",
-    "get_vendor_scorecard": "供应商绩效测算",
     "calculate_spend_analysis": "采购支出分析",
     "calculate_po_cycle_time": "采购周期测算",
     # 异常分析
@@ -49,7 +43,23 @@ _TOOL_LABELS: dict[str, str] = {
     "detect_duplicate_invoices": "重复发票检测",
     "analyze_discount_utilization": "折扣利用率分析",
     "analyze_vendor_concentration": "供应商集中度分析",
-    "run_vendor_risk_scoring": "供应商风险评分",
+    # 图查询 — 语义搜索
+    "search_knowledge_graph": "知识图谱搜索",
+    # 图查询 — 实体操作
+    "get_entity_detail": "查询实体详情",
+    "query_entity_timeline": "查询实体时间线",
+    "query_entity_relationships": "查询实体关系网络",
+    # 图查询 — 路径遍历
+    "find_path_between": "查询实体间路径",
+    "trace_procurement_chain": "追踪采购全链路",
+    "query_supplier_profile": "供应商画像分析",
+    # 图查询 — 异常检测
+    "detect_graph_anomalies": "图结构异常检测",
+    "query_risk_impact": "风险影响面评估",
+    # 图查询 — 对比分析
+    "compare_entities": "多实体对比分析",
+    "find_contract_coverage": "合同覆盖分析",
+    "find_competing_suppliers": "竞争供应商分析",
     # 报告 / 图表
     "generate_summary_report": "生成分析报告",
     "generate_chart": "生成图表",
@@ -82,10 +92,20 @@ def _fallback_label(kind: str, name: str) -> str:
 
 
 def resolve_tool_label(name: str) -> str:
-    """解析 tool / DAG task 的展示文案。"""
+    """解析 tool / DAG task 的展示文案。
+
+    支持 ``graph:xxx`` 前缀格式——先按原名查，再去掉前缀查。
+    """
     label = _TOOL_LABELS.get(name)
     if label is not None:
         return label
+    # Strip "graph:" or "pg:" prefix and try again
+    for prefix in ("graph:", "pg:"):
+        if name.startswith(prefix):
+            bare = name[len(prefix):]
+            label = _TOOL_LABELS.get(bare)
+            if label is not None:
+                return label
     return _fallback_label("tool", name)
 
 

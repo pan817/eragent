@@ -137,7 +137,7 @@ def test_middleware_tool_and_model_spans(store):
     types = sorted(s.span_type for s in spans)
     assert types == ["agent", "model", "tool"]
     tool_span = next(s for s in spans if s.span_type == "tool")
-    assert tool_span.name == "query_purchase_orders"
+    assert tool_span.name == "pg:query_purchase_orders"
     assert tool_span.attributes["args"] == {"vendor_id": "SUP-001"}
 
 

@@ -6,6 +6,7 @@ config.settings 模块单元测试。
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -344,8 +345,12 @@ class TestLLMFastFallback:
         assert s.llm.api_key == "sk-main"
         assert s.llm.timeout == 240
 
-    def test_default_settings_llm_fast_equals_llm(self) -> None:
+    def test_default_settings_llm_fast_equals_llm(self, monkeypatch) -> None:
         """直接 Settings() 构造（无 from_yaml）时，llm_fast 默认与 llm 默认完全一致。"""
+        # 清除环境变量中可能覆盖 llm_fast 字段的值
+        for key in list(os.environ.keys()):
+            if key.startswith("LLM_FAST_"):
+                monkeypatch.delenv(key, raising=False)
         s = Settings()
         assert s.llm_fast.provider == s.llm.provider
         assert s.llm_fast.model == s.llm.model

@@ -73,7 +73,7 @@ def db_engine():
         poolclass=StaticPool,
     )
     install_sqlite_timezone_hook(engine)
-    init_database(engine, seed=0)
+    init_database(engine, seed=0, count=50)
     yield engine
     engine.dispose()
 

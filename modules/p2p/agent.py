@@ -30,7 +30,7 @@ from core.observability import TimingMiddleware
 from core.observability.tracing import estimate_tokens, record_span
 from core.time_utils import now_cn
 from core.llm.model_factory import build_chat_model
-from modules.p2p.prompts import build_system_prompt, format_long_term_memory
+from modules.p2p.prompts import build_system_prompt, format_long_term_memory, get_tool_strategy_prompt
 
 _logger = get_logger(__name__)
 
@@ -351,34 +351,18 @@ class P2PAgent:
             pass  # 纯记录，无业务逻辑
 
     def _build_tools(self) -> list:
-        """导入并返回 P2P 工具集。
+        """通过 Provider 获取工具集，按 query_backend 配置自动选择。
 
-        从 modules.p2p.tools 模块导入全部 8 个 @tool 装饰的工具函数。
-
-        Returns:
-            包含 8 个 LangChain Tool 对象的列表。
+        统一工具来源：ReAct Agent 和 DAG Executor 使用同一组工具。
+        工具数量取决于 query_backend 配置：
+        - postgresql: 19 个（shared + pg_only）
+        - graphiti:   16 个（shared + graph_only）
+        - hybrid:     25 个（全部）
         """
-        from modules.p2p.tools import (
-            calculate_supplier_kpis,
-            query_invoices,
-            query_payments,
-            query_purchase_orders,
-            query_receipts,
-            run_payment_compliance_check,
-            run_price_variance_analysis,
-            run_three_way_match,
-        )
+        from modules.p2p.provider import P2PModuleProvider
 
-        return [
-            query_purchase_orders,
-            query_receipts,
-            query_invoices,
-            query_payments,
-            run_three_way_match,
-            run_price_variance_analysis,
-            run_payment_compliance_check,
-            calculate_supplier_kpis,
-        ]
+        provider = P2PModuleProvider()
+        return provider.get_tools()
 
     def _get_or_build_agent(self) -> Any:
         """获取或延迟构建 LangChain Agent。
@@ -396,7 +380,7 @@ class P2PAgent:
                 return self._agent
             model = build_chat_model(self._settings.llm)
             tools = self._build_tools()
-            system_prompt = build_system_prompt()
+            system_prompt = build_system_prompt() + "\n\n" + get_tool_strategy_prompt()
 
             from core.memory.trimmer import MemoryMiddleware
 
@@ -840,6 +824,7 @@ class P2PAgent:
         )
 
         # ── 重试循环 ──
+        _zero_tool_retried = False  # track zero-tool guard retry
         for attempt in range(max_retries):
             try:
                 agent = self._get_or_build_agent()
@@ -874,6 +859,45 @@ class P2PAgent:
                         last_message.content
                         if hasattr(last_message, "content")
                         else str(last_message)
+                    )
+
+                # ── 零工具调用校验（防止 LLM 伪造数据）──
+                # 统计本轮 ReAct 中实际调用的工具次数。
+                # 只在首次尝试时校验（attempt==0），避免与异常重试循环冲突。
+                tool_call_count = sum(
+                    1 for m in messages
+                    if hasattr(m, "type") and m.type == "tool"
+                )
+                if (
+                    tool_call_count == 0
+                    and content
+                    and not _zero_tool_retried
+                    and not skip_memory_write
+                    and self._settings.memory.long_term_enabled
+                    and attempt < max_retries - 1
+                ):
+                    _logger.warning(
+                        "ReAct completed with ZERO tool calls — "
+                        "response may contain fabricated data, "
+                        "forcing retry with explicit instruction"
+                    )
+                    _zero_tool_retried = True
+                    invoke_messages.append((
+                        "human",
+                        "你刚才没有调用任何工具就直接回答了，这违反了数据诚信原则。"
+                        "请务必先调用相关查询工具获取真实数据，再基于工具返回的结果回答。"
+                        "禁止使用历史对话中的数据，必须重新查询。",
+                    ))
+                    continue  # retry the loop
+
+                if tool_call_count == 0 and content and _zero_tool_retried and self._settings.memory.long_term_enabled:
+                    _logger.error(
+                        "ReAct retry still ZERO tool calls — "
+                        "rejecting fabricated response"
+                    )
+                    content = (
+                        "未能查询到相关数据。系统在处理您的请求时未调用任何数据查询工具，"
+                        "无法提供可靠的分析结果。请尝试更明确的查询，或指定具体的实体编号。"
                     )
 
                 # 短期记忆由 checkpointer 自动写回,无需手动 append。

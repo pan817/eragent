@@ -12,11 +12,14 @@
 
 ## 未修复
 
-### 1. 意图路由命中率优化
-- **问题**：当前 IntentRouter 把较多查询兜底到 ReAct 路径（L3 LLM 分类），DAG 命中率不够高。
-- **影响**：ReAct 路径延迟更高、token 消耗更多；DAG 模板的并行优势没充分利用。
-- **建议修复**：扩充 `config/intent_seeds.yaml` 的语义种子覆盖度；调优 L2 Chroma 相似度阈值；把高频 ReAct 查询沉淀回 DAG 模板。
+### 1. 意图路由命中率优化（部分修复）
+- **问题**：当前 IntentRouter 把较多查询兜底到 ReAct 路径，DAG 命中率不够高。
+- **已修复部分**（2026-04-21）：`l3_dag_min_confidence` 从 0.99 调至 0.75，启用 `generic_template_enabled` 和 `lookup_shortcut_enabled`，DAG + ReAct 共存已激活。
+- **遗留问题**：路由架构已从 L0+L1+L2+L3 简化为 L0 bypass + Unified LLM，L2 语义检索（Chroma + intent_seeds.yaml）和 L1 关键词分类已从路由流程中移除。当前 DAG/ReAct 分流完全依赖 LLM 置信度单一维度，缺少低成本的预筛机制。
+- **影响**：每个非 bypass 查询都需要一次 LLM 调用才能路由，无法在 LLM 之前通过关键词/语义检索快速命中高置信度场景。
+- **建议修复**：评估是否需要恢复 L1/L2 层作为 LLM 前置快筛（降低 token 消耗），或维持当前 Unified LLM 方案并持续观察 `l3_dag_min_confidence` 阈值是否合理。
 - **发现日期**：（早于 2026-04）
+- **部分修复日期**：2026-04-21
 
 ### 2. core / modules 反向依赖 api.schemas（分层违规）
 - **问题**：业务层（`modules/p2p/*`）和编排层（`core/orchestrator/*`、`core/tasks/*`）反向 import `api.schemas.analysis` 里定义的 Pydantic 模型（`AnalysisRequest` / `AnalysisResult` / `Severity` / `ErrorInfo` 等）。违反"下层不依赖上层"的分层原则。
@@ -86,6 +89,24 @@
   - [core/tasks/registry.py](../core/tasks/registry.py)（任务生命周期）
 - **建议修复**：在 lifespan shutdown 阶段调用 `TaskRegistry.shutdown(timeout=30)`，等待所有运行中任务完成或超时后标记为 aborted；同时停止接受新任务。
 - **发现日期**：2026-04-18
+
+### 9. Neo4j 后端不支持金额维度排序（amount_desc / amount_asc）
+- **问题**：`Neo4jStructuredBackend` 的 4 个查询方法（`query_purchase_orders` / `query_invoices` / `query_receipts` / `query_payments`）在 `order_by` 参数为 `amount_desc` 或 `amount_asc` 时静默降级为日期排序。PostgreSQL 后端通过 `_apply_order_and_limit` 支持金额排序。
+- **影响**：使用 `graphiti` / `hybrid` 查询模式时，工具层传入 `order_by=amount_desc` 的查询无法按金额排序，返回按日期倒序的结果。实际影响较低——当前 15 个 DAG 模板和工具调用中 `order_by` 参数默认为空字符串（不排序），仅 ReAct Agent 自主调用时可能传入金额排序。
+- **涉及文件**：
+  - [core/etl/query_backend.py](../core/etl/query_backend.py)（`_build_tail` 方法）
+- **根因**：各实体类型的金额字段名不统一（PO: `total_amount`、Invoice: `invoice_amount`、Payment: `amount`），且 Cypher RETURN 结构不同（PO 返回 `po_props + line_props`，其余返回 `props`），无法用单一 `order_field` 覆盖。
+- **建议修复**：在 `_build_tail` 中增加 `amount_field` 参数，各查询方法传入各自的金额节点属性名（如 `po.total_amount`、`n.invoice_amount`）。需注意 RETURN 子句中属性是否可直接引用（`properties(n)` 是 map，不能直接 `ORDER BY properties(n).amount`，需在 RETURN 中显式暴露金额字段）。
+- **发现日期**：2026-04-21
+
+### 10. L1/L2 路由配置残留为死代码
+- **问题**：`IntentRoutingSettings` 中仍保留 `l1_threshold_default`、`l1_threshold_strict`、`l2_similarity_threshold`、`l2_length_ratio_floor`、`l2_length_ratio_penalty`、`l2_topk` 共 6 个配置项，`config.yaml` 中也有对应条目。但路由架构已简化为 L0 bypass + Unified LLM，这些配置没有任何代码路径引用。
+- **影响**：配置文件膨胀，新开发者可能误以为 L1/L2 仍在生效而调参无效果；`IntentRoutingSettings` 模型加载了无用字段。不影响功能。
+- **涉及文件**：
+  - [config/settings.py](../config/settings.py)（`IntentRoutingSettings` 类定义）
+  - [config/config.yaml](../config/config.yaml)（`intent_routing` 段 L1/L2 条目）
+- **建议修复**：删除 6 个死配置项及 `config.yaml` 中对应行；同步清理 CLAUDE.md 和文档中对 `intent_seeds.yaml` 的引用。若未来决定恢复 L1/L2，从 git 历史恢复即可。
+- **发现日期**：2026-04-21
 
 ---
 

@@ -16,9 +16,9 @@ ANALYSIS_TYPE_DESCRIPTIONS: list[tuple[str, str]] = [
     ("receipt_anomaly", "超量收货、拒收、延迟收货等收货异常分析"),
     ("invoice_duplicate", "重复发票检测"),
     ("discount_utilization", "早付折扣利用率分析"),
-    ("po_cycle_time", "采购订单全流程周期分析"),
+    ("po_cycle_time", "采购订单各环节耗时/时间周期统计（从创建到收货到付款的时间间隔）；注意：\"追踪链路/关系追溯/上下游关联\"不属于此类，应归 comprehensive"),
     ("vendor_concentration", "供应商集中度与采购依赖风险分析"),
-    ("comprehensive", "明确需要跨多个维度组合分析（如\"综合评估供应商风险\"）"),
+    ("comprehensive", "明确需要跨多个维度组合分析（如\"综合评估供应商风险\"），或链路追踪/关系追溯/上下游关联查询（如\"追踪PO的完整采购链路\"\"查看发票对应的收货和付款\"）"),
 ]
 
 # L1 分析关键词（出现这些词说明用户有具体业务意图）

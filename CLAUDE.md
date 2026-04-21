@@ -25,6 +25,12 @@
   - **commit 规范**：commit message 遵循 Conventional Commits 格式（`feat/fix/refactor/test/docs(scope): 描述`）。
   - **关键指标埋点**：LLM 调用耗时、token 消耗、路由命中层级（L1/L2/L3）、DAG 任务成功/失败率等关键指标需可统计。
   - **查询安全**：禁止在循环中执行 SQL 查询（N+1 问题），批量操作使用 bulk insert/update，关注 ORM 生成 SQL 的性能。
+  - **LangChain Tool 定义规范**：
+    - 命名：动词 + 对象，动词区分语义（query=精确查/analyze=分析/detect=检测/find=发现/trace=追踪/compare=对比/calculate=计算/run=执行规则）。
+    - docstring 必须包含四要素：①一句话说明（做什么）②适用场景（何时用）③不适用场景+推荐替代工具（何时不用）④返回内容（返回什么，可用于什么后续分析）。
+    - 参数描述（Args）必须包含：业务含义、取值范围（枚举值或边界）、默认行为（空值/零值含义）、参数间组合关系（如有）。
+    - 工具集注入必须精准：只注入当前模式下可用的工具，不注入返回降级信息或空结果的占位工具。
+    - 新增工具时必须同步更新 system prompt 中的工具分组速查表（`modules/p2p/prompts.py`）。
 
 ## 技术栈
 | 组件 | 选型 |

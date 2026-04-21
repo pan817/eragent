@@ -51,6 +51,20 @@ def _matches_overview_query(query: str) -> bool:
     return has_procurement and has_intent
 
 
+# 图查询意图关键词：出现时应走 ReAct 以使用图查询工具
+_GRAPH_INTENT_WORDS = {
+    "链路", "链条", "关系", "关联", "上下游", "追踪", "追溯", "溯源",
+    "流转", "路径", "对应", "关系图", "timeline", "trace",
+    "relationship", "chain", "linked",
+}
+
+
+def _matches_graph_query(query: str) -> bool:
+    """判断 query 是否包含图遍历/关系追溯意图。"""
+    q = query.lower()
+    return any(w in q for w in _GRAPH_INTENT_WORDS)
+
+
 def _publish_stage_safe(
     name: str,
     attrs: dict[str, Any] | None = None,
@@ -566,14 +580,26 @@ class Orchestrator:
 
             # 3. 合并参数（统一 LLM 已提取所有参数到 signal.entities）
             parsed_params = signal.entities.copy()
-            # time_range 优先级: time_range > time_range_days > signal 提取 > config 默认
+            # time_range 优先级: time_range > time_range_days > signal 提取 > 实体判断 > config 默认
             resolved_days = _resolve_time_range(request.time_range)
-            time_range_days: int = (
+            explicit_days = (
                 resolved_days
                 or request.time_range_days
                 or signal.time_range_days
-                or self._settings.analysis.default_time_range_days
             )
+            if explicit_days:
+                time_range_days: int = explicit_days
+            else:
+                # 有明确实体时不加默认时间窗口（days=0），避免过滤掉目标数据
+                _entity_keys = {"po_number", "vendor_id", "invoice_num",
+                                "check_number", "receipt_number"}
+                has_specific_entity = any(
+                    signal.entities.get(k) for k in _entity_keys
+                )
+                time_range_days = (
+                    0 if has_specific_entity
+                    else self._settings.analysis.default_time_range_days
+                )
             parsed_params["days"] = time_range_days
 
             # 如果统一 LLM 完成了指代消解，用 resolved_query 替换 enhanced_query
@@ -652,7 +678,7 @@ class Orchestrator:
                             query=request.query,
                             user_id=request.user_id,
                             session_id=session_id,
-                            time_range=f"最近 {time_range_days} 天",
+                            time_range=f"最近 {time_range_days} 天" if time_range_days > 0 else "不限时间",
                             report_markdown=(
                                 f"在系统中未找到以下实体：{discarded_str}。"
                                 f"请核实编号是否正确，或联系管理员确认数据是否已导入系统。"
@@ -733,11 +759,20 @@ class Orchestrator:
                 ):
                     generic_template_key = "recent_procurement_health"
 
+                # COMPREHENSIVE + 有实体 + 图数据库可用 + 查询含关系追溯意图
+                # → 走 ReAct（DAG 模板不含图查询工具，ReAct 可自主选择）
+                _graph_available = (
+                    self._settings.graphiti_etl.enabled
+                    and self._settings.graphiti_etl.query_backend != "postgresql"
+                )
+                _wants_graph = _graph_available and _matches_graph_query(request.query)
+
                 use_dag = (
                     generic_template_key is not None
                     or signal.route_level == 25  # L2.5 案例命中
                     or analysis_type != AnalysisType.COMPREHENSIVE
-                    or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity)
+                    or (analysis_type == AnalysisType.COMPREHENSIVE and has_entity
+                        and not _wants_graph)
                 )
 
             # ── output_mode 自适应解析 ──────────────────────────────────────────
@@ -930,7 +965,7 @@ class Orchestrator:
             query=query,
             user_id=user_id,
             session_id=session_id,
-            time_range=f"最近 {time_range_days} 天",
+            time_range=f"最近 {time_range_days} 天" if time_range_days > 0 else "不限时间",
             summary={
                 "route_type": "lookup_shortcut",
                 "route_level": signal.route_level,
@@ -1092,7 +1127,7 @@ class Orchestrator:
                     query=query,
                     user_id=user_id,
                     session_id=session_id,
-                    time_range=f"最近 {time_range_days} 天",
+                    time_range=f"最近 {time_range_days} 天" if time_range_days > 0 else "不限时间",
                     anomalies=agent_result.get("anomalies", []),
                     supplier_kpis=agent_result.get("supplier_kpis", []),
                     summary=summary,
@@ -1116,7 +1151,7 @@ class Orchestrator:
                 query=query,
                 user_id=user_id,
                 session_id=session_id,
-                time_range=f"最近 {time_range_days} 天",
+                time_range=f"最近 {time_range_days} 天" if time_range_days > 0 else "不限时间",
                 failed_tasks=failed_list,
                 error=ErrorInfo(
                     code="AGENT_EXECUTION_FAILED",
@@ -1179,7 +1214,7 @@ class Orchestrator:
             query=query,
             user_id=user_id,
             session_id=session_id,
-            time_range=f"最近 {time_range_days} 天",
+            time_range=f"最近 {time_range_days} 天" if time_range_days > 0 else "不限时间",
             report_markdown=_strip_think_tags(dag_result.get("report", "")),
             completed_tasks=dag_result.get("completed_tasks", []),
             failed_tasks=failed_list,

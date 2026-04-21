@@ -264,6 +264,7 @@ class MockDataGenerator:
                 "invoice_id": idx + 1,
                 "invoice_num": inv_num,
                 "po_number": ph["po_number"],
+                "po_line_id": pl["po_line_id"],
                 "line_num": 1,
                 "amount": inv_amount,
                 "quantity": pl["quantity"],
@@ -583,6 +584,10 @@ class MockDataGenerator:
             pl["vendor_id"] = line_sup_map.get(pl["po_number"], "")
         po_distributions = self.generate_po_distributions(po_lines, po_locations)
         rcv_headers, rcv_transactions = self.generate_receipts(po_lines, po_headers)
+        # 补充 vendor_site_id 到 shipment headers（SHIPS_TO 边需要）
+        vendor_site_map = {s["vendor_id"]: s["vendor_site_id"] for s in supplier_sites}
+        for h in rcv_headers:
+            h["vendor_site_id"] = vendor_site_map.get(h.get("vendor_id", ""), "")
         shipment_lines = self.generate_shipment_lines(rcv_headers, po_lines)
         invoices, invoice_lines = self.generate_invoices(po_headers, po_lines)
         invoice_distributions = self.generate_invoice_distributions(invoices, invoice_lines)
