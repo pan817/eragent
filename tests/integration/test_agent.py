@@ -39,9 +39,16 @@ class TestP2PAgentAnalyze:
             agent = P2PAgent()
 
         mock_agent = MagicMock()
+        # Include a tool message to pass zero-tool-call guard
+        mock_tool_msg = MagicMock()
+        mock_tool_msg.type = "tool"
+        mock_tool_msg.content = '[]'
         mock_message = MagicMock()
+        mock_message.type = "ai"
         mock_message.content = "# 测试分析报告\n\n无异常发现"
-        mock_agent.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
+        mock_agent.ainvoke = AsyncMock(
+            return_value={"messages": [mock_tool_msg, mock_message]}
+        )
         agent._agent = mock_agent
 
         result = await agent.analyze("分析三路匹配", user_id="test-user")

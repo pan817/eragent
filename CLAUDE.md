@@ -56,6 +56,7 @@ eragent/
 │   ├── routes/
 │   │   ├── analyze.py           # 同步分析路由（POST /analyze）
 │   │   ├── analyze_async.py     # 异步分析 + SSE 流式事件路由
+│   │   ├── admin_metrics.py     # 管理指标路由（系统健康/性能统计）
 │   │   ├── sessions.py          # 会话历史 CRUD 路由
 │   │   ├── traces.py            # 可观测性 trace 查询路由
 │   │   └── etl.py               # ETL Admin API（状态查询 + 手动触发同步）
@@ -75,9 +76,15 @@ eragent/
 │   ├── llm/                     # LLM 客户端工厂
 │   │   └── model_factory.py     # 通用 LLM 创建逻辑（从 modules/p2p 提升）
 │   ├── memory/                  # 记忆管理
+│   │   ├── manager.py           # 记忆管理器（协调长/短期记忆生命周期）
 │   │   ├── long_term.py         # 跨会话长期记忆（按 user_id 隔离，PostgreSQL）
 │   │   ├── short_term.py        # 短期记忆辅助
+│   │   ├── extractor.py         # 记忆抽取（从分析结果提取实体/事实）
+│   │   ├── consolidation.py     # 记忆整合（去重/合并/淘汰）
+│   │   ├── feedback.py          # 反馈记忆（用户纠正/偏好学习）
+│   │   ├── injection.py         # 记忆注入（将记忆注入 Agent 上下文）
 │   │   ├── trimmer.py           # 记忆裁剪器
+│   │   ├── types.py             # 记忆类型定义
 │   │   └── tables.py            # ORM 表定义
 │   ├── observability/           # 可观测性
 │   │   ├── checkpointer.py      # LangGraph PostgresSaver trace 补丁（幂等挂载）
@@ -90,11 +97,14 @@ eragent/
 │   ├── etl/                     # Graphiti ETL 模块（EBS → Neo4j 时序知识图谱）
 │   │   ├── client.py            # GraphitiClient（graphiti-core SDK 封装）
 │   │   ├── config.py            # GraphitiETLSettings
+│   │   ├── llm_client.py        # ETL 专用 LLM 客户端（Qwen 兼容 + Dashscope Embedder）
+│   │   ├── metrics.py           # ETL 指标采集（同步耗时/节点数/失败率）
 │   │   ├── models.py            # ETL 数据模型（GraphitiNode/Edge/TransformResult 等）
 │   │   ├── pipeline.py          # ETLPipeline（全量/增量同步编排）
 │   │   ├── query_backend.py     # 双后端查询抽象（graphiti/postgresql/hybrid）
 │   │   ├── scheduler.py         # ETLScheduler（定时调度 + 手动触发）
 │   │   ├── state.py             # SyncStateManager（水位线管理）
+│   │   ├── tracing.py           # ETL 链路追踪（同步过程可观测性）
 │   │   ├── tables.py            # ETLSyncState ORM 表
 │   │   ├── extractors/          # 数据抽取器（5 域 20 表）
 │   │   │   └── base / master_data / purchasing / receiving / payables / sourcing
@@ -114,11 +124,13 @@ eragent/
 │   ├── orchestrator/            # 编排层
 │   │   ├── orchestrator.py      # 分析任务编排器（同步/异步共用入口）
 │   │   ├── entity.py            # 实体抽取 + 指代消解
+│   │   ├── lookup.py            # 实体查找（跨数据源检索）
+│   │   ├── param_extractor.py   # 查询参数提取器
+│   │   ├── unified_router.py    # 统一 LLM 路由器（一次调用完成意图+参数+消解）
 │   │   ├── prompts.py           # 编排层提示词模板
 │   │   ├── provider.py          # ModuleProvider Protocol（业务模块能力接口）
-│   │   ├── router/              # IntentRouter 三级路由包（bypass→L1→L2→L3）
+│   │   ├── router/              # IntentRouter 路由包（bypass→L1→L2→L3）
 │   │   │   └── __init__.py      # 路由核心逻辑
-│   │   ├── intent.py            # 意图分类辅助 / IntentKind 兼容旧入口
 │   │   ├── signal.py            # QuerySignal / IntentKind 数据契约
 │   │   └── dag/                 # DAG 执行子模块
 │   │       └── executor / templates / registry / validator / case_store / tables
@@ -142,11 +154,15 @@ eragent/
 │   ├── repository.py            # P2PRepository（数据查询）
 │   ├── rules/                   # 业务规则引擎（__init__.py 提供统一导出）
 │   │   └── three_way_match / price_variance / payment_compliance / supplier_performance / _utils
-│   ├── tools/                   # LangChain @tool 工具包（25 个工具）
-│   │   └── query / analysis / advanced / graph / stub / _inject / _output
+│   ├── tools/                   # LangChain @tool 工具包（27 个工具）
+│   │   ├── pg/                  # PostgreSQL 查询工具（15 个）
+│   │   │   └── query.py / analysis.py / advanced.py
+│   │   ├── graph/               # 图查询工具（12 个）
+│   │   │   └── search / entity / traversal / anomaly / comparison / _resolve
+│   │   ├── _inject.py           # Repository/GraphitiClient/QueryBackend 注入管理
+│   │   └── _output.py           # 工具输出格式化与裁剪
 │   ├── ontology/p2p.owl         # P2P 领域 OWL 本体（非 Python 包）
 │   ├── prompts.py               # Agent 提示词模板
-│   ├── model_factory.py         # LLM 客户端工厂（qwen / zhipu / minimax / deepseek / openai）
 │   ├── agent.py                 # P2P Agent（create_agent）
 │   ├── report_agent.py          # ReportAgent（DAG 路径 LLM 报告生成）
 │   ├── errors.py                # 业务异常类型
@@ -160,7 +176,7 @@ eragent/
 │   ├── conftest.py              # 基础 fixture（最小化，P2P fixture 已拆出）
 │   ├── fixtures/                # 按模块拆分的测试 fixture
 │   │   └── p2p.py               # P2P 专属 fixture（p2p_settings, repository, mock_po_data）
-│   ├── unit/                    # 单元测试（41 个文件）
+│   ├── unit/                    # 单元测试（58 个文件）
 │   ├── integration/             # 集成测试（含 test_e2e.py / test_async_multi_worker.py）
 │   └── http/                    # .http 调试用例
 ├── alembic.ini                  # Alembic 配置（script_location=migrations）
@@ -186,12 +202,12 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **异步分析（SSE）**：`POST /analyze/async` + SSE 流式事件。`EventBus` 支持 memory（单进程）/ Redis（多 worker）双后端，多 worker 部署时 memory 后端 fail-fast。
 - **会话历史**：`core/chat/` 独立持久化用户消息/助手回复（与 LangGraph checkpointer 短期记忆解耦），通过 `/sessions/*` API 暴露。
 - **本体与规则分工**：合规规则（三路匹配、付款条款）用 SWRL 定义于本体，KPI 计算用 Python；上下文注入混合结构化 JSON + 自然语言。当前版本纯分析只读，写操作接口预留。
-- **模型工厂**：`core/llm/model_factory.py` 提供通用 LLM 创建逻辑，`modules/p2p/model_factory.py` 封装 P2P 特定配置，便于切换模型 / 测试 mock。
+- **模型工厂**：`core/llm/model_factory.py` 提供通用 LLM 创建逻辑，便于切换模型 / 测试 mock。
 - **时区约定**：全链路统一业务时区（默认 `Asia/Shanghai`），由 `app.timezone` / `APP_TIMEZONE` 配置。
   - Python 侧**禁止** `datetime.utcnow()` / `datetime.now(timezone.utc)`，必须经 `core.time_utils.now_cn()` 产生时间戳。PG 引擎通过 `connect_args.options` 注入 `-c TimeZone=<tz>`。
 - **Graphiti ETL**：`core/etl/` 模块将 PostgreSQL（EBS 镜像表）数据同步到 Graphiti（Neo4j）时序知识图谱。全量初始化 + 每 10 分钟增量同步（`LAST_UPDATE_DATE` 水位线）。5 个域按依赖顺序执行：主数据 → 采购 → 收货 → 应付 → 寻源合同。20 张表声明式映射为 15 种节点 + 19 种边。
 - **双后端查询模式**：`graphiti_etl.query_backend` 控制查询路径 — `graphiti`（全部走图查询）/ `postgresql`（全部走 SQL）/ `hybrid`（图优先 SQL 降级）。通过 `QueryBackend` Protocol 实现透明切换，过渡期使用 `hybrid` 模式。
-- **图查询工具**：6 个 LangChain Tool（`search_knowledge_graph`、`query_entity_timeline`、`query_entity_relationships`、`query_supplier_profile`、`compare_entities`、`detect_graph_anomalies`），工具总数 25 个。
+- **图查询工具**：12 个 LangChain Tool（`search_knowledge_graph`、`get_entity_detail`、`query_entity_timeline`、`query_entity_relationships`、`find_path_between`、`query_supplier_profile`、`compare_entities`、`detect_graph_anomalies`、`query_risk_impact`、`trace_procurement_chain`、`find_contract_coverage`、`find_competing_suppliers`），PG 工具 15 个，工具总数 27 个。
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`LLM_FAST_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
@@ -225,13 +241,13 @@ alembic revision --autogenerate -m "描述"
 - `tests/` 目录及其子目录不需要 `__init__.py`（pytest 自动发现，`tests/fixtures/` 除外需要 `__init__.py` 供 `pytest_plugins` 引用）
 - `modules/p2p/ontology/` 仅存放 OWL 文件，不是 Python 包，无 `__init__.py`
 - `modules/p2p/rules/__init__.py` 提供四个规则类的统一导出
-- `modules/p2p/tools/__init__.py` 提供全部 19 个 @tool 函数的统一导出
+- `modules/p2p/tools/__init__.py` 提供全部 27 个 @tool 函数的统一导出（PG 15 + Graph 12）
 - `core/orchestrator/router/__init__.py` 承载 IntentRouter 三级路由核心逻辑
 
 ## 当前进度
 - 所有功能模块及七阶段架构重构（Phase 1 → 7.3）已全部完成
 - Graphiti ETL 全部 6 个 Phase（0-6）已完成：表结构改造（20 张 EBS 表）、ETL 基础设施、Extractor/Transformer/Loader（5 域）、Pipeline/Scheduler、6 个图查询工具、LLM 抽取、Admin API、双后端查询模式
 - Alembic 迁移体系已落地 13 个版本（0001 baseline → 0013 etl_sync_state）
-- 单元测试 41 个文件 + 集成测试 6 个文件（pytest 收集 1200+ 用例）
+- 单元测试 58 个文件 + 集成测试 6 个文件（pytest 收集 1419+ 用例，覆盖率 ≥ 90%）
 - 端到端测试（真实 LLM）通过
 - 架构层技术债见 [docs/agent_issue.md](docs/agent_issue.md)

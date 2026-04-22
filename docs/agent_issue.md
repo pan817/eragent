@@ -123,3 +123,25 @@
 - **详细分析**：[docs/data_lookup_react_analysis.md](data_lookup_react_analysis.md)
 - **发现日期**：2026-04-18
 - **修复日期**：2026-04-19
+
+### 11. lifespan shutdown 未重置全局工具注入状态（已修复）
+- **问题**：`api/main.py` lifespan shutdown 关闭 `GraphitiClient` 后，未调用 `set_graphiti_client(None)` 和 `set_query_backend(None)` 重置 `modules/p2p/tools/_inject.py` 中的全局变量，导致残留已关闭的客户端引用。
+- **影响**：
+  - 测试环境：e2e 测试创建的 TestClient 退出后，全局 `_graphiti_client` 和 `_query_backend` 残留，后续单元测试调用 PG 查询工具时触发 `RuntimeError: GraphitiClient is not initialised`，造成 22 个测试用例失败。
+  - 生产环境：热重启场景下可能引用已关闭的连接。
+- **涉及文件**：
+  - [api/main.py](../api/main.py)（shutdown 逻辑）
+  - [modules/p2p/tools/_inject.py](../modules/p2p/tools/_inject.py)（全局状态管理）
+- **修复方案**：在 shutdown 中 `graphiti_client.close()` 后追加 `set_graphiti_client(None)` 和 `set_query_backend(None)`。
+- **发现日期**：2026-04-22
+- **修复日期**：2026-04-22
+
+### 12. DocumentRef 字段未防御 None 输入（已修复）
+- **问题**：`api/schemas/domain.py` 的 `DocumentRef` 模型所有字段定义为 `str`（`default=""`），但上游规则引擎（如 `modules/p2p/rules/three_way_match.py`）传入 `vendor_name=None` 时，Pydantic 严格校验抛出 `ValidationError: Input should be a valid string`。
+- **影响**：DAG 执行中任务 `t4`（供应商绩效）和 `t5`（依赖 t4 的后续任务）失败，分析结果降级为 `partial_success`，e2e 测试断言 `status == "success"` 失败。
+- **涉及文件**：
+  - [api/schemas/domain.py](../api/schemas/domain.py)（DocumentRef 模型定义）
+  - [modules/p2p/rules/three_way_match.py](../modules/p2p/rules/three_way_match.py)（传入 vendor_name 的调用方）
+- **修复方案**：为 DocumentRef 添加 `field_validator`，将所有 `str` 字段的 `None` 输入转为空字符串。
+- **发现日期**：2026-04-22
+- **修复日期**：2026-04-22

@@ -286,6 +286,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await etl_scheduler.shutdown()
     if graphiti_client is not None:
         await graphiti_client.close()
+        # TECH-DEBT(#11): shutdown 必须重置全局注入状态，防止残留已关闭的客户端引用
+        from modules.p2p.tools import set_graphiti_client, set_query_backend
+        set_graphiti_client(None)  # type: ignore[arg-type]
+        set_query_backend(None)  # type: ignore[arg-type]
     await registry.shutdown()
     shutdown_task_registry()
     # 如果是 Redis 后端，关闭底层连接；memory 后端此调用是 no-op

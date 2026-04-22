@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from core.time_utils import now_cn
 
@@ -73,6 +73,13 @@ class DocumentRef(BaseModel):
     invoice_num: str = Field(default="", description="发票号")
     check_number: str = Field(default="", description="付款单号")
     vendor_name: str = Field(default="", description="供应商名称")
+
+    # TECH-DEBT(#12): 上游规则引擎可能传入 None，需在模型层防御
+    @field_validator("po_number", "gr_number", "invoice_num", "check_number", "vendor_name", mode="before")
+    @classmethod
+    def _coerce_none_to_empty(cls, v: object) -> object:
+        """Coerce None to empty string to prevent ValidationError from upstream data."""
+        return "" if v is None else v
 
 
 class AnomalyDetail(BaseModel):
