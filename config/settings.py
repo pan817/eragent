@@ -479,6 +479,37 @@ class IntentRoutingSettings(BaseSettings):
     model_config = {"env_prefix": "INTENT_ROUTING_"}
 
 
+class PlanAndSolveSettings(BaseSettings):
+    """Plan and Solve 规划器配置。
+
+    控制 Plan and Solve 路径的开关、模型选择、超时与校验行为。
+    失败时降级到 ReAct 兜底，因此任何字段都不会造成比当前更差的表现。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Plan and Solve 总开关：关闭时 L3 兜底一律走 ReAct（保持历史行为）",
+    )
+    use_fast_model: bool = Field(
+        default=True,
+        description="True 用 llm_fast（推荐，性能优先），False 用 llm 主模型",
+    )
+    max_planning_tokens: int = Field(
+        default=2000,
+        description="Planning LLM 最大输出 token 数",
+    )
+    planning_timeout_sec: int = Field(
+        default=30,
+        description="Planning 阶段超时（秒），超时降级到 ReAct",
+    )
+    validate_plan: bool = Field(
+        default=True,
+        description="是否校验 LLM 生成的计划（工具名合法性、依赖结构）",
+    )
+
+    model_config = {"env_prefix": "PLAN_SOLVE_"}
+
+
 class TTLSettings(BaseSettings):
     """各记忆类型的 TTL 配置（天数，0=不过期）。"""
 
@@ -625,6 +656,7 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     intent_routing: IntentRoutingSettings = Field(default_factory=IntentRoutingSettings)
+    plan_and_solve: PlanAndSolveSettings = Field(default_factory=PlanAndSolveSettings)
     graphiti_etl: Any = Field(default_factory=dict)
 
     @field_validator("graphiti_etl", mode="before")

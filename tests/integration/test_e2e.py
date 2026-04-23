@@ -171,6 +171,37 @@ class TestE2EComprehensive:
         assert len(data["report_markdown"]) > 100
 
 
+class TestE2EPlanAndSolve:
+    """Plan and Solve 路径真实 LLM 端到端测试。
+
+    触发条件：DATA_LOOKUP 快捷路径 miss 或无静态 DAG 模板的 ANALYSIS。
+    查询需要步骤可预判（典型："查询最近 7 天的采购订单"），验证 Planner
+    能生成合法计划 → DAGExecutor 并行执行 → ReportAgent 汇总。
+    """
+
+    def test_recent_procurement_query_via_plan_and_solve(
+        self, e2e_client: TestClient
+    ) -> None:
+        """步骤可预判的探索性查询应走 PS 路径并成功返回。
+
+        该类查询过去会走 ReAct（3-4 轮 LLM）；PS 路径用 1 次 planning + 1 次 report
+        完成同等分析，断言 status=success + 非空报告即视为通过，不对 route_type
+        作强断言（若 PS 真实 LLM 偶发返回 plannable=false，降级 ReAct 也应成功）。
+        """
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
+            "query": "查询最近 7 天的采购订单概况",
+            "time_range_days": 7,
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert len(data["report_markdown"]) > 50
+        # 路由信息应被注入 summary（route_type 可能是 plan_and_solve / agent / DAG）
+        route_type = data.get("summary", {}).get("route_type")
+        assert route_type in {"plan_and_solve", "agent", "DAG", "lookup_shortcut"}
+
+
 class TestE2ECustomTimeRange:
     """自定义时间范围端到端测试。"""
 

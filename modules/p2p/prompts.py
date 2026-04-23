@@ -386,3 +386,191 @@ def get_tool_strategy_prompt() -> str:
         return _PG_STRATEGY_PROMPT
     else:  # hybrid / graphiti
         return _HYBRID_STRATEGY_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Plan and Solve Planning Prompt
+# ---------------------------------------------------------------------------
+
+# 工具分类顺序（与 _PG_STRATEGY_PROMPT / _HYBRID_STRATEGY_PROMPT 保持一致）
+_PLANNING_TOOL_CATEGORIES: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "data_query",
+        "精确查询（已知条件查具体记录）",
+        (
+            "query_purchase_orders",
+            "query_receipts",
+            "query_goods_receipts",
+            "query_invoices",
+            "query_vendor_invoices",
+            "query_payments",
+            "query_vendor_master",
+        ),
+    ),
+    (
+        "rule_check",
+        "规则检测（检查合规性）",
+        (
+            "run_three_way_match",
+            "run_price_variance_analysis",
+            "calculate_ppv",
+            "run_payment_compliance_check",
+            "validate_compliance",
+            "calculate_supplier_kpis",
+            "get_vendor_scorecard",
+        ),
+    ),
+    (
+        "aggregation",
+        "聚合统计（汇总分析）",
+        (
+            "calculate_spend_analysis",
+            "analyze_vendor_concentration",
+            "calculate_po_cycle_time",
+            "detect_duplicate_invoices",
+            "analyze_discount_utilization",
+        ),
+    ),
+    (
+        "graph_entity",
+        "实体探索（定位和了解实体）",
+        (
+            "get_entity_detail",
+            "search_knowledge_graph",
+        ),
+    ),
+    (
+        "graph_relation",
+        "关系发现（探索关联和路径）",
+        (
+            "query_entity_relationships",
+            "find_path_between",
+            "trace_procurement_chain",
+            "query_entity_timeline",
+        ),
+    ),
+    (
+        "graph_anomaly",
+        "异常检测（发现结构性问题）",
+        (
+            "detect_graph_anomalies",
+            "query_risk_impact",
+        ),
+    ),
+    (
+        "graph_compare",
+        "对比与画像（多维度分析）",
+        (
+            "compare_entities",
+            "query_supplier_profile",
+            "find_contract_coverage",
+            "find_competing_suppliers",
+        ),
+    ),
+]
+
+
+def _extract_tool_signature(tool: Any) -> tuple[str, str, str]:
+    """从 LangChain @tool 对象提取 (名称, 一句话说明, 参数摘要)。"""
+    name: str = getattr(tool, "name", None) or getattr(tool, "__name__", "")
+    desc: str = (getattr(tool, "description", "") or "").strip()
+    first_line = desc.split("\n", 1)[0] if desc else ""
+
+    args_schema: dict[str, Any] = {}
+    if hasattr(tool, "args") and isinstance(tool.args, dict):
+        args_schema = tool.args
+
+    arg_parts: list[str] = []
+    for arg_name, arg_meta in args_schema.items():
+        arg_type = ""
+        if isinstance(arg_meta, dict):
+            arg_type = arg_meta.get("type") or arg_meta.get("anyOf", [{}])[0].get("type", "")
+        arg_parts.append(f"{arg_name}:{arg_type}" if arg_type else arg_name)
+    args_repr = ", ".join(arg_parts) if arg_parts else "无参数"
+
+    return name, first_line, args_repr
+
+
+def format_tools_for_planning(tools: list[Any]) -> str:
+    """将工具列表按 P2P 模块分类方式格式化为 Planning Prompt 可读文本。
+
+    未在 ``_PLANNING_TOOL_CATEGORIES`` 中声明的工具归入"其他工具"分组，
+    避免工具新增后被 Planner 漏掉。
+    """
+    by_name: dict[str, Any] = {}
+    for tool in tools:
+        name = getattr(tool, "name", None) or getattr(tool, "__name__", "")
+        if name:
+            by_name[name] = tool
+
+    used: set[str] = set()
+    sections: list[str] = []
+    for _key, title, names in _PLANNING_TOOL_CATEGORIES:
+        group_lines: list[str] = []
+        for name in names:
+            tool = by_name.get(name)
+            if tool is None:
+                continue
+            used.add(name)
+            tname, tdesc, targs = _extract_tool_signature(tool)
+            group_lines.append(f"- `{tname}` ({targs}) — {tdesc}" if tdesc else f"- `{tname}` ({targs})")
+        if group_lines:
+            sections.append(f"### {title}\n" + "\n".join(group_lines))
+
+    # 其他工具（防止新增工具遗漏）
+    leftover = sorted(set(by_name) - used)
+    if leftover:
+        group_lines = []
+        for name in leftover:
+            tname, tdesc, targs = _extract_tool_signature(by_name[name])
+            group_lines.append(f"- `{tname}` ({targs}) — {tdesc}" if tdesc else f"- `{tname}` ({targs})")
+        sections.append("### 其他工具\n" + "\n".join(group_lines))
+
+    return "\n\n".join(sections) if sections else "（无可用工具）"
+
+
+_PLANNING_PROMPT_TEMPLATE = """你是 ERP 采购分析系统的执行规划器，负责在拿到用户查询后，一次性生成后续工具调用的完整计划（Plan and Solve 模式）。
+
+## 当前时间范围
+最近 {time_range_days} 天（0 表示不限时间）。涉及相对时间（"最近"/"本月"等）时以此为准。
+
+## 可用工具
+{tools_section}
+
+## 用户查询
+{query}
+
+## 已解析参数（来自路由层；优先直接填入 inputs）
+{params_json}
+
+## 规划规则（务必严格遵守）
+1. **判定 plannable**：
+   - `plannable=true`：拿到查询即可确定"调哪些工具 + 填什么参数 + 步骤间依赖"，且不需要根据中间结果改变策略。
+   - `plannable=false`：查询需要根据上一步的具体返回值决定下一步（如"先查 PO，发现异常再决定追收货还是发票"），或可用工具无法覆盖需求。
+     → 此时 `tasks` 留空数组，由系统降级到 ReAct。
+2. **工具选择**：`tool_name` 必须来自上文"可用工具"列表；不存在的工具名会导致计划被丢弃。
+3. **参数填充**：`inputs` 直接填实际值，不使用占位符。已解析参数为空字符串时保留空串（含义为"不过滤"），不要编造值。
+4. **依赖关系**：数据查询任务 `depends_on=[]`；规则/聚合工具必须依赖至少一个数据查询任务。
+5. **并行优化**：相互独立的数据查询任务 `depends_on=[]`，执行器会自动并行。
+6. **报告节点**：{report_tool_hint}
+7. **任务数量**：单个计划不超过 8 个 task（含报告节点）。
+8. **task_id**：短字符串（如 `t1`/`t_po`/`t_report`），同一计划内唯一。
+
+## 输出
+通过结构化工具调用返回 `ExecutionPlan`。除工具调用外不要输出任何自然语言。
+"""
+
+
+def build_planning_prompt_template() -> str:
+    """返回 Plan and Solve Planning Prompt 模板（含 P2P 模块的报告工具约定）。"""
+    return _PLANNING_PROMPT_TEMPLATE
+
+
+def get_planning_report_tool_hint() -> str:
+    """报告节点命名约定提示词（注入 Planning Prompt 的 ``{report_tool_hint}`` 占位符）。"""
+    return (
+        "除 plannable=false 外，计划必须以一个 `tool_name=\"generate_summary_report\"` 的"
+        "任务作为终点（`inputs.scenario` 写一句话场景描述，`output_key=\"report\"`，"
+        "`depends_on` 指向所有前置数据/规则任务）。系统会把 DAG 节点的输出"
+        "交给 ReportAgent 汇总成最终 Markdown 报告。"
+    )

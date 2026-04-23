@@ -302,6 +302,15 @@ intent_routing:
   generic_template_enabled: true    # 开启通用 DAG 模板（概览类查询走 DAG 并行）
   lookup_shortcut_enabled: true     # 开启 lookup 快捷路径（纯数据查询跳过 ReAct）
 
+# Plan and Solve 规划器：在无静态 DAG 模板且不需要动态决策时接管 ReAct 路径
+# 查询步骤可预判时，先由 LLM 生成 DAG 计划再并行执行，替代 ReAct 多轮串行
+plan_and_solve:
+  enabled: true                # 总开关；关闭时全部回退到 ReAct 兜底
+  use_fast_model: true         # true=llm_fast（性能优先），false=llm 主模型
+  max_planning_tokens: 2000    # Planning 输出 token 上限
+  planning_timeout_sec: 30     # Planning 超时（秒），超时即降级 ReAct
+  validate_plan: true          # 校验 LLM 生成的计划（工具名/依赖合法性）
+
 logging:
   level: "INFO"
   format: "console"            # json | console（生产推荐 json 便于采集）

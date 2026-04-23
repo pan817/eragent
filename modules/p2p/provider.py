@@ -102,3 +102,19 @@ class P2PModuleProvider:
         from modules.p2p.prompts import trim_to_token_budget
 
         return trim_to_token_budget(text, max_tokens, label)
+
+    def get_planning_prompt_template(self) -> str:
+        from modules.p2p.prompts import (
+            build_planning_prompt_template,
+            get_planning_report_tool_hint,
+        )
+
+        template = build_planning_prompt_template()
+        return template.replace(
+            "{report_tool_hint}", get_planning_report_tool_hint()
+        )
+
+    def format_tools_for_planning(self, tools: list[Any]) -> str:
+        from modules.p2p.prompts import format_tools_for_planning
+
+        return format_tools_for_planning(tools)

@@ -145,6 +145,7 @@ class Orchestrator:
         self._dag_executor: Any = None
         self._report_agent: Any = None
         self._registry: Any = None
+        self._planner: Any = None
         self._lock = threading.RLock()
         self._init_components()
         from core.memory.manager import MemoryManager
@@ -266,6 +267,23 @@ class Orchestrator:
                 from core.orchestrator.dag.registry import build_default_registry
                 self._registry = build_default_registry()
         return self._registry
+
+    @property
+    def _lazy_planner(self) -> Any:
+        """延迟初始化 Plan and Solve Planner。
+
+        与 ``_lazy_agent`` / ``_lazy_dag_executor`` 同模式：首次访问时构建，
+        之后复用同一实例（Planner 内部的工具清单缓存按工具名指纹匹配，
+        模式切换自动失效，无需显式重建）。
+        """
+        if self._planner is None:
+            from core.orchestrator.planner import Planner
+
+            self._planner = Planner(
+                settings=self._settings,
+                provider=self._provider,
+            )
+        return self._planner
 
     @property
     def _lazy_dag_executor(self) -> Any:
@@ -775,6 +793,17 @@ class Orchestrator:
                         and not _wants_graph)
                 )
 
+            # Plan and Solve 入口判定（Q2 决策）：
+            # - is_recall / low_confidence → 继续 ReAct（回溯查询需读短期记忆，低置信度意图模糊）
+            # - is_data_lookup（lookup 快捷路径已 miss）/ 无静态 DAG 模板的 ANALYSIS → 先尝试 PS
+            # - 静态 DAG 命中 → 直接 DAG，不走 PS
+            use_plan_and_solve = (
+                self._settings.plan_and_solve.enabled
+                and not use_dag
+                and not is_recall
+                and not low_confidence
+            )
+
             # ── output_mode 自适应解析 ──────────────────────────────────────────
             # 解析顺序：
             #   1) 显式 detailed/brief/table/chat → 严格尊重，不做任何覆盖
@@ -796,9 +825,9 @@ class Orchestrator:
                     else:
                         effective_output_mode = "detailed"
                         _logger.info("output_mode auto → 'detailed' (default for non-lookup)")
-                if use_dag and effective_output_mode == "chat":
+                if (use_dag or use_plan_and_solve) and effective_output_mode == "chat":
                     _logger.info(
-                        "output_mode 'chat' downgraded to 'brief' on DAG path "
+                        "output_mode 'chat' downgraded to 'brief' on DAG/PS path "
                         "(ReportAgent requires structured output)"
                     )
                     effective_output_mode = "brief"
@@ -810,45 +839,85 @@ class Orchestrator:
                 om_attrs["has_prompt"] = bool(output_mode_prompt)
                 om_attrs["status"] = "ok"
 
+            if use_dag:
+                _path_label = "DAG"
+            elif use_plan_and_solve:
+                _path_label = "plan_and_solve"
+            else:
+                _path_label = "agent"
             _logger.info(
                 "route decision: path=%s analysis_type=%s days=%d entities=%s",
-                "DAG" if use_dag else "agent",
+                _path_label,
                 analysis_type.value,
                 time_range_days,
                 {k: v for k, v in parsed_params.items() if k != "days" and v},
             )
 
-            # trace span: 标记执行路径（DAG / agent），便于命中率聚合
+            # trace span: 标记执行路径（DAG / plan_and_solve / agent），便于命中率聚合
             from core.observability.tracing import record_span
             with record_span("orchestrator", "route_execution") as exec_attrs:
-                exec_attrs["execution"] = "dag" if use_dag else "agent"
+                exec_attrs["execution"] = _path_label
                 exec_attrs["analysis_type"] = analysis_type.value
                 exec_attrs["route_level"] = signal.route_level
                 exec_attrs["confidence"] = signal.confidence
                 exec_attrs["l3_threshold_used"] = self._settings.intent_routing.l3_dag_min_confidence
 
-            stage_name = "dag_planned" if use_dag else "react_started"
+            if use_dag:
+                stage_name = "dag_planned"
+            elif use_plan_and_solve:
+                stage_name = "plan_and_solve_started"
+            else:
+                stage_name = "react_started"
             _publish_stage_safe(
                 stage_name,
                 {"analysis_type": analysis_type.value},
             )
-            result = await self._execute_dag(
-                analysis_type=analysis_type,
-                params=parsed_params,
-                query=enhanced_query,
-                report_id=report_id,
-                trace_id=trace_id,
-                user_id=request.user_id,
-                session_id=session_id,
-                time_range_days=time_range_days,
-                start_time=start_time,
-                signal=signal,
-                output_mode_prompt=output_mode_prompt,
-                use_agent_fallback=not use_dag,
-                context_summary=session_ctx.get("context_summary", ""),
-                skip_memory_write=is_recall,
-                generic_template_key=generic_template_key,
-            )
+
+            result: AnalysisResult | None = None
+            if use_plan_and_solve:
+                result = await self._try_plan_and_solve(
+                    analysis_type=analysis_type,
+                    params=parsed_params,
+                    query=enhanced_query,
+                    report_id=report_id,
+                    trace_id=trace_id,
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    time_range_days=time_range_days,
+                    start_time=start_time,
+                    signal=signal,
+                    output_mode_prompt=output_mode_prompt,
+                    context_summary=session_ctx.get("context_summary", ""),
+                    skip_memory_write=is_recall,
+                )
+                if result is None:
+                    # PS 失败（超时 / 不可规划 / 校验不通过）→ 降级到 ReAct
+                    _publish_stage_safe(
+                        "react_started",
+                        {
+                            "analysis_type": analysis_type.value,
+                            "fallback_from": "plan_and_solve",
+                        },
+                    )
+
+            if result is None:
+                result = await self._execute_dag(
+                    analysis_type=analysis_type,
+                    params=parsed_params,
+                    query=enhanced_query,
+                    report_id=report_id,
+                    trace_id=trace_id,
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    time_range_days=time_range_days,
+                    start_time=start_time,
+                    signal=signal,
+                    output_mode_prompt=output_mode_prompt,
+                    use_agent_fallback=not use_dag,
+                    context_summary=session_ctx.get("context_summary", ""),
+                    skip_memory_write=is_recall,
+                    generic_template_key=generic_template_key,
+                )
 
             # 5. 持久化（非分析意图的回溯查询不写入长期记忆和报告，
             #    避免 "Q: 上次分析的结果呢 A: ..." 被存入记忆产生循环引用）
@@ -978,6 +1047,142 @@ class Orchestrator:
             duration_ms=duration_ms,
         )
 
+    # ── Plan and Solve 路径 ─────────────────────────────────────────
+
+    async def _try_plan_and_solve(
+        self,
+        *,
+        analysis_type: AnalysisType,
+        params: dict[str, Any],
+        query: str,
+        report_id: str,
+        trace_id: str,
+        user_id: str,
+        session_id: str,
+        time_range_days: int,
+        start_time: float,
+        signal: Any,
+        output_mode_prompt: str = "",
+        context_summary: str = "",
+        skip_memory_write: bool = False,
+    ) -> AnalysisResult | None:
+        """Plan and Solve 兜底路径。
+
+        用一次 LLM 调用生成 DAG 计划，交 DAGExecutor 并行执行；成功返回
+        ``AnalysisResult``（由 ``_analyze_inner`` 统一持久化），失败返回
+        ``None`` 让调用方降级到 ReAct。
+
+        任何失败（超时 / plannable=False / 校验不通过 / LLM 异常）都记录
+        WARNING 级日志 + trace span，并返回 None。
+        """
+        from core.observability.tracing import record_span
+
+        ps_cfg = self._settings.plan_and_solve
+        planner = self._lazy_planner
+
+        _ps_start = time.monotonic()
+        with record_span("orchestrator", "plan_and_solve") as ps_attrs:
+            ps_attrs["query"] = query[:200]
+            ps_attrs["time_range_days"] = time_range_days
+
+            tools = self._provider.get_tools() if self._provider is not None else []
+
+            # 1. Planning 阶段
+            try:
+                plan = await asyncio.wait_for(
+                    planner.plan(
+                        query=query,
+                        tools=tools,
+                        params=params,
+                        time_range_days=time_range_days,
+                    ),
+                    timeout=ps_cfg.planning_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                ps_attrs["status"] = "fallback_to_react"
+                ps_attrs["fallback_reason"] = "planning_timeout"
+                ps_attrs["timeout_sec"] = ps_cfg.planning_timeout_sec
+                _logger.warning(
+                    "plan_and_solve planning timeout (%ds), fallback to ReAct",
+                    ps_cfg.planning_timeout_sec,
+                )
+                return None
+
+            planning_duration_ms = (time.monotonic() - _ps_start) * 1000.0
+            ps_attrs["planning_duration_ms"] = round(planning_duration_ms, 2)
+            ps_attrs["plannable"] = plan.plannable
+            ps_attrs["task_count"] = len(plan.tasks)
+            ps_attrs["reasoning"] = (plan.reasoning or "")[:300]
+
+            _publish_stage_safe(
+                "plan_generated",
+                {
+                    "plannable": plan.plannable,
+                    "task_count": len(plan.tasks),
+                    "reasoning": (plan.reasoning or "")[:200],
+                },
+                duration_ms=planning_duration_ms,
+            )
+
+            if not plan.plannable:
+                ps_attrs["status"] = "fallback_to_react"
+                ps_attrs["fallback_reason"] = "not_plannable"
+                _logger.info(
+                    "plan_and_solve not plannable: %s, fallback to ReAct",
+                    plan.reasoning,
+                )
+                return None
+
+            # 2. 校验
+            if ps_cfg.validate_plan:
+                from core.orchestrator.planner import Planner as _Planner
+
+                errors = _Planner.validate_plan(plan, self._lazy_tool_registry)
+                if errors:
+                    ps_attrs["status"] = "fallback_to_react"
+                    ps_attrs["fallback_reason"] = "validation_failed"
+                    ps_attrs["validation_errors"] = errors
+                    _logger.warning(
+                        "plan_and_solve validation failed: %s, fallback to ReAct",
+                        errors,
+                    )
+                    return None
+
+            # 3. 计划转 DAG 任务
+            dag_tasks = planner.plan_to_tasks(plan)
+            ps_attrs["status"] = "ok"
+            ps_attrs["tools"] = [t.get("tool_name", "") for t in dag_tasks]
+
+        # 4. 复用 _execute_dag 执行（含记忆写入、结果封装）
+        result = await self._execute_dag(
+            analysis_type=analysis_type,
+            params=params,
+            query=query,
+            report_id=report_id,
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            time_range_days=time_range_days,
+            start_time=start_time,
+            signal=signal,
+            output_mode_prompt=output_mode_prompt,
+            use_agent_fallback=False,
+            context_summary=context_summary,
+            skip_memory_write=skip_memory_write,
+            precomputed_tasks=dag_tasks,
+            route_type_override="plan_and_solve",
+        )
+
+        # 把 planning 元信息附加到 summary（便于可观测性聚合）
+        if result.summary is not None:
+            result.summary.setdefault("plan_reasoning", plan.reasoning)
+            result.summary.setdefault("plan_task_count", len(dag_tasks))
+            result.summary.setdefault(
+                "plan_planning_duration_ms", round(planning_duration_ms, 2)
+            )
+
+        return result
+
     # ── DAG 执行路径 ────────────────────────────────────────────────
 
     async def _execute_dag(
@@ -997,19 +1202,27 @@ class Orchestrator:
         context_summary: str = "",
         skip_memory_write: bool = False,
         generic_template_key: str | None = None,
+        precomputed_tasks: list[dict[str, Any]] | None = None,
+        route_type_override: str | None = None,
     ) -> AnalysisResult:
         """通过 DAG Executor 执行分析（统一入口）。
 
         当 use_agent_fallback=True 或 DAG 模板不可用时，构造单节点 agent DAG
         交由 DAGExecutor 执行，等价于原 _execute_react 的行为。
+
+        ``precomputed_tasks`` 非空时（Plan and Solve 路径）直接使用传入的
+        DAG 任务列表，跳过模板加载与 DAGValidator 校验（调用方负责校验）。
+        ``route_type_override`` 在结果 summary 中覆盖默认的 "DAG" 标识。
         """
         from core.orchestrator.dag.templates import load_dag_template, load_generic_template
         from core.orchestrator.dag.validator import DAGValidator
 
         is_agent_path = use_agent_fallback
-        dag_tasks = None
+        dag_tasks: list[dict[str, Any]] | None = None
 
-        if not use_agent_fallback:
+        if precomputed_tasks is not None and not use_agent_fallback:
+            dag_tasks = precomputed_tasks
+        elif not use_agent_fallback:
             # L2.5 案例命中 → 优先复用 dag_hint（跳过模板加载）
             if getattr(signal, "dag_hint", None):
                 dag_tasks = signal.dag_hint
@@ -1220,7 +1433,7 @@ class Orchestrator:
             failed_tasks=failed_list,
             error=error_info,
             summary={
-                "route_type": "DAG",
+                "route_type": route_type_override or "DAG",
                 "route_level": signal.route_level,
                 "route_confidence": signal.confidence,
                 "route_reasoning": signal.reasoning,
