@@ -74,6 +74,8 @@ _STAGE_LABELS: dict[str, str] = {
     "dag_planned": "分析计划生成",
     "react_started": "开始智能分析",
     "lookup_shortcut": "快速查询",
+    "plan_and_solve_started": "规划分析路径",
+    "plan_generated": "执行计划就绪",
 }
 
 
