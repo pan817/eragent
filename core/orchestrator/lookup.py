@@ -1,12 +1,18 @@
 """DATA_LOOKUP 快捷路径。
 
-对被识别为 DATA_LOOKUP 的查询，根据已提取的实体编号或 query 关键词
-直接调用对应 query_* 工具，跳过 ReAct Agent，实现零 LLM 消耗的事实查询。
+仅处理用户显式给出实体编号的精确事实查询，直接调用对应 query_* 工具，
+零 LLM 消耗。其余 DATA_LOOKUP 查询（无编号/仅含关键词）交由 Plan and Solve
+路径接管，由 Planner 按语义生成工具组合计划。
 
-两条路径（共享 lookup_shortcut_enabled 开关）：
-- 路径 A：有实体编号（po_number / invoice_num 等）→ 精确查询
-- 路径 B：无编号但有实体类型关键词（"查最新PO"）→ 默认参数查询
-- 两者均未命中 → 返回 None，由 orchestrator 降级到 ReAct
+只剩一条路径：
+- 有实体编号（po_number / invoice_num / check_number / vendor_id）→ 精确查询
+- 否则返回 None，由 orchestrator 进入 Plan and Solve（或降级 ReAct）
+
+历史上曾有"路径 B：关键词推断"——含"采购订单/发票/付款"等词时直接映射到
+对应 query_* 工具，零 LLM 返回表格。该路径在 PS 上线后废弃，原因：
+贪心关键词匹配会把"查询最近 N 天采购订单概况"这类本应综合分析的查询
+误拦成"列表表格"，用户体验由"慢但正解"降级到"快但错解"；PS 对同类查询的
+规划是确定性的（query_* + report），虽多 2-5s 延迟但语义正确。
 """
 
 from __future__ import annotations
@@ -73,28 +79,26 @@ def resolve_lookup_tool(
     params: dict[str, Any],
     query: str,
 ) -> tuple[str, dict[str, Any]] | None:
-    """根据实体/关键词确定应调用的工具和参数。
+    """根据实体编号确定应调用的工具和参数。
+
+    仅当 ``params`` 含 ``po_number`` / ``invoice_num`` / ``check_number`` /
+    ``vendor_id`` 任一实体编号时返回工具映射；否则返回 None，由调用方进入
+    Plan and Solve 路径。
 
     Returns:
-        (tool_name, tool_kwargs) 或 None（无法确定，应降级 ReAct）。
+        (tool_name, tool_kwargs) 或 None。
         特殊返回 tool_name="__supplier_combo__" 表示需要双工具调用。
     """
-    days = params.get("days", 30)
     limit = params.get("limit", 0)
     order_by = params.get("order_by", "")
 
-    # 从 params 中取 limit/order_by（统一 LLM 已提取）
-    # _parse_query_constraints 作为兜底（LLM 未提取时）
+    # 从 query 解析数量/排序兜底（LLM 未提取时）
     if not limit and not order_by:
         q_limit, q_order = _parse_query_constraints(query)
         if q_limit:
             limit = q_limit
         if q_order:
             order_by = q_order
-
-    # 有 limit 意图时放宽 days
-    if limit and days <= 30:
-        days = 365
 
     # 注意：跨实体检测已由统一 LLM 的 is_cross_entity 判断，
     # 在 orchestrator 层拦截（不进入此函数）。
@@ -107,7 +111,7 @@ def resolve_lookup_tool(
             base["order_by"] = order_by
         return base
 
-    # 路径 A：有实体编号 → 不限时间（用户明确指定的实体可能创建于任何时间）
+    # 有实体编号 → 不限时间（用户明确指定的实体可能创建于任何时间）
     for entity_field, tool_name, param_map in _ENTITY_TOOL_MAP:
         entity_val = params.get(entity_field)
         if entity_val:
@@ -116,7 +120,7 @@ def resolve_lookup_tool(
                 kwargs[tool_param] = params[source_field]
             return tool_name, _with_constraints(kwargs)
 
-    # 路径 A 特殊分支：vendor_id（双工具调用）→ 不限时间
+    # vendor_id 特殊分支（双工具调用）→ 不限时间
     vendor_id = params.get("vendor_id")
     if vendor_id:
         return "__supplier_combo__", _with_constraints({
@@ -124,15 +128,7 @@ def resolve_lookup_tool(
             "days": 0,
         })
 
-    # 路径 B：关键词推断
-    from modules.p2p.intent_rules import LOOKUP_KEYWORD_TOOL_MAP
-
-    q_lower = query.lower()
-    for keywords, tool_name, defaults in LOOKUP_KEYWORD_TOOL_MAP:
-        if any(kw in q_lower for kw in keywords):
-            kwargs = {**defaults, "days": days}
-            return tool_name, _with_constraints(kwargs)
-
+    # 无实体编号：不再按关键词推断，让 Plan and Solve 接管
     return None
 
 

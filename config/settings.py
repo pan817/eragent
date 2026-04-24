@@ -473,7 +473,7 @@ class IntentRoutingSettings(BaseSettings):
     )
     lookup_shortcut_enabled: bool = Field(
         default=True,
-        description="DATA_LOOKUP 快捷路径开关：开启时有实体/关键词的事实查询直调工具，关闭时一律走 ReAct",
+        description="DATA_LOOKUP 快捷路径开关：开启时仅当 query 含明确实体编号（PO/INV/PAY/SUP）时直调工具；无实体编号的查询交由 Plan and Solve 接管",
     )
 
     model_config = {"env_prefix": "INTENT_ROUTING_"}

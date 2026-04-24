@@ -754,8 +754,8 @@ class Orchestrator:
                             lookup_result, session_id, parsed_params,
                         )
                     return lookup_result
-                # 快捷路径未命中，降级到 ReAct
-                _logger.info("lookup shortcut miss, fallback to ReAct")
+                # 无实体编号 → lookup 快捷路径不接，交由 Plan and Solve 或 ReAct 接管
+                _logger.info("lookup shortcut miss (no entity id), proceed to PS/ReAct")
 
             if is_recall or is_data_lookup or low_confidence:
                 use_dag = False

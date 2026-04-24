@@ -37,38 +37,6 @@ ANALYSIS_KEYWORDS: set[str] = {
     "重复", "周期", "集中度", "风险",
 }
 
-# DATA_LOOKUP 关键词 → query 工具映射（路径 B：无实体编号时按关键词推断工具）
-# 每个条目：(关键词集合, 工具名, 默认参数)
-# 匹配优先级按列表顺序，首个命中即返回
-LOOKUP_KEYWORD_TOOL_MAP: list[tuple[set[str], str, dict[str, str | int]]] = [
-    (
-        {"po", "po号", "采购单", "采购订单"},
-        "query_purchase_orders",
-        {"days": 30},
-    ),
-    (
-        {"发票", "invoice", "inv"},
-        "query_invoices",
-        {"days": 30},
-    ),
-    (
-        {"付款", "付款单", "payment", "支付单", "支付", "付款记录", "应付"},
-        "query_payments",
-        {"days": 30},
-    ),
-    (
-        {"收货", "收货单", "receipt", "rcv", "gr"},
-        "query_receipts",
-        {"days": 30},
-    ),
-    (
-        {"供应商", "supplier", "sup"},
-        "query_vendor_master",
-        {},
-    ),
-]
-
-
 # L3 分析师角色描述
 ROLE_DESCRIPTIONS: dict[str, str] = {
     "general": "",

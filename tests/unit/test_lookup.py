@@ -1,10 +1,12 @@
 """DATA_LOOKUP 快捷路径单元测试。
 
 覆盖场景：
-- resolve_lookup_tool：路径 A（实体编号）/ 路径 B（关键词推断）/ 未命中
+- resolve_lookup_tool：有实体编号命中工具 / 无实体编号返回 None（交给 PS）
 - format_lookup_result：各实体类型的 Markdown 格式化
 - execute_lookup：工具调用成功 / 工具未注册 / 调用异常
-- 配置开关 lookup_shortcut_enabled 关闭时的行为
+
+注：历史上的"路径 B 关键词推断"已废弃（含"采购订单/发票"等词会误拦
+本应由 PS 综合分析的查询），resolve_lookup_tool 在无实体编号时统一返回 None。
 """
 
 from __future__ import annotations
@@ -80,44 +82,23 @@ class TestResolveLookupTool:
         tool_name, _ = result
         assert tool_name == "query_purchase_orders"
 
-    def test_path_b_keyword_po(self) -> None:
-        """路径 B：关键词推断 → query_purchase_orders。"""
-        result = resolve_lookup_tool({"days": 30}, "查最新的采购订单")
-        assert result is not None
-        tool_name, kwargs = result
-        assert tool_name == "query_purchase_orders"
-        assert kwargs["days"] == 30
+    def test_no_entity_id_returns_none_even_with_keywords(self) -> None:
+        """无实体编号时，即使 query 含"采购订单/发票"等词也应返回 None（交给 PS）。
 
-    def test_path_b_keyword_invoice(self) -> None:
-        """路径 B：关键词推断 → query_invoices。"""
-        result = resolve_lookup_tool({"days": 30}, "列出最近的发票")
-        assert result is not None
-        tool_name, _ = result
-        assert tool_name == "query_invoices"
+        回归保护：历史上曾因"路径 B 关键词推断"把这类查询误拦成 lookup。
+        """
+        for q in (
+            "查最新的采购订单",
+            "列出最近的发票",
+            "看看最近的付款记录",
+            "查最近的收货单",
+            "查看供应商列表",
+            "最近 7 天的采购订单概况",
+        ):
+            assert resolve_lookup_tool({"days": 30}, q) is None, q
 
-    def test_path_b_keyword_payment(self) -> None:
-        """路径 B：关键词推断 → query_payments。"""
-        result = resolve_lookup_tool({"days": 30}, "看看最近的付款记录")
-        assert result is not None
-        tool_name, _ = result
-        assert tool_name == "query_payments"
-
-    def test_path_b_keyword_receipt(self) -> None:
-        """路径 B：关键词推断 → query_receipts。"""
-        result = resolve_lookup_tool({"days": 30}, "查最近的收货单")
-        assert result is not None
-        tool_name, _ = result
-        assert tool_name == "query_receipts"
-
-    def test_path_b_keyword_supplier(self) -> None:
-        """路径 B：关键词推断 → query_vendor_master。"""
-        result = resolve_lookup_tool({"days": 30}, "查看供应商列表")
-        assert result is not None
-        tool_name, _ = result
-        assert tool_name == "query_vendor_master"
-
-    def test_limit_and_order_by_passthrough_path_a(self) -> None:
-        """路径 A：limit/order_by 透传到 kwargs。"""
+    def test_limit_and_order_by_passthrough_with_entity(self) -> None:
+        """有实体编号时 limit/order_by 仍正确透传。"""
         result = resolve_lookup_tool(
             {"po_number": "PO-001", "days": 30, "limit": 1, "order_by": "date_desc"},
             "查看最新的一个PO",
@@ -128,41 +109,17 @@ class TestResolveLookupTool:
         assert kwargs["limit"] == 1
         assert kwargs["order_by"] == "date_desc"
 
-    def test_limit_and_order_by_passthrough_path_b(self) -> None:
-        """路径 B：limit/order_by 透传到 kwargs。"""
-        result = resolve_lookup_tool(
-            {"days": 30, "limit": 5, "order_by": "amount_desc"},
-            "金额最大的5笔付款",
-        )
-        assert result is not None
-        tool_name, kwargs = result
-        assert tool_name == "query_payments"
-        assert kwargs["limit"] == 5
-        assert kwargs["order_by"] == "amount_desc"
-
-    def test_no_limit_order_by_when_absent(self) -> None:
-        """不传 limit/order_by 时 kwargs 中不出现这些键。"""
-        result = resolve_lookup_tool({"days": 30}, "查最新的采购订单")
-        assert result is not None
-        _, kwargs = result
-        assert "limit" not in kwargs
-        assert "order_by" not in kwargs
-
     def test_no_match_returns_none(self) -> None:
-        """无实体无关键词 → None（降级 ReAct）。"""
+        """无实体无法命中 → None（由 orchestrator 进入 PS 或 ReAct）。"""
         result = resolve_lookup_tool({"days": 30}, "帮我查一下")
         assert result is None
 
     def test_receipt_number_not_supported(self) -> None:
-        """receipt_number 不在映射表中（工具缺参数），走路径 B 或兜底。"""
-        # receipt_number 不被路径 A 识别，但 query 中有"收货"可被路径 B 命中
+        """receipt_number 未纳入 lookup 实体映射表，且无其他实体 → None。"""
         result = resolve_lookup_tool(
             {"receipt_number": "RCV-001", "days": 30}, "查看收货单RCV-001"
         )
-        assert result is not None
-        tool_name, _ = result
-        # 路径 A 不识别 receipt_number，路径 B 命中"收货单"关键词
-        assert tool_name == "query_receipts"
+        assert result is None
 
 
 # ── _parse_query_constraints 测试 ─────────────────────────────────────
@@ -206,18 +163,16 @@ class TestParseQueryConstraints:
         assert limit == 0
         assert order == ""
 
-    def test_resolve_uses_constraints(self) -> None:
-        """resolve_lookup_tool should use parsed constraints."""
-        tool_name, kwargs = resolve_lookup_tool({}, "查询最新的一个PO")  # type: ignore
-        assert tool_name == "query_purchase_orders"
+    def test_resolve_uses_constraints_when_entity_present(self) -> None:
+        """有实体编号时，query 中解析出的 limit/order_by 也会透传。"""
+        result = resolve_lookup_tool(
+            {"po_number": "PO-001"}, "查询 PO-001 最新的一个记录",
+        )
+        assert result is not None
+        _, kwargs = result
         assert kwargs.get("limit") == 1
         assert kwargs.get("order_by") == "date_desc"
-        assert kwargs.get("days") == 365  # relaxed from 30
-
-    def test_resolve_relaxes_days_with_limit(self) -> None:
-        """When limit is set, days should be relaxed to 365."""
-        _, kwargs = resolve_lookup_tool({"days": 30}, "最新的一条发票")  # type: ignore
-        assert kwargs["days"] == 365
+        assert kwargs.get("days") == 0  # 有实体编号时不限时间
 
 
 # ── format_lookup_result 测试 ─────────────────────────────────────────
