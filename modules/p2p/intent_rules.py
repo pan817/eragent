@@ -37,6 +37,40 @@ ANALYSIS_KEYWORDS: set[str] = {
     "重复", "周期", "集中度", "风险",
 }
 
+# lookup 快捷路径高置信度关键词映射（四重漏斗之漏斗 #1 "实体类型唯一"）
+# 每条目：(实体类型词集合, 工具名)
+# 相比老版本的 LOOKUP_KEYWORD_TOOL_MAP，刻意剔除：
+#   - 过短易误匹配的简写（inv / rcv / gr / sup）
+#   - 业务术语但语义模糊（应付 / 支付 / 付款记录）
+# 命中规则：query 中有且仅有一组关键词命中（多类别 → miss）。
+LOOKUP_HIGH_CONFIDENCE_KEYWORDS: list[tuple[set[str], str]] = [
+    ({"po", "po号", "采购单", "采购订单"}, "query_purchase_orders"),
+    ({"发票", "invoice"}, "query_invoices"),
+    ({"付款", "付款单", "payment", "支付单"}, "query_payments"),
+    ({"收货", "收货单", "receipt"}, "query_receipts"),
+    ({"供应商", "supplier"}, "query_vendor_master"),
+]
+
+# lookup 黑名单词（四重漏斗之漏斗 #3 "无分析/诊断/概览意图"）
+# query 含任一词 → 判定为综合分析意图，lookup miss 交给 PS。
+# 覆盖三类意图：
+#   - 分析/诊断：异常 / 差异 / 为什么 / 怎么样 / 是否 / 分析 / 对比 / 评估 / 审查 / 原因 / 影响
+#   - 综合概览：概况 / 概览 / 情况 / 健康 / 趋势
+#   - 风险合规：风险 / 合规 / 绩效
+LOOKUP_EXCLUSION_WORDS: set[str] = {
+    "异常", "差异", "为什么", "怎么样", "是否",
+    "概况", "概览", "情况", "分析", "对比", "评估", "审查",
+    "健康", "风险", "合规", "绩效", "趋势", "原因", "影响",
+}
+
+# lookup 关系追溯词（四重漏斗之漏斗 #4 "无关系追溯意图"）
+# query 含任一词 → 可能需要图查询工具，lookup miss 交给 PS/ReAct。
+# 与 orchestrator._matches_graph_query 的词集保持一致，但只保留与 lookup 冲突的核心词。
+LOOKUP_GRAPH_INTENT_WORDS: set[str] = {
+    "链路", "链条", "关联", "关系", "上下游", "追踪", "追溯", "溯源", "路径",
+}
+
+
 # L3 分析师角色描述
 ROLE_DESCRIPTIONS: dict[str, str] = {
     "general": "",

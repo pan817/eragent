@@ -1,12 +1,17 @@
 """DATA_LOOKUP 快捷路径单元测试。
 
 覆盖场景：
-- resolve_lookup_tool：有实体编号命中工具 / 无实体编号返回 None（交给 PS）
+- resolve_lookup_tool 路径 A：实体编号精确查询
+- resolve_lookup_tool 路径 B：四重漏斗高置信度关键词映射
+  · 漏斗 #1 实体类型唯一（单类命中 / 多类或零类 miss）
+  · 漏斗 #2 有数量/排序修饰 或 明确时间窗
+  · 漏斗 #3 无分析/诊断/概览黑名单词
+  · 漏斗 #4 无关系追溯词
 - format_lookup_result：各实体类型的 Markdown 格式化
 - execute_lookup：工具调用成功 / 工具未注册 / 调用异常
 
-注：历史上的"路径 B 关键词推断"已废弃（含"采购订单/发票"等词会误拦
-本应由 PS 综合分析的查询），resolve_lookup_tool 在无实体编号时统一返回 None。
+历史 bad case 回归：
+  "查询最近 7 天的采购订单概况" 等含"概况/异常"等词的查询必须 miss（漏斗 #3）。
 """
 
 from __future__ import annotations
@@ -82,21 +87,6 @@ class TestResolveLookupTool:
         tool_name, _ = result
         assert tool_name == "query_purchase_orders"
 
-    def test_no_entity_id_returns_none_even_with_keywords(self) -> None:
-        """无实体编号时，即使 query 含"采购订单/发票"等词也应返回 None（交给 PS）。
-
-        回归保护：历史上曾因"路径 B 关键词推断"把这类查询误拦成 lookup。
-        """
-        for q in (
-            "查最新的采购订单",
-            "列出最近的发票",
-            "看看最近的付款记录",
-            "查最近的收货单",
-            "查看供应商列表",
-            "最近 7 天的采购订单概况",
-        ):
-            assert resolve_lookup_tool({"days": 30}, q) is None, q
-
     def test_limit_and_order_by_passthrough_with_entity(self) -> None:
         """有实体编号时 limit/order_by 仍正确透传。"""
         result = resolve_lookup_tool(
@@ -114,12 +104,122 @@ class TestResolveLookupTool:
         result = resolve_lookup_tool({"days": 30}, "帮我查一下")
         assert result is None
 
-    def test_receipt_number_not_supported(self) -> None:
-        """receipt_number 未纳入 lookup 实体映射表，且无其他实体 → None。"""
+    def test_receipt_number_falls_into_path_b(self) -> None:
+        """receipt_number 未纳入路径 A 映射表；但查询含"收货单"+时间窗会被路径 B 命中。"""
         result = resolve_lookup_tool(
-            {"receipt_number": "RCV-001", "days": 30}, "查看收货单RCV-001"
+            {"receipt_number": "RCV-001", "days": 7},
+            "查看最近 7 天的收货单",
+        )
+        assert result is not None
+        tool_name, _ = result
+        assert tool_name == "query_receipts"
+
+
+# ── 路径 B 四重漏斗测试 ─────────────────────────────────────────────
+
+
+class TestPathBFourFilters:
+    """路径 B：四重漏斗逻辑测试。"""
+
+    # ─ 命中场景 ─
+
+    def test_hit_latest_n_po(self) -> None:
+        """漏斗全满足：'最新 5 个 PO' → query_purchase_orders。"""
+        result = resolve_lookup_tool({"days": 30}, "最新的 5 个 PO")
+        assert result is not None
+        tool_name, kwargs = result
+        assert tool_name == "query_purchase_orders"
+        assert kwargs["limit"] == 5
+        assert kwargs["order_by"] == "date_desc"
+
+    def test_hit_largest_amount_payments(self) -> None:
+        """漏斗全满足：'金额最大的 3 笔付款' → query_payments。"""
+        result = resolve_lookup_tool({"days": 30}, "金额最大的 3 笔付款")
+        assert result is not None
+        tool_name, kwargs = result
+        assert tool_name == "query_payments"
+        assert kwargs["order_by"] == "amount_desc"
+
+    def test_hit_with_explicit_time_window(self) -> None:
+        """漏斗 #2 放宽：明确时间窗（"最近 7 天"）+ 无数量修饰也命中。"""
+        result = resolve_lookup_tool(
+            {"days": 7}, "查询最近 7 天的发票",
+        )
+        assert result is not None
+        tool_name, _ = result
+        assert tool_name == "query_invoices"
+
+    def test_hit_supplier_list(self) -> None:
+        """'本月的供应商列表' → 时间窗命中漏斗 #2。"""
+        result = resolve_lookup_tool({}, "本月的供应商列表")
+        assert result is not None
+        tool_name, _ = result
+        assert tool_name == "query_vendor_master"
+
+    # ─ 漏斗 #1 miss：实体类型多类或零类 ─
+
+    def test_miss_multi_entity_categories(self) -> None:
+        """漏斗 #1 miss：同时含 PO + 发票 → 多类别放行。"""
+        result = resolve_lookup_tool(
+            {"days": 7}, "列出最近 7 天的采购订单和发票",
         )
         assert result is None
+
+    def test_miss_no_entity_category(self) -> None:
+        """漏斗 #1 miss：query 中无任何实体类别词。"""
+        result = resolve_lookup_tool({"days": 7}, "最近 7 天有什么值得关注的")
+        assert result is None
+
+    # ─ 漏斗 #2 miss：无数量/排序 + 无时间窗 ─
+
+    def test_miss_no_quantity_no_time_window(self) -> None:
+        """漏斗 #2 miss：只有实体词，无数量/排序/时间窗。"""
+        result = resolve_lookup_tool({"days": 30}, "查一下发票")
+        assert result is None
+
+    # ─ 漏斗 #3 miss：黑名单词（回归 bad case）─
+
+    def test_miss_bad_case_procurement_overview(self) -> None:
+        """历史 bad case 回归：'查询最近 7 天的采购订单概况' 必须 miss。"""
+        assert resolve_lookup_tool(
+            {"days": 7}, "查询最近 7 天的采购订单概况",
+        ) is None
+
+    def test_miss_blacklist_analysis_words(self) -> None:
+        """漏斗 #3 miss：含"异常/对比/分析/为什么/风险"等词。"""
+        for q in (
+            "最近 7 天的采购订单异常",
+            "对比最新 5 个 PO 的差异",
+            "分析最近一周的付款",
+            "为什么最新 3 张发票金额偏高",
+            "最近采购订单风险如何",
+            "最近付款合规情况",
+            "评估最新发票",
+        ):
+            assert resolve_lookup_tool({"days": 7}, q) is None, q
+
+    # ─ 漏斗 #4 miss：关系追溯词 ─
+
+    def test_miss_graph_intent_words(self) -> None:
+        """漏斗 #4 miss：含"链路/关联/追踪/上下游/溯源"等词。"""
+        for q in (
+            "追踪最新 PO 的完整链路",
+            "查看最近 5 个 PO 的上下游关系",
+            "溯源最近的付款路径",
+        ):
+            assert resolve_lookup_tool({"days": 7}, q) is None, q
+
+    # ─ 路径 A 和路径 B 优先级 ─
+
+    def test_path_a_precedes_path_b(self) -> None:
+        """有实体编号时走路径 A，不经过漏斗。"""
+        result = resolve_lookup_tool(
+            {"po_number": "PO-001"}, "PO-001 的异常情况",  # "异常/情况" 本是黑名单词
+        )
+        assert result is not None
+        tool_name, kwargs = result
+        assert tool_name == "query_purchase_orders"
+        assert kwargs["po_number"] == "PO-001"
 
 
 # ── _parse_query_constraints 测试 ─────────────────────────────────────

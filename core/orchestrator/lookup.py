@@ -1,18 +1,22 @@
 """DATA_LOOKUP 快捷路径。
 
-仅处理用户显式给出实体编号的精确事实查询，直接调用对应 query_* 工具，
-零 LLM 消耗。其余 DATA_LOOKUP 查询（无编号/仅含关键词）交由 Plan and Solve
-路径接管，由 Planner 按语义生成工具组合计划。
+两条路径（共享 lookup_shortcut_enabled 开关）：
 
-只剩一条路径：
-- 有实体编号（po_number / invoice_num / check_number / vendor_id）→ 精确查询
-- 否则返回 None，由 orchestrator 进入 Plan and Solve（或降级 ReAct）
+- **路径 A：实体编号精确查询**
+  有 po_number / invoice_num / check_number / vendor_id → 直调工具。
+  实体编号 = 100% 确定性信号，零 LLM 消耗 + 零误中风险。
 
-历史上曾有"路径 B：关键词推断"——含"采购订单/发票/付款"等词时直接映射到
-对应 query_* 工具，零 LLM 返回表格。该路径在 PS 上线后废弃，原因：
-贪心关键词匹配会把"查询最近 N 天采购订单概况"这类本应综合分析的查询
-误拦成"列表表格"，用户体验由"慢但正解"降级到"快但错解"；PS 对同类查询的
-规划是确定性的（query_* + report），虽多 2-5s 延迟但语义正确。
+- **路径 B：高置信度关键词映射**（四重漏斗）
+  query 同时满足四个信号才命中，任一缺失放行到 Plan and Solve：
+    #1 实体类型词唯一（仅含"PO/发票/付款/收货/供应商"中一类，不含多类）
+    #2 有数量/排序修饰 或 明确时间窗（"最新 5 个"/"金额最大 3 笔"/"最近 7 天"）
+    #3 不含分析/诊断/概览黑名单词（异常/概况/对比/为什么/健康/风险…）
+    #4 不含关系追溯词（链路/关联/追踪/上下游…）
+
+路径 B 的历史：早期版本仅凭"query 含采购订单/发票"等单一关键词即命中，
+贪心匹配把"最近 7 天采购订单概况"这类综合分析查询误拦成"列表表格"。
+引入四重漏斗后，规则严格到近似"只在极明确的事实列表查询时才命中"，
+误中概率显著降低；覆盖面窄于老版本，但大于"只保留路径 A"的极简方案。
 """
 
 from __future__ import annotations
@@ -75,15 +79,81 @@ _ENTITY_TOOL_MAP: list[tuple[str, str, dict[str, str]]] = [
 ]
 
 
+# ── 路径 B 四重漏斗：时间窗识别 ───────────────────────────────────
+
+# "最近 N 天/月/周"/"过去 N 天"/"本月"等明确时间窗
+_EXPLICIT_TIME_WINDOW_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?:最近|过去|近)\s*\d+\s*(?:天|月|周|年|日)", re.I),
+    re.compile(r"(?:past|last|recent)\s+\d+\s*(?:day|week|month|year)s?", re.I),
+    re.compile(r"本(?:月|周|年)|上(?:月|周|年)|今(?:天|日|月|年)", re.I),
+]
+
+
+def _has_explicit_time_window(query: str) -> bool:
+    """检测 query 是否包含明确时间窗（用户显式给定）。"""
+    return any(p.search(query) for p in _EXPLICIT_TIME_WINDOW_PATTERNS)
+
+
+def _resolve_high_confidence_keyword_tool(
+    query: str,
+    limit: int,
+    order_by: str,
+) -> str | None:
+    """路径 B 四重漏斗：判断是否可按关键词映射到工具。
+
+    四个漏斗同时满足才返回工具名，任一缺失返回 None 交给 PS。
+
+    Args:
+        query: 用户查询文本。
+        limit: 已解析的数量约束（0 表示未指定）。
+        order_by: 已解析的排序约束（"" 表示未指定）。
+
+    Returns:
+        工具名或 None。
+    """
+    from modules.p2p.intent_rules import (
+        LOOKUP_EXCLUSION_WORDS,
+        LOOKUP_GRAPH_INTENT_WORDS,
+        LOOKUP_HIGH_CONFIDENCE_KEYWORDS,
+    )
+
+    q_lower = query.lower()
+
+    # 漏斗 #3：黑名单词（分析/诊断/概览意图）→ miss
+    if any(w in q_lower for w in LOOKUP_EXCLUSION_WORDS):
+        return None
+
+    # 漏斗 #4：关系追溯词 → miss（交给 PS/ReAct 调图查询）
+    if any(w in q_lower for w in LOOKUP_GRAPH_INTENT_WORDS):
+        return None
+
+    # 漏斗 #1：实体类型词唯一（命中多类别或零类别都 miss）
+    matched_tool: str | None = None
+    for keywords, tool_name in LOOKUP_HIGH_CONFIDENCE_KEYWORDS:
+        if any(kw in q_lower for kw in keywords):
+            if matched_tool is not None:
+                return None  # 多类别 → miss
+            matched_tool = tool_name
+    if matched_tool is None:
+        return None  # 无实体类型词 → miss
+
+    # 漏斗 #2：数量/排序修饰 或 明确时间窗
+    if not (limit or order_by or _has_explicit_time_window(query)):
+        return None
+
+    return matched_tool
+
+
 def resolve_lookup_tool(
     params: dict[str, Any],
     query: str,
 ) -> tuple[str, dict[str, Any]] | None:
-    """根据实体编号确定应调用的工具和参数。
+    """根据实体编号或高置信度关键词确定应调用的工具和参数。
 
-    仅当 ``params`` 含 ``po_number`` / ``invoice_num`` / ``check_number`` /
-    ``vendor_id`` 任一实体编号时返回工具映射；否则返回 None，由调用方进入
-    Plan and Solve 路径。
+    两条路径（见模块 docstring）：
+      - 路径 A：params 含实体编号 → 直接返回工具映射（确定性最高）
+      - 路径 B：query 通过四重漏斗 → 按关键词映射（高置信度）
+      - 两者都不满足 → 返回 None，由 orchestrator 进入 Plan and Solve
 
     Returns:
         (tool_name, tool_kwargs) 或 None。
@@ -111,7 +181,7 @@ def resolve_lookup_tool(
             base["order_by"] = order_by
         return base
 
-    # 有实体编号 → 不限时间（用户明确指定的实体可能创建于任何时间）
+    # ── 路径 A：有实体编号 → 直调（不限时间）────────────────────
     for entity_field, tool_name, param_map in _ENTITY_TOOL_MAP:
         entity_val = params.get(entity_field)
         if entity_val:
@@ -128,7 +198,14 @@ def resolve_lookup_tool(
             "days": 0,
         })
 
-    # 无实体编号：不再按关键词推断，让 Plan and Solve 接管
+    # ── 路径 B：四重漏斗高置信度关键词映射 ─────────────────────
+    hc_tool = _resolve_high_confidence_keyword_tool(query, limit, order_by)
+    if hc_tool is not None:
+        # 命中 → days 沿用 params 中的值（路由/用户指定），兜底 30
+        kwargs = {"days": params.get("days", 30) or 30}
+        return hc_tool, _with_constraints(kwargs)
+
+    # 两条路径都未命中 → 交给 Plan and Solve
     return None
 
 
