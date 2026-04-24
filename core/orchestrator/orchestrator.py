@@ -1288,13 +1288,24 @@ class Orchestrator:
 
         executor = self._lazy_dag_executor
 
+        # PS 路径（precomputed_tasks 非空）不写 case_store：
+        # LLM 动态规划的 DAG 不是确定性静态案例，写入后被 L2.5 检索复用会
+        # 用一个 LLM 每次可能不同的规划去套新查询，产生语义漂移。
+        is_plan_and_solve = precomputed_tasks is not None and not is_agent_path
+        if is_agent_path:
+            path_label = "agent"
+        elif is_plan_and_solve:
+            path_label = "plan_and_solve"
+        else:
+            path_label = "DAG"
+
         _logger.info(
             "executing DAG: type=%s tasks=%d route_level=%d confidence=%.3f path=%s",
             analysis_type.value,
             len(dag_tasks),
             signal.route_level,
             signal.confidence,
-            "agent" if is_agent_path else "DAG",
+            path_label,
         )
 
         # 记录 context_budget span（DAG 路径）
@@ -1319,6 +1330,7 @@ class Orchestrator:
             agent=self._lazy_agent if is_agent_path else None,
             query=query,
             analysis_type=analysis_type.value,
+            skip_case_store=is_plan_and_solve,
         )
         duration_ms = (time.monotonic() - start_time) * 1000.0
 

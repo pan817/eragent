@@ -353,6 +353,11 @@ class TestPlanAndSolveSuccess:
         planner.plan.assert_called_once()
         executor.execute.assert_called_once()
 
+        # 回归保护：PS 路径必须传 skip_case_store=True，避免 LLM 动态规划结果
+        # 被作为静态 case 持久化后污染 L2.5 检索
+        _, call_kwargs = executor.execute.call_args
+        assert call_kwargs.get("skip_case_store") is True
+
         # planner 元信息回写到 summary
         assert "plan_reasoning" in result.summary
         assert "plan_task_count" in result.summary
@@ -384,3 +389,7 @@ class TestPlanAndSolveSuccess:
         assert result.summary.get("route_type") == "DAG"
         planner.plan.assert_not_called()
         executor.execute.assert_called_once()
+
+        # 对照：静态 DAG 路径应正常写入 case_store（skip_case_store=False）
+        _, call_kwargs = executor.execute.call_args
+        assert call_kwargs.get("skip_case_store") is False

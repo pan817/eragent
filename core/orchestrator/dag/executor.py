@@ -48,12 +48,17 @@ class DAGExecutor:
         agent: Any = None,
         query: str = "",
         analysis_type: str = "",
+        skip_case_store: bool = False,
     ) -> dict[str, Any]:
         """执行 DAG 任务列表，记录完整执行过程到 trace。
 
         Args:
             tasks: DAG 任务定义列表。
             output_mode_prompt: 输出模式格式指令，注入 ReportAgent。
+            skip_case_store: True 时不把成功结果写入 case_store。
+                Plan and Solve 路径使用（动态规划结果不应作为静态 case 复用，
+                否则 L2.5 检索会用一个 LLM 每次可能不同的规划去套新查询，
+                产生语义漂移）。
         """
         start = time.monotonic()
         outputs: dict[str, str] = {}
@@ -277,7 +282,12 @@ class DAGExecutor:
         }
 
         # case_store 写入：成功 DAG 案例持久化（失败不阻断主流程）
-        if self._case_store is not None and result.get("status") == "ok":
+        # skip_case_store=True 时跳过（如 Plan and Solve 的动态规划结果）
+        if (
+            self._case_store is not None
+            and result.get("status") == "ok"
+            and not skip_case_store
+        ):
             try:
                 await self._case_store.store_successful_case(
                     query=query,
