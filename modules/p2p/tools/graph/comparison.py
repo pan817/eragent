@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from modules.p2p.tools._inject import _get_graphiti_client
+from modules.p2p.tools._inject import _get_graph_schema, _get_graphiti_client
 from modules.p2p.tools._output import _clip_and_dump
 
 
@@ -47,14 +47,16 @@ async def compare_entities(
     client = _get_graphiti_client()
     ids = [eid.strip() for eid in entity_ids.split(",") if eid.strip()]
 
-    if entity_type == "Supplier":
-        cypher = """
-        MATCH (s:Entity {entity_type:'Supplier'})
+    gs = _get_graph_schema()
+    if entity_type == gs.node("supplier"):
+        cypher = f"""
+        MATCH (s:Entity {{entity_type:'{gs.node("supplier")}'}})
         WHERE s.entity_id IN $ids
-        OPTIONAL MATCH (s)-[:RELATES_TO {name:'CREATES_PO'}]->(po:Entity)
-        OPTIONAL MATCH (po)-[:RELATES_TO {name:'CONTAINS_LINE'}]->(line:Entity)<-[:RELATES_TO {name:'RECEIVES_LINE'}]-(rcv:Entity)
-        OPTIONAL MATCH (s)-[:RELATES_TO {name:'SUBMITS_INVOICE'}]->(inv:Entity)
-        OPTIONAL MATCH (s)-[:RELATES_TO {name:'BIDS_ON'}]->(auction:Entity)
+        OPTIONAL MATCH (s)-[:RELATES_TO {{name:'{gs.edge("creates_po")}'}}]->(po:Entity)
+        OPTIONAL MATCH (po)-[:RELATES_TO {{name:'{gs.edge("contains_line")}'}}]->(line:Entity)
+          <-[:RELATES_TO {{name:'{gs.edge("receives_line")}'}}]-(rcv:Entity)
+        OPTIONAL MATCH (s)-[:RELATES_TO {{name:'{gs.edge("submits_invoice")}'}}]->(inv:Entity)
+        OPTIONAL MATCH (s)-[:RELATES_TO {{name:'{gs.edge("bids_on")}'}}]->(auction:Entity)
         RETURN s.entity_id AS vendor_id, s.vendor_name AS vendor_name,
                count(DISTINCT po) AS po_count,
                count(DISTINCT rcv) AS receipt_count,
@@ -113,9 +115,13 @@ async def find_contract_coverage(
 
     where_clause = "WHERE " + " AND ".join(wheres) if wheres else ""
 
+    gs = _get_graph_schema()
     cypher = f"""
-    MATCH (line:Entity {{entity_type:'POLine'}})<-[:RELATES_TO {{name:'CONTAINS_LINE'}}]-(po:Entity)
-    OPTIONAL MATCH (line)-[:RELATES_TO {{name:'ORDERS_MATERIAL'}}]->(m:Entity)<-[:RELATES_TO {{name:'CONTRACT_COVERS'}}]-(cl:Entity)<-[:RELATES_TO {{name:'CONTAINS_CONTRACT_LINE'}}]-(c:Entity)
+    MATCH (line:Entity {{entity_type:'{gs.node("po_line")}'}})
+      <-[:RELATES_TO {{name:'{gs.edge("contains_line")}'}}]-(po:Entity)
+    OPTIONAL MATCH (line)-[:RELATES_TO {{name:'{gs.edge("orders_material")}'}}]->(m:Entity)
+      <-[:RELATES_TO {{name:'{gs.edge("contract_covers")}'}}]-(cl:Entity)
+      <-[:RELATES_TO {{name:'{gs.edge("contains_contract_line")}'}}]-(c:Entity)
     {where_clause}
     RETURN po.po_number AS po_number, po.entity_id AS vendor_id,
            line.item_description AS item, line.unit_price AS unit_price,
@@ -154,12 +160,15 @@ async def find_competing_suppliers(
     """
     client = _get_graphiti_client()
 
+    gs = _get_graph_schema()
     if vendor_id:
-        cypher = """
-        MATCH (s:Entity {entity_type:'Supplier', entity_id: $vendor_id})-[:RELATES_TO {name:'BIDS_ON'}]->(a:Entity {entity_type:'Auction'})
-        MATCH (competitor:Entity {entity_type:'Supplier'})-[:RELATES_TO {name:'BIDS_ON'}]->(a)
+        cypher = f"""
+        MATCH (s:Entity {{entity_type:'{gs.node("supplier")}', entity_id: $vendor_id}})
+          -[:RELATES_TO {{name:'{gs.edge("bids_on")}'}}]->(a:Entity {{entity_type:'{gs.node("auction")}'}})
+        MATCH (competitor:Entity {{entity_type:'{gs.node("supplier")}'}})
+          -[:RELATES_TO {{name:'{gs.edge("bids_on")}'}}]->(a)
         WHERE competitor.entity_id <> $vendor_id
-        OPTIONAL MATCH (a)<-[:RELATES_TO {name:'HAS_BID'}]-(bid:Entity)
+        OPTIONAL MATCH (a)<-[:RELATES_TO {{name:'{gs.edge("has_bid")}'}}]-(bid:Entity)
         RETURN a.document_number AS auction_id, a.auction_title AS auction_title,
                a.auction_status AS status,
                competitor.entity_id AS competitor_id,
@@ -169,9 +178,10 @@ async def find_competing_suppliers(
         """
         params: dict[str, Any] = {"vendor_id": vendor_id}
     elif auction_id:
-        cypher = """
-        MATCH (s:Entity {entity_type:'Supplier'})-[:RELATES_TO {name:'BIDS_ON'}]->(a:Entity {entity_type:'Auction', entity_id: $auction_id})
-        OPTIONAL MATCH (a)<-[:RELATES_TO {name:'HAS_BID'}]-(bid:Entity)
+        cypher = f"""
+        MATCH (s:Entity {{entity_type:'{gs.node("supplier")}'}})
+          -[:RELATES_TO {{name:'{gs.edge("bids_on")}'}}]->(a:Entity {{entity_type:'{gs.node("auction")}', entity_id: $auction_id}})
+        OPTIONAL MATCH (a)<-[:RELATES_TO {{name:'{gs.edge("has_bid")}'}}]-(bid:Entity)
         RETURN a.auction_title AS auction_title, a.auction_status AS status,
                s.entity_id AS vendor_id, s.vendor_name AS vendor_name,
                bid.bid_total AS bid_amount, bid.award_status AS award_status

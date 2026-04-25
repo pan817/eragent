@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from modules.p2p.tools._inject import set_graphiti_client
+from modules.p2p.tools._inject import set_graph_schema, set_graphiti_client
+from modules.p2p.schemas.oracle_ebs.graph_schema import ORACLE_EBS_GRAPH_SCHEMA
 from modules.p2p.tools.graph import (
     compare_entities,
     detect_graph_anomalies,
@@ -37,8 +38,10 @@ def _inject_mock_client():
     ])
     mock_client.is_connected = True
     set_graphiti_client(mock_client)
+    set_graph_schema(ORACLE_EBS_GRAPH_SCHEMA)
     yield mock_client
     set_graphiti_client(None)  # type: ignore[arg-type]
+    set_graph_schema(None)
 
 
 class TestSearchKnowledgeGraph:

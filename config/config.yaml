@@ -1,6 +1,8 @@
 # ERP Agent 系统配置文件
 # 敏感信息（API Key 等）通过环境变量注入，不在此文件中存储
 
+erp_schema: oracle_ebs    # oracle_ebs | new_erp
+
 app:
   name: "ERP Analysis Agent"
   version: "0.1.0"

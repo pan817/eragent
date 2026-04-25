@@ -80,6 +80,7 @@ async def running_app(monkeypatch):
         mock_cfg = MagicMock()
         mock_cfg.app_name = "ERP Agent Test"
         mock_cfg.app_version = "0.1.0-test"
+        mock_cfg.erp_schema = "oracle_ebs"
         mock_cfg.postgresql = MagicMock()
         # 使用更短的 TTL 和心跳方便测试
         mock_cfg.async_analysis = AsyncAnalysisSettings(

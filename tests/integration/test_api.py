@@ -40,6 +40,7 @@ def client() -> TestClient:
         mock_cfg = MagicMock()
         mock_cfg.app_name = "ERP Agent Test"
         mock_cfg.app_version = "0.1.0-test"
+        mock_cfg.erp_schema = "oracle_ebs"
         mock_cfg.postgresql = MagicMock()
         mock_cfg.async_analysis = AsyncAnalysisSettings()
         mock_settings.return_value = mock_cfg

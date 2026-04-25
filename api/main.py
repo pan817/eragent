@@ -26,7 +26,6 @@ from core.database import (
     get_session_factory,
     reset_and_seed,
 )
-from modules.p2p.repository import P2PRepository
 from core.chat import ChatRepository, init_chat_repository
 from core.logging_utils import get_logger
 from core.observability import init_trace_store, shutdown_trace_store
@@ -36,7 +35,9 @@ from core.tasks import (
     shutdown_event_bus,
     shutdown_task_registry,
 )
+from modules.p2p.schemas import SchemaRegistry
 from modules.p2p.tools import set_repository
+from modules.p2p.tools._inject import set_graph_schema
 
 _logger = get_logger(__name__)
 
@@ -135,7 +136,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.settings = settings
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
-    set_repository(P2PRepository(session_factory))
+    schema_reg = SchemaRegistry.get(settings.erp_schema)
+    repo = schema_reg.repository_factory(session_factory)
+    set_repository(repo)
+    set_graph_schema(schema_reg.graph_schema)
     init_trace_store(session_factory)
     _logger.info("trace store ready (TimingMiddleware observable)")
 
@@ -262,7 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from core.etl.query_backend import create_query_backend
             qb = create_query_backend(
                 query_backend_mode=etl_cfg.query_backend,
-                repository=P2PRepository(session_factory),
+                repository=repo,
                 graphiti_client=graphiti_client,
             )
             set_query_backend(qb)
@@ -290,6 +294,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from modules.p2p.tools import set_graphiti_client, set_query_backend
         set_graphiti_client(None)  # type: ignore[arg-type]
         set_query_backend(None)  # type: ignore[arg-type]
+    set_graph_schema(None)
     await registry.shutdown()
     shutdown_task_registry()
     # 如果是 Redis 后端，关闭底层连接；memory 后端此调用是 no-op

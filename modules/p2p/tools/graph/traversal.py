@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from modules.p2p.tools._inject import _get_graphiti_client
+from modules.p2p.tools._inject import _get_graph_schema, _get_graphiti_client
 from modules.p2p.tools._output import _clip_and_dump
 from modules.p2p.tools.graph._resolve import resolve_entity_id, _extract_records
 
@@ -120,15 +120,16 @@ async def query_supplier_profile(
         JSON 格式的供应商画像数据。
     """
     client = _get_graphiti_client()
-    cypher = """
-    MATCH (s:Entity {entity_type: 'Supplier', entity_id: $vendor_id})
-    OPTIONAL MATCH (s)-[r1:RELATES_TO {name: 'CREATES_PO'}]->(po:Entity)
-    OPTIONAL MATCH (po)-[r2:RELATES_TO {name: 'CONTAINS_LINE'}]->(line:Entity)
-    OPTIONAL MATCH (line)<-[r3:RELATES_TO {name: 'RECEIVES_LINE'}]-(rcv:Entity)
-    OPTIONAL MATCH (s)-[r4:RELATES_TO {name: 'SUBMITS_INVOICE'}]->(inv:Entity)
-    OPTIONAL MATCH (inv)<-[r5:RELATES_TO {name: 'PAYS_INVOICE'}]-(pmt:Entity)
-    OPTIONAL MATCH (s)-[r6:RELATES_TO {name: 'BIDS_ON'}]->(auction:Entity)
-    OPTIONAL MATCH (s)-[r7:RELATES_TO {name: 'HAS_SITE'}]->(site:Entity)
+    gs = _get_graph_schema()
+    cypher = f"""
+    MATCH (s:Entity {{entity_type: '{gs.node("supplier")}', entity_id: $vendor_id}})
+    OPTIONAL MATCH (s)-[r1:RELATES_TO {{name: '{gs.edge("creates_po")}'}}]->(po:Entity)
+    OPTIONAL MATCH (po)-[r2:RELATES_TO {{name: '{gs.edge("contains_line")}'}}]->(line:Entity)
+    OPTIONAL MATCH (line)<-[r3:RELATES_TO {{name: '{gs.edge("receives_line")}'}}]-(rcv:Entity)
+    OPTIONAL MATCH (s)-[r4:RELATES_TO {{name: '{gs.edge("submits_invoice")}'}}]->(inv:Entity)
+    OPTIONAL MATCH (inv)<-[r5:RELATES_TO {{name: '{gs.edge("pays_invoice")}'}}]-(pmt:Entity)
+    OPTIONAL MATCH (s)-[r6:RELATES_TO {{name: '{gs.edge("bids_on")}'}}]->(auction:Entity)
+    OPTIONAL MATCH (s)-[r7:RELATES_TO {{name: '{gs.edge("has_site")}'}}]->(site:Entity)
     RETURN properties(s) AS supplier,
            count(DISTINCT po) AS po_count,
            count(DISTINCT line) AS line_count,
@@ -136,7 +137,7 @@ async def query_supplier_profile(
            count(DISTINCT inv) AS invoice_count,
            count(DISTINCT pmt) AS payment_count,
            count(DISTINCT auction) AS auction_count,
-           collect(DISTINCT {site_id: site.entity_id, site_code: site.vendor_site_code, city: site.city}) AS sites
+           collect(DISTINCT {{site_id: site.entity_id, site_code: site.vendor_site_code, city: site.city}}) AS sites
     """
     result = await client.execute_cypher(cypher, {"vendor_id": vendor_id})
     records = _extract_records(result)

@@ -11,22 +11,9 @@ from __future__ import annotations
 from typing import Any
 
 from core.logging_utils import get_logger
+from modules.p2p.tools._inject import _get_graph_schema
 
 _logger = get_logger(__name__)
-
-# Business property names per entity type that can serve as alternative IDs
-_BUSINESS_ID_FIELDS: dict[str, list[str]] = {
-    "PurchaseOrder": ["po_number"],
-    "Supplier": ["vendor_id", "segment1"],
-    "Invoice": ["invoice_num"],
-    "Payment": ["check_number"],
-    "Receipt": ["receipt_num"],
-    "Material": ["segment1"],
-    "Contract": ["contract_number"],
-    "Auction": ["document_number"],
-    "SupplierSite": ["vendor_site_code"],
-    "POLine": ["po_number"],  # POLine might be referenced by parent PO number
-}
 
 
 def _extract_records(result: Any) -> list[dict[str, Any]]:
@@ -59,7 +46,7 @@ async def resolve_entity(
         return records[0]
 
     # Strategy 2: match on business property fields
-    biz_fields = _BUSINESS_ID_FIELDS.get(entity_type, [])
+    biz_fields = _get_graph_schema().biz_id_fields(entity_type)
     for field in biz_fields:
         cypher = f"""
         MATCH (n:Entity {{entity_type: $type}})

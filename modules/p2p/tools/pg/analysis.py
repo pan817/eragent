@@ -55,18 +55,20 @@ async def _run_three_way_match_impl(po_number: str) -> str:
 
 async def _three_way_match_graph_enhanced(po_number: str) -> dict[str, Any] | None:
     """通过图边遍历精确匹配 PO行↔收货↔发票行。"""
-    from modules.p2p.tools._inject import _get_graphiti_client
+    from modules.p2p.tools._inject import _get_graph_schema, _get_graphiti_client
 
     try:
         client = _get_graphiti_client()
     except RuntimeError:
         return None
 
-    cypher = """
-    MATCH (po:Entity {entity_type:'PurchaseOrder'})-[:RELATES_TO {name:'CONTAINS_LINE'}]->(line:Entity)
+    gs = _get_graph_schema()
+    cypher = f"""
+    MATCH (po:Entity {{entity_type:'{gs.node("purchase_order")}'}})
+      -[:RELATES_TO {{name:'{gs.edge("contains_line")}'}}]->(line:Entity)
     WHERE ($po_number IS NULL OR po.po_number = $po_number)
-    OPTIONAL MATCH (line)<-[:RELATES_TO {name:'RECEIVES_LINE'}]-(rcv:Entity)
-    OPTIONAL MATCH (line)<-[:RELATES_TO {name:'INVOICES_LINE'}]-(il:Entity)
+    OPTIONAL MATCH (line)<-[:RELATES_TO {{name:'{gs.edge("receives_line")}'}}]-(rcv:Entity)
+    OPTIONAL MATCH (line)<-[:RELATES_TO {{name:'{gs.edge("invoices_line")}'}}]-(il:Entity)
     RETURN po.po_number AS po_number, po.vendor_id AS vendor_id,
            po.vendor_name AS vendor_name,
            line.entity_id AS line_id, line.quantity AS po_quantity,

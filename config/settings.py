@@ -657,6 +657,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     intent_routing: IntentRoutingSettings = Field(default_factory=IntentRoutingSettings)
     plan_and_solve: PlanAndSolveSettings = Field(default_factory=PlanAndSolveSettings)
+    erp_schema: str = "oracle_ebs"
     graphiti_etl: Any = Field(default_factory=dict)
 
     @field_validator("graphiti_etl", mode="before")
