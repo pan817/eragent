@@ -426,33 +426,6 @@ class ReportSettings(BaseSettings):
 class IntentRoutingSettings(BaseSettings):
     """意图路由配置（控制 L1/L2/L3 路由阈值与特性开关）。"""
 
-    # TECH-DEBT(#10): L1/L2 配置已无代码引用，路由已简化为 L0 bypass + Unified LLM
-    # L1 关键词命中率门槛
-    l1_threshold_default: float = Field(
-        default=0.10,
-        description="L1 大多数规则的命中率门槛（hit_rate >= 此值才算命中）",
-    )
-    l1_threshold_strict: float = Field(
-        default=0.14,
-        description="INVOICE_DUPLICATE / VENDOR_CONCENTRATION 等高假阳性规则的命中率门槛",
-    )
-    # L2 Chroma 语义匹配
-    l2_similarity_threshold: float = Field(
-        default=0.80,
-        description="L2 命中所需的最低 cosine similarity（1 - distance）",
-    )
-    l2_length_ratio_floor: float = Field(
-        default=0.4,
-        description="query/seed 长度比低于此值时触发相似度折扣",
-    )
-    l2_length_ratio_penalty: float = Field(
-        default=0.7,
-        description="长度比过低时的相似度乘子",
-    )
-    l2_topk: int = Field(
-        default=1,
-        description="L2 检索返回的 top-k 数量（1=原行为，3=投票模式）",
-    )
     # L3 LLM 分类置信度分档
     l3_dag_min_confidence: float = Field(
         default=0.5,

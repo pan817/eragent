@@ -99,18 +99,38 @@
 - **建议修复**：在 `_build_tail` 中增加 `amount_field` 参数，各查询方法传入各自的金额节点属性名（如 `po.total_amount`、`n.invoice_amount`）。需注意 RETURN 子句中属性是否可直接引用（`properties(n)` 是 map，不能直接 `ORDER BY properties(n).amount`，需在 RETURN 中显式暴露金额字段）。
 - **发现日期**：2026-04-21
 
-### 10. L1/L2 路由配置残留为死代码
+---
+
+## 已修复
+
+### 15. ParamExtractor 死代码遗留（已修复）
+- **问题**：v1 memory 设计 I4 章明确要求"删除 `core/orchestrator/param_extractor.py` — 合并进统一 LLM 调用"。Unified LLM Router 已实施（`core/orchestrator/unified_router.py`），`intent_seeds.yaml` 已删除，但 `param_extractor.py`（含 `ParamExtractor` 类，约 200 行）+ `tests/unit/test_param_extractor.py`（约 20 个测试用例）仍存在。
+- **影响**：约 220 行死代码 + 20 个无效测试用例占用维护精力；新开发者读到 `ParamExtractor` 类可能误以为仍在使用；不影响功能（orchestrator 已无调用路径）。
+- **涉及文件**：
+  - [core/orchestrator/param_extractor.py](../core/orchestrator/param_extractor.py)（已删除）
+  - [tests/unit/test_param_extractor.py](../tests/unit/test_param_extractor.py)（已删除）
+- **修复方案**：直接删除两个文件；移除 `core/orchestrator/orchestrator.py:160` 的过时注释；将 `core/orchestrator/unified_router.py:4` 和 `core/orchestrator/router/__init__.py:342` 文档字符串/注释中"ParamExtractor"的引用改写为更通用的表述（"独立参数提取器"）。修复后跑全量测试确认无引用残留。
+- **发现日期**：2026-05-01
+- **修复日期**：2026-05-01
+
+### 10. L1/L2 路由配置残留为死代码（已修复）
 - **问题**：`IntentRoutingSettings` 中仍保留 `l1_threshold_default`、`l1_threshold_strict`、`l2_similarity_threshold`、`l2_length_ratio_floor`、`l2_length_ratio_penalty`、`l2_topk` 共 6 个配置项，`config.yaml` 中也有对应条目。但路由架构已简化为 L0 bypass + Unified LLM，这些配置没有任何代码路径引用。
 - **影响**：配置文件膨胀，新开发者可能误以为 L1/L2 仍在生效而调参无效果；`IntentRoutingSettings` 模型加载了无用字段。不影响功能。
 - **涉及文件**：
   - [config/settings.py](../config/settings.py)（`IntentRoutingSettings` 类定义）
   - [config/config.yaml](../config/config.yaml)（`intent_routing` 段 L1/L2 条目）
-- **建议修复**：删除 6 个死配置项及 `config.yaml` 中对应行；同步清理 CLAUDE.md 和文档中对 `intent_seeds.yaml` 的引用。若未来决定恢复 L1/L2，从 git 历史恢复即可。
+- **修复方案**：从 `config/settings.py` 的 `IntentRoutingSettings` 删除 6 个 L1/L2 字段定义；从 `config/config.yaml` 的 `intent_routing` 段删除对应 6 行；同步移除 CLAUDE.md 项目结构中已不存在的 `intent_seeds.yaml` 引用。`Settings` 顶层 `extra="ignore"` 确保用户旧 `config.yaml` 仍能加载。历史设计文档（`docs/intent_routing_hit_rate_optimization.md` 等）中的引用作为存档保留，不清理。若未来决定恢复 L1/L2，从 git 历史恢复即可。
 - **发现日期**：2026-04-21
+- **修复日期**：2026-05-01
 
----
-
-## 已修复
+### 14. 图查询工具静默吞异常缺少日志（已修复）
+- **问题**：`modules/p2p/tools/pg/advanced.py`（`get_vendor_connection_overview`）使用 `try / except Exception: pass` 捕获 Neo4j Cypher 调用失败后直接返回空列表 `[]`，没有任何 WARNING 以上级别日志。CLAUDE.md "工程要求" 节明确要求"失败必须有日志/metric，不接受 `except: pass` 静默吞异常。任何降级必须有 WARNING 以上日志"。
+- **影响**：图后端故障（连接断开、Cypher 语法异常、超时）会被静默降级为"该供应商无连接"，调用方拿到空结果但无法区分"真无连接"还是"查询失败"；运维侧没有可观测信号，无法及时发现 Neo4j 异常。
+- **涉及文件**：
+  - [modules/p2p/tools/pg/advanced.py](../modules/p2p/tools/pg/advanced.py)
+- **修复方案**：模块顶部新增 `from core.logging_utils import get_logger` 与 `_logger = get_logger(__name__)`；将 `except Exception: pass` 改为 `except Exception as exc: _logger.warning("get_vendor_connection_overview cypher failed: %s", exc)`；保留 `return []` 降级行为。同文件其它 `except` 分支已确认无相同模式。
+- **发现日期**：2026-05-01
+- **修复日期**：2026-05-01
 
 ### 8. DATA_LOOKUP 查询缺少 DAG 模板，100% 走 ReAct
 - **问题**：所有被识别为 DATA_LOOKUP 的事实查询在 orchestrator 中被强制排除在 DAG 路径之外，只能走 ReAct。
@@ -135,6 +155,15 @@
 - **修复方案**：在 shutdown 中 `graphiti_client.close()` 后追加 `set_graphiti_client(None)` 和 `set_query_backend(None)`。
 - **发现日期**：2026-04-22
 - **修复日期**：2026-04-22
+
+### 13. ETL Pipeline 使用 `datetime.utcnow()` 违反时区约定（已修复）
+- **问题**：`core/etl/pipeline.py` 在 `update_watermark` 写入 RUNNING 状态时直接调用 `datetime.utcnow()` 生成时间戳，绕过了 `core.time_utils.now_cn()` 统一入口。CLAUDE.md "时区约定" 节明确禁止 `datetime.utcnow()` / `datetime.now(timezone.utc)`。
+- **影响**：写入 PostgreSQL 的 RUNNING 水位线为 naive UTC 时间，与系统其它路径产生的业务时区时间戳不一致，可能在 UI 展示或对比逻辑中出现 8 小时偏差；也是后续审计时容易被忽略的隐性退化。功能未直接破坏（同步链路仍可工作），但属于生产标准违规。
+- **涉及文件**：
+  - [core/etl/pipeline.py](../core/etl/pipeline.py)
+- **修复方案**：在文件顶部追加 `from core.time_utils import now_cn`，将 `datetime.utcnow()` 替换为 `now_cn()`；保留 `datetime` 类型注解所需的 import；grep 确认全文件无 `datetime.utcnow|datetime.now(timezone.utc)` 残留。
+- **发现日期**：2026-05-01
+- **修复日期**：2026-05-01
 
 ### 12. DocumentRef 字段未防御 None 输入（已修复）
 - **问题**：`api/schemas/domain.py` 的 `DocumentRef` 模型所有字段定义为 `str`（`default=""`），但上游规则引擎（如 `modules/p2p/rules/three_way_match.py`）传入 `vendor_name=None` 时，Pydantic 严格校验抛出 `ValidationError: Input should be a valid string`。

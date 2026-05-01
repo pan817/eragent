@@ -1,7 +1,7 @@
 """统一 LLM 路由器。
 
 合并意图分类 + 参数提取 + 指代消解 + 跨实体判断为一次 LLM 调用。
-替代原有 L1 分析匹配 + L2 向量查询 + L3 LLM 分类 + ParamExtractor。
+替代历史的多级路由（L1 关键词 / L2 向量 / L3 LLM）和独立参数提取器。
 """
 
 from __future__ import annotations

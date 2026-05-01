@@ -157,7 +157,6 @@ class Orchestrator:
         self._timing_middleware: TimingMiddleware = TimingMiddleware(
             agent_name="p2p_agent"
         )
-        # ParamExtractor 已合并到统一 LLM 路由（UnifiedRouter），不再需要
 
     # ── 记忆管理（委托 core/memory/manager.py）─────────────────
 

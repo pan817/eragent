@@ -13,8 +13,11 @@ from typing import Any
 
 from langchain.tools import tool
 
+from core.logging_utils import get_logger
 from modules.p2p.tools._inject import _get_query_backend, _get_repository
 from modules.p2p.tools._output import _clip_and_dump
+
+_logger = get_logger(__name__)
 
 
 def _get_mode() -> str:
@@ -383,8 +386,8 @@ async def _get_vendor_relationship_density(
             return result
         if hasattr(result, "records"):
             return [dict(r) for r in result.records]
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.warning("get_vendor_connection_overview cypher failed: %s", exc)
     return []
 
 

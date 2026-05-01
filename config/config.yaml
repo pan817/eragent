@@ -287,15 +287,6 @@ memory:
     min_confidence: 0.6             # LLM 提取最低置信度
 
 intent_routing:
-  # TECH-DEBT(#10): L1/L2 configs below are dead code — routing uses L0 bypass + Unified LLM only
-  # L1 keyword hit-rate thresholds
-  l1_threshold_default: 0.10
-  l1_threshold_strict: 0.14
-  # L2 Chroma semantic matching
-  l2_similarity_threshold: 0.80
-  l2_length_ratio_floor: 0.4
-  l2_length_ratio_penalty: 0.7
-  l2_topk: 1
   # L3 LLM classification confidence tiers
   l3_dag_min_confidence: 0.75       # confidence >= 0.75 走 DAG，< 0.75 走 ReAct
   l3_react_min_confidence: 0.3

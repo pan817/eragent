@@ -20,6 +20,7 @@ from core.etl.state import SyncStateManager
 from core.etl.tracing import etl_tracer
 from core.etl.transformers.llm_extractor import LLMTextExtractor
 from core.etl.transformers.structured import StructuredTransformer
+from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
 
@@ -188,7 +189,7 @@ class ETLPipeline:
         """Extract, transform, and load one table."""
         table_t0 = time.monotonic()
         # Mark RUNNING
-        now = datetime.utcnow()
+        now = now_cn()
         await self._state.update_watermark(
             table_name=table_name,
             domain=domain,

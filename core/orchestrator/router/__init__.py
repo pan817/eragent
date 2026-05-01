@@ -339,7 +339,7 @@ class IntentRouter:
                 attrs.update(trace_data)
                 return signal
 
-            # 统一 LLM 调用（替代 L1/L2/L3 + ParamExtractor）
+            # 统一 LLM 调用（一次完成意图分类 + 参数提取 + 指代消解）
             if self._unified_router is None:
                 from core.orchestrator.unified_router import UnifiedRouter
                 self._unified_router = UnifiedRouter(settings=self._settings)
