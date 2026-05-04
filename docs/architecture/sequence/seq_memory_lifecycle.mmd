@@ -1,0 +1,76 @@
+sequenceDiagram
+    autonumber
+    participant O as Orchestrator
+    participant MM as MemoryManager
+    participant LTM as LongTermMemory
+    participant INJ as Injection
+    participant EXT as MemoryExtractor
+    participant FD as FeedbackDetector
+    participant SSE as SessionSummaryExtractor
+    participant CHI as ChatHistoryIndexer
+    participant IW as IdleSessionWatcher
+    participant PG as PostgreSQL
+    participant Chroma as Chroma
+    participant LLM as LLM (fast)
+
+    %% ===== Flow 1: 分析前 - 记忆检索注入 (同步) =====
+    rect rgb(232, 245, 233)
+    Note over O,Chroma: Flow 1: build_context (同步, 分析前)
+    O->>MM: build_context(user_id, query, params, analysis_type)
+    MM->>LTM: search_by_type(user_id, query)
+    LTM->>Chroma: vector similarity search
+    Chroma-->>LTM: candidate memories
+    LTM->>PG: filter by type + TTL + user_id
+    PG-->>LTM: valid memories
+    LTM-->>MM: ranked memories
+    MM->>INJ: format_memory_injection(memories, analysis_type)
+    Note over INJ: recency decay 加权排序
+    INJ-->>MM: formatted context string
+    MM-->>O: memory_context (注入 Prompt)
+    end
+
+    %% ===== Flow 2: 分析后 - 记忆提取 (fire-and-forget) =====
+    rect rgb(227, 242, 253)
+    Note over O,PG: Flow 2: on_analysis_complete (异步, fire-and-forget)
+    O-)MM: on_analysis_complete(result, session_id, params)
+    MM-)EXT: asyncio.create_task(_extract_memories)
+    EXT->>LLM: 提取记忆条目 (ENTITY_PROFILE / ANALYSIS_INSIGHT)
+    LLM-->>EXT: extracted entries
+    EXT->>LTM: store(entries)
+    LTM->>PG: INSERT memories
+    LTM->>Chroma: upsert embeddings
+    end
+
+    %% ===== Flow 3: 用户反馈检测 (fire-and-forget) =====
+    rect rgb(255, 243, 224)
+    Note over O,PG: Flow 3: on_user_message (异步, 反馈检测)
+    O-)MM: on_user_message(query, session_id)
+    MM-)FD: asyncio.create_task(_extract_feedback)
+    FD->>LLM: 分类: 是否为纠正/确认?
+    LLM-->>FD: feedback_signal (CORRECTION / None)
+    opt 检测到反馈
+        FD->>LTM: store(CORRECTION memory, TTL=180d)
+        LTM->>PG: INSERT
+    end
+    end
+
+    %% ===== Flow 4: 聊天索引 (异步入队) =====
+    rect rgb(243, 229, 245)
+    Note over O,PG: Flow 4: on_chat_message (异步入队)
+    O-)MM: on_chat_message(session_id, role, content)
+    MM-)CHI: enqueue(message)
+    CHI->>CHI: 累积片段, 达到阈值后批量索引
+    CHI->>PG: INSERT chat_index_fragments
+    end
+
+    %% ===== Flow 5: 会话空闲 - recap 生成 =====
+    rect rgb(252, 228, 236)
+    Note over IW,PG: Flow 5: on_session_idle (会话生命周期)
+    IW->>IW: 检测 session 空闲超时
+    IW->>MM: on_session_idle(session_id, user_id)
+    MM->>SSE: extract(session_id, messages)
+    SSE->>LLM: 生成会话摘要 (话题 + 实体 + 结论)
+    LLM-->>SSE: recap_text
+    SSE->>LTM: store(SESSION_RECAP, TTL=90d + recency decay)
+    LTM->>PG: INSERT
+    end

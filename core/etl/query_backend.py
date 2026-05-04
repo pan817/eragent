@@ -111,7 +111,7 @@ class Neo4jStructuredBackend:
             params["status_val"] = status
 
     @staticmethod
-    def _order_and_limit(kwargs: dict[str, Any], order_field: str = "n.created_at") -> str:
+    def _order_and_limit(kwargs: dict[str, Any], order_field: str = "n.valid_from") -> str:
         """Build ``ORDER BY ... LIMIT ...`` fragment (no leading space).
 
         # TECH-DEBT(#9): amount_desc/amount_asc 静默降级为日期排序
@@ -152,20 +152,17 @@ class Neo4jStructuredBackend:
         self._add_status_filter(wheres, params, kwargs, status_field="po.status")
 
         where_clause = f"WHERE {' AND '.join(wheres)}" if wheres else ""
-        ol = self._order_and_limit(kwargs, order_field="po.created_at")
+        ol = self._order_and_limit(kwargs, order_field="po.valid_from")
 
         cypher = f"""
         {match}
         {where_clause}
-        OPTIONAL MATCH (line)<-[:RELATES_TO {{name:'RECEIVES_LINE'}}]-(rcv:Entity)
-        OPTIONAL MATCH (line)<-[:RELATES_TO {{name:'INVOICES_LINE'}}]-(il:Entity)-[:RELATES_TO {{name:'BELONGS_TO_INVOICE'}}]->(inv:Entity)
-        OPTIONAL MATCH (inv)<-[:RELATES_TO {{name:'PAYS_INVOICE'}}]-(pmt:Entity)
         OPTIONAL MATCH (po)<-[:RELATES_TO {{name:'CREATES_PO'}}]-(sup:Entity {{entity_type:'Supplier'}})
         RETURN properties(po) AS po_props, properties(line) AS line_props,
                sup.entity_id AS vendor_id, sup.vendor_name AS vendor_name,
-               rcv IS NOT NULL AS has_receipt,
-               il IS NOT NULL AS has_invoice,
-               pmt IS NOT NULL AS has_payment
+               EXISTS {{(line)<-[:RELATES_TO {{name:'RECEIVES_LINE'}}]-(:Entity)}} AS has_receipt,
+               EXISTS {{(line)<-[:RELATES_TO {{name:'INVOICES_LINE'}}]-(:Entity)}} AS has_invoice,
+               EXISTS {{(line)<-[:RELATES_TO {{name:'INVOICES_LINE'}}]-(:Entity)-[:RELATES_TO {{name:'BELONGS_TO_INVOICE'}}]->(:Entity)<-[:RELATES_TO {{name:'PAYS_INVOICE'}}]-(:Entity)}} AS has_payment
         {ol}
         """
         result = await self._client.execute_cypher(cypher, params)

@@ -12,7 +12,8 @@
   - 不引入"临时方案"或"待重构标记"，要么做完，要么不做。
   - 数据库变更走 alembic 迁移，不依赖 `create_all` 兜底。
   - 不写"调试用"分支或注释掉的代码。
-  - **技术债登记（双记录）**：代码处写 `# TECH-DEBT(#N): <说明>`，同时在 [docs/agent_issue.md](docs/agent_issue.md) 追加完整条目。修复后两处同步移除，commit message 引用条目编号。
+  - **技术债登记（双记录）**：代码处写 `# TECH-DEBT(#N): <说明>`，同时在 [docs/issues/agent_issue.md](docs/issues/agent_issue.md) 追加完整条目。修复后两处同步移除，commit message 引用条目编号。
+  - **测试缺陷登记**：所有在生产/手动测试中发现但自动化测试未覆盖的 bug，必须登记到 [docs/issues/test_defects.md](docs/issues/test_defects.md)，包含根因、代码位置、测试缺口分析（为什么测试没覆盖 + 建议补充场景）。审视完毕后迁移至 [docs/issues/test_defects_reviewed.md](docs/issues/test_defects_reviewed.md)。使用 `/review-defects` 触发例行审视。
   - 修改依赖时必须同步更新 `pyproject.toml` 和 `requirements.txt`，两者的依赖列表必须保持一致。
   - `alembic.ini` 禁止非 ASCII 字符（含中文注释），注释一律使用英文。
   - **测试通过要求**：小修改（bug fix、配置调整等）必须确保所有单元测试通过；新增/修改/重构大功能必须确保单元测试、端到端测试、API 测试等全部测试用例通过。
@@ -59,7 +60,7 @@ eragent/
 ├── core/                        # 核心基础设施
 │   ├── database/                # 统一 SQLAlchemy engine / session / Repository / init_db
 │   ├── llm/model_factory.py     # 通用 LLM 创建（多 provider 切换）
-│   ├── memory/                  # 长/短期记忆 + extractor / consolidation / feedback / injection / trimmer
+│   ├── memory/                  # 长/短期记忆 + session recap + chat indexer + recency decay
 │   ├── observability/           # tracing / streaming / store / checkpointer / display_labels
 │   ├── etl/                     # Graphiti ETL（EBS → Neo4j 时序图谱）
 │   │   ├── client / config / pipeline / scheduler / state / query_backend
@@ -87,16 +88,17 @@ eragent/
 │   │   ├── oracle_ebs/          # Oracle EBS 实现（models / repository / graph_schema）
 │   │   └── new_erp/             # 新 ERP 实现（models / repository / graph_schema）
 │   ├── rules/                   # three_way_match / price_variance / payment_compliance / supplier_performance
-│   ├── tools/                   # LangChain @tool 工具包（27 个）
+│   ├── tools/                   # LangChain @tool 工具包（28 个）
 │   │   ├── pg/                  # PostgreSQL 查询工具（query / analysis / advanced，15 个）
 │   │   ├── graph/               # 图查询工具（search / entity / traversal / anomaly / comparison，12 个）
+│   │   ├── chat_history.py      # 会话历史检索工具（1 个）
 │   │   └── _inject.py / _output.py
 │   ├── ontology/p2p.owl         # OWL 本体（非 Python 包）
 │   └── mock_data/generator.py
-├── docs/                        # 技术债清单 agent_issue.md、架构图、设计规格等
-├── migrations/                  # Alembic（已落地 13 个版本：0001 baseline → 0013 etl_sync_state）
-├── scripts/                     # 部署辅助（deploy_timezone / route_hit_rate / start.sh）
-├── tests/                       # 60 单元 + 8 集成测试文件，pytest 收集 1521 用例
+├── docs/                        # 架构图、设计规格、问题追踪、测试、参考资料
+├── migrations/                  # Alembic（已落地 15 个版本：0001 baseline → 0015 event_dates_to_timestamp）
+├── scripts/                     # 部署辅助（deploy_timezone / backfill_chat_index / start.sh）
+├── tests/                       # 67 单元 + 8 集成测试文件，pytest 收集 1663 用例
 │   ├── conftest.py              # 基础 fixture（最小化）
 │   ├── fixtures/p2p.py          # P2P 专属 fixture（pytest_plugins 引用，需 __init__.py）
 │   ├── unit/ integration/ http/
@@ -116,7 +118,7 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **可观测性**：通过 LangChain 中间件采集 agent / tool 执行 trace，写入 PostgreSQL，可经 `/traces` API 查询。
 - **ModuleProvider 解耦**：Orchestrator 通过 `ModuleProvider` Protocol 与业务模块交互（路由规则、DAG 模板、工具集、实体模式、记忆构建、Plan 提示词），不直接 import 模块代码。新增模块只需实现 Protocol 并在启动时注册。
 - **多数据源支持**：`modules/p2p/schemas/protocol.py` 定义 `P2PRepositoryProtocol`，工具/规则只依赖该抽象；`oracle_ebs/` 与 `new_erp/` 各自实现 models + repository + graph_schema，按配置切换数据源。
-- **记忆模块**：长期记忆按 `user_id` 隔离（PostgreSQL），短期记忆由 LangGraph PostgresSaver checkpointer 承担（按 `session_id` 隔离）。
+- **记忆模块**：长期记忆按 `user_id` 隔离（PostgreSQL），短期记忆由 LangGraph PostgresSaver checkpointer 承担（按 `session_id` 隔离）。Session recap + chat history indexer 支持跨会话回忆。
 - **编排粒度（DAG + Plan and Solve + ReAct 共存）**：L1/L2 命中 → DAG 并行执行 + ReportAgent 汇总；L3 兜底 → Planner（`core/orchestrator/planner.py`）一次 LLM 调用生成完整 DAG 计划，由 DAGExecutor 并行执行，替代 ReAct 多轮串行；规划失败/低置信度时降级到 ReAct 自主调用工具；早退路由（META/CHITCHAT/OUT_OF_SCOPE）→ 模板响应。意图模糊时不前置拦截，遵循"尽量回复"原则。
 - **异步分析（SSE）**：`POST /analyze/async` + SSE 流式事件。`EventBus` 支持 memory（单进程）/ Redis（多 worker）双后端，多 worker 部署时 memory 后端 fail-fast。
 - **会话历史**：`core/chat/` 独立持久化用户消息/助手回复（与 LangGraph checkpointer 短期记忆解耦），通过 `/sessions/*` API 暴露。
@@ -125,7 +127,7 @@ from modules.p2p.rules.three_way_match import ThreeWayMatchChecker
 - **时区约定**：全链路统一业务时区（默认 `Asia/Shanghai`），由 `app.timezone` / `APP_TIMEZONE` 配置。Python 侧**禁止** `datetime.utcnow()` / `datetime.now(timezone.utc)`，必须经 `core.time_utils.now_cn()` 产生时间戳。PG 引擎通过 `connect_args.options` 注入 `-c TimeZone=<tz>`。
 - **Graphiti ETL**：`core/etl/` 将 PostgreSQL（EBS 镜像表）同步到 Graphiti（Neo4j）时序知识图谱。全量初始化 + 每 10 分钟增量同步（`LAST_UPDATE_DATE` 水位线）。5 域按依赖顺序：主数据 → 采购 → 收货 → 应付 → 寻源合同。20 张表声明式映射为 15 节点 + 19 边类型。
 - **双后端查询模式**：`graphiti_etl.query_backend` 控制查询路径 — `graphiti` / `postgresql` / `hybrid`（图优先 SQL 降级）。通过 `QueryBackend` Protocol 透明切换，过渡期使用 `hybrid`。
-- **工具集**：PG 工具 15 个 + 图工具 12 个 = 27 个 LangChain `@tool`，按 `pg/` 与 `graph/` 分包组织，统一 `_inject.py` 注入 Repository / GraphitiClient / QueryBackend。
+- **工具集**：PG 工具 15 个 + 图工具 12 个 + chat 工具 1 个 = 28 个 LangChain `@tool`，按 `pg/` 与 `graph/` 分包组织，统一 `_inject.py` 注入 Repository / GraphitiClient / QueryBackend。
 
 ## 配置要点
 - 敏感信息通过环境变量注入：`LLM_API_KEY`、`LLM_FAST_API_KEY`、`NEO4J_PASSWORD`、`POSTGRES_PASSWORD`
@@ -142,6 +144,10 @@ pip install -e ".[dev]"
 pytest --cov=. --cov-report=term-missing --cov-fail-under=90
 ```
 
+## 本地服务
+- 部署端口：**8080**（`http://localhost:8080`）
+- 初始化数据：`POST /api/v1/ptp-agent/init-data?sync_to_neo4j=true`
+
 ## 数据库迁移
 ```bash
 alembic upgrade head                              # 升到最新版本
@@ -154,15 +160,16 @@ alembic revision --autogenerate -m "描述"          # 生成新迁移
 - `tests/` 目录及子目录不需要 `__init__.py`（pytest 自动发现，`tests/fixtures/` 除外，需要供 `pytest_plugins` 引用）
 - `modules/p2p/ontology/` 仅存放 OWL 文件，不是 Python 包，无 `__init__.py`
 - `modules/p2p/rules/__init__.py` 提供四个规则类的统一导出
-- `modules/p2p/tools/__init__.py` 提供全部 27 个 @tool 函数的统一导出（PG 15 + Graph 12）
+- `modules/p2p/tools/__init__.py` 提供全部 28 个 @tool 函数的统一导出（PG 15 + Graph 12 + Chat 1）
 - `core/orchestrator/router/__init__.py` 承载 IntentRouter 三级路由核心逻辑
 
 ## 当前进度
 - 所有功能模块及七阶段架构重构（Phase 1 → 7.3）已全部完成
-- Graphiti ETL 全部 6 个 Phase（0-6）已完成：表结构改造（20 张 EBS 表）、ETL 基础设施、Extractor/Transformer/Loader、Pipeline/Scheduler、12 个图查询工具、LLM 抽取、Admin API、双后端查询模式
+- Graphiti ETL 全部 6 个 Phase（0-6）已完成：表结构改造、ETL 基础设施、Pipeline/Scheduler、12 个图查询工具、双后端查询模式
 - 多数据源改造已落地：`P2PRepositoryProtocol` 抽象 + `oracle_ebs`/`new_erp` 双实现
 - Plan and Solve 已接管 lookup 关键词推断与 L3 兜底路径
-- Alembic 迁移体系已落地 13 个版本（0001 baseline → 0013 etl_sync_state）
-- 单元测试 60 个文件 + 集成测试 8 个文件（pytest 收集 1521 用例，覆盖率 90.64%）
+- 长程对话记忆 v2：session recap + chat indexer + recency decay + idle watcher
+- Alembic 迁移体系已落地 15 个版本（0001 baseline → 0015 event_dates_to_timestamp）
+- 单元测试 67 个文件 + 集成测试 8 个文件（pytest 收集 1663 用例，覆盖率 90.36%）
 - 端到端测试（真实 LLM）通过
-- 架构层技术债见 [docs/agent_issue.md](docs/agent_issue.md)
+- 架构层技术债见 [docs/issues/agent_issue.md](docs/issues/agent_issue.md)

@@ -1,0 +1,103 @@
+sequenceDiagram
+    autonumber
+    participant Trigger as Trigger (Scheduler/API/CLI)
+    participant PL as ETLPipeline
+    participant SM as SyncStateManager
+    participant EX_M as Extractor: master_data
+    participant EX_P as Extractor: purchasing
+    participant EX_R as Extractor: receiving
+    participant EX_A as Extractor: payables
+    participant EX_S as Extractor: sourcing
+    participant TF as StructuredTransformer
+    participant LLM_E as LLMTextExtractor
+    participant LD as GraphitiLoader
+    participant PG as PostgreSQL (EBS)
+    participant Neo as Neo4j (Graphiti)
+    participant LLM as LLM
+
+    Trigger->>PL: run_full_sync() / run_incremental()
+
+    %% 模式判定
+    alt Full Sync
+        PL->>Neo: clear_graph()
+        Note over PL: 全量模式, 无水位线过滤
+    else Incremental
+        PL->>SM: get_watermarks(all_domains)
+        SM-->>PL: {domain: last_update_date}
+        Note over PL: 增量模式, LAST_UPDATE_DATE 过滤
+    end
+
+    %% Phase 1: master_data 串行 (其他域依赖它)
+    rect rgb(224, 247, 250)
+    Note over PL,Neo: Phase 1: master_data (串行, 优先)
+    PL->>EX_M: extract(tables, watermark)
+    EX_M->>PG: SELECT * FROM ap_suppliers, mtl_system_items WHERE ...
+    PG-->>EX_M: raw_rows
+    EX_M-->>PL: extracted_data
+
+    PL->>TF: transform(extracted_data, registry_mapping)
+    TF-->>PL: nodes + edges
+
+    opt 含自由文本字段
+        PL->>LLM_E: extract_relations(text_fields)
+        LLM_E->>LLM: 抽取实体关系
+        LLM-->>LLM_E: extra_facts
+        LLM_E-->>PL: additional_edges
+    end
+
+    PL->>LD: load(nodes, edges)
+    LD->>Neo: Episode API batch write
+    Neo-->>LD: ack
+
+    PL->>SM: update_watermark("master_data", now)
+    end
+
+    %% Phase 2: 剩余 4 域并行 (max_concurrent=3)
+    rect rgb(232, 245, 233)
+    Note over PL,Neo: Phase 2: 4 域并行 (semaphore=3)
+    par purchasing
+        PL->>EX_P: extract(tables, watermark)
+        EX_P->>PG: SELECT FROM po_headers, po_lines, ...
+        PG-->>EX_P: raw_rows
+        EX_P-->>PL: data
+        PL->>TF: transform(data)
+        TF-->>PL: nodes + edges
+        PL->>LD: load(nodes, edges)
+        LD->>Neo: write
+        PL->>SM: update_watermark("purchasing")
+    and receiving
+        PL->>EX_R: extract(tables, watermark)
+        EX_R->>PG: SELECT FROM rcv_transactions, ...
+        PG-->>EX_R: raw_rows
+        EX_R-->>PL: data
+        PL->>TF: transform(data)
+        TF-->>PL: nodes + edges
+        PL->>LD: load(nodes, edges)
+        LD->>Neo: write
+        PL->>SM: update_watermark("receiving")
+    and payables
+        PL->>EX_A: extract(tables, watermark)
+        EX_A->>PG: SELECT FROM ap_invoices, ap_checks, ...
+        PG-->>EX_A: raw_rows
+        EX_A-->>PL: data
+        PL->>TF: transform(data)
+        TF-->>PL: nodes + edges
+        PL->>LD: load(nodes, edges)
+        LD->>Neo: write
+        PL->>SM: update_watermark("payables")
+    and sourcing (等待 semaphore 释放)
+        PL->>EX_S: extract(tables, watermark)
+        EX_S->>PG: SELECT FROM pon_auction_headers, okc_k_headers, ...
+        PG-->>EX_S: raw_rows
+        EX_S-->>PL: data
+        PL->>TF: transform(data)
+        TF-->>PL: nodes + edges
+        PL->>LD: load(nodes, edges)
+        LD->>Neo: write
+        PL->>SM: update_watermark("sourcing")
+    end
+    end
+
+    %% 结果汇总
+    PL->>PL: aggregate SyncResult (total_rows, nodes, edges, errors)
+    PL-->>Trigger: SyncResult

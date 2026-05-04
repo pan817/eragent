@@ -59,22 +59,50 @@ class ETLPipeline:
         return await self._state.needs_full_sync(all_tables)
 
     async def run_full_sync(self) -> SyncResult:
-        """Execute a full sync: clear Neo4j, then rebuild all domains."""
+        """Execute a full sync: clear Neo4j, then rebuild all domains.
+
+        Two-phase execution: master_data first (other domains' edges
+        reference master data nodes), then remaining domains in parallel.
+        """
         _logger.info("ETL full sync started — clearing Neo4j graph")
         t0 = time.monotonic()
         result = SyncResult(sync_type="full")
 
-        # Clear Neo4j before full rebuild
         await self._loader._client.clear_graph()
 
         with etl_tracer.sync("full") as sync_id:
-            for domain_name in _DOMAIN_ORDER:
-                ext = self._extractors.get(domain_name)
-                if ext is None:
-                    continue
+            # Phase 1: master_data must complete first
+            master_ext = self._extractors.get("master_data")
+            if master_ext is not None:
                 await self._sync_domain(
-                    ext, sync_type="FULL", result=result, sync_id=sync_id
+                    master_ext, sync_type="FULL", result=result, sync_id=sync_id,
                 )
+
+            # Phase 2: remaining domains in parallel
+            remaining = [
+                d for d in _DOMAIN_ORDER
+                if d != "master_data" and d in self._extractors
+            ]
+            if remaining:
+                partials = await asyncio.gather(*[
+                    self._sync_domain_isolated(
+                        self._extractors[d], sync_type="FULL", sync_id=sync_id,
+                    )
+                    for d in remaining
+                ], return_exceptions=True)
+
+                for domain_name, p in zip(remaining, partials):
+                    if isinstance(p, BaseException):
+                        _logger.error(
+                            "ETL full sync domain %s raised: %s",
+                            domain_name, p, exc_info=p,
+                        )
+                        continue
+                    result.total_rows += p.total_rows
+                    result.total_nodes += p.total_nodes
+                    result.total_edges += p.total_edges
+                    result.failed_tables.extend(p.failed_tables)
+                    result.succeeded_tables.extend(p.succeeded_tables)
 
         result.duration_ms = (time.monotonic() - t0) * 1000
         status = "success" if not result.failed_tables else "partial_failure"
@@ -147,6 +175,17 @@ class ETLPipeline:
     # Internal
     # ------------------------------------------------------------------
 
+    async def _sync_domain_isolated(
+        self,
+        extractor: BaseExtractor,
+        sync_type: str,
+        sync_id: str | None = None,
+    ) -> SyncResult:
+        """Run _sync_domain with its own SyncResult (safe for asyncio.gather)."""
+        partial = SyncResult(sync_type=sync_type.lower())
+        await self._sync_domain(extractor, sync_type=sync_type, result=partial, sync_id=sync_id)
+        return partial
+
     async def _sync_domain(
         self,
         extractor: BaseExtractor,
@@ -154,41 +193,60 @@ class ETLPipeline:
         result: SyncResult,
         sync_id: str | None = None,
     ) -> None:
-        """Sync all tables in a single domain (sequential within domain)."""
+        """Sync all tables in a domain: nodes in parallel, then edges in batch."""
         domain = extractor.domain()
         domain_span_id = f"domain:{domain}"
 
         with etl_tracer.span("domain", domain, sync_id or "") as domain_attrs:
-            for table_name in extractor.table_names():
-                try:
-                    await self._sync_table(
-                        extractor, table_name, domain, sync_type, result,
-                        sync_id=sync_id, parent_span_id=domain_span_id,
-                    )
-                    result.succeeded_tables.append(table_name)
-                except Exception as exc:
-                    result.failed_tables.append(table_name)
-                    etl_metrics.inc_errors(domain, type(exc).__name__)
-                    _logger.error(
-                        "ETL sync failed for %s.%s",
-                        domain,
-                        table_name,
-                    exc_info=True,
+            # Phase 1: extract + transform + write nodes (parallel across tables)
+            table_names = extractor.table_names()
+            table_results = await asyncio.gather(*[
+                self._sync_table_nodes(
+                    extractor, tn, domain, sync_type,
+                    sync_id=sync_id, parent_span_id=domain_span_id,
                 )
+                for tn in table_names
+            ], return_exceptions=True)
 
-    async def _sync_table(
+            # Aggregate results and collect pending edges
+            all_pending_edges: list[Any] = []
+            for table_name, tr in zip(table_names, table_results):
+                if isinstance(tr, BaseException):
+                    result.failed_tables.append(table_name)
+                    etl_metrics.inc_errors(domain, type(tr).__name__)
+                    _logger.error(
+                        "ETL sync failed for %s.%s: %s",
+                        domain, table_name, tr,
+                        exc_info=tr,
+                    )
+                    continue
+                rows, nodes, edges_pending = tr
+                result.total_rows += rows
+                result.total_nodes += nodes
+                all_pending_edges.extend(edges_pending)
+                result.succeeded_tables.append(table_name)
+
+            # Phase 2: create all edges after every table's nodes are written
+            if all_pending_edges:
+                edges_created = await self._loader.create_edges(all_pending_edges)
+                result.total_edges += edges_created
+                domain_attrs["edges"] = edges_created
+
+    async def _sync_table_nodes(
         self,
         extractor: BaseExtractor,
         table_name: str,
         domain: str,
         sync_type: str,
-        result: SyncResult,
         sync_id: str | None = None,
         parent_span_id: str | None = None,
-    ) -> None:
-        """Extract, transform, and load one table."""
+    ) -> tuple[int, int, list[Any]]:
+        """Extract, transform, and write nodes for one table.
+
+        Returns:
+            (total_rows, total_nodes, pending_edges)
+        """
         table_t0 = time.monotonic()
-        # Mark RUNNING
         now = now_cn()
         await self._state.update_watermark(
             table_name=table_name,
@@ -201,11 +259,9 @@ class ETLPipeline:
 
         total_rows = 0
         total_nodes = 0
-        total_edges = 0
         max_watermark: datetime | None = None
-        pending_edges: list[Any] = []  # collect edges for Cypher creation
+        pending_edges: list[Any] = []
 
-        # Choose iterator
         if sync_type == "FULL":
             row_iter = extractor.extract_full(table_name)
         else:
@@ -224,11 +280,9 @@ class ETLPipeline:
                 )
                 total_nodes += load_result.loaded
 
-            # Collect edges for post-load Cypher creation
             pending_edges.extend(transform_result.edges)
 
-            # Free text → Graphiti add_episode (LLM extraction)
-            if transform_result.free_text_records:
+            if transform_result.free_text_records and self._llm_extractor is not None:
                 try:
                     await self._loader.load_free_text(
                         transform_result.free_text_records
@@ -242,7 +296,6 @@ class ETLPipeline:
 
             total_rows += len(batch)
 
-            # Track max watermark from batch
             for row in batch:
                 lud = row.get("last_update_date")
                 if lud is not None:
@@ -250,7 +303,6 @@ class ETLPipeline:
                         if max_watermark is None or lud > max_watermark:
                             max_watermark = lud
 
-        # Update state
         final_watermark = max_watermark or now
         await self._state.update_watermark(
             table_name=table_name,
@@ -261,32 +313,24 @@ class ETLPipeline:
             status="SUCCESS",
         )
 
-        # Create edges via Cypher after all nodes are written
-        if pending_edges:
-            edges_created = await self._loader.create_edges(pending_edges)
-            total_edges = edges_created
-
-        result.total_rows += total_rows
-        result.total_nodes += total_nodes
-        result.total_edges += total_edges
-
-        # Record per-table metrics
+        table_duration_ms = (time.monotonic() - table_t0) * 1000
         etl_metrics.inc_rows_extracted(domain, table_name, total_rows)
 
-        # Record trace span with real duration
         if sync_id:
-            table_duration = (time.monotonic() - table_t0) * 1000
             etl_tracer.record_span(
                 "table", table_name, sync_id,
-                duration_ms=table_duration,
+                duration_ms=table_duration_ms,
                 parent_id=parent_span_id,
-                rows=total_rows, nodes=total_nodes, edges=total_edges,
+                rows=total_rows, nodes=total_nodes, edges=len(pending_edges),
             )
 
         _logger.info(
-            "ETL table synced: %s rows=%d nodes=%d edges=%d",
+            "ETL table synced: %s rows=%d nodes=%d pending_edges=%d duration=%.0fms",
             table_name,
             total_rows,
             total_nodes,
-            total_edges,
+            len(pending_edges),
+            table_duration_ms,
         )
+
+        return total_rows, total_nodes, pending_edges

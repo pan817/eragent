@@ -1,0 +1,245 @@
+digraph DataModel {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10];
+    edge [fontname="Helvetica", fontsize=8];
+    label="eragent Data Model - PostgreSQL Tables by Module";
+    labelloc=t;
+    fontsize=14;
+    compound=true;
+    nodesep=0.4;
+    ranksep=0.6;
+
+    /* ========================================================
+       Module 1: EBS Mirror (core/database/models.py) - 20 tables
+       Grouped by domain
+       ======================================================== */
+
+    subgraph cluster_ebs {
+        label="EBS Mirror (core/database/models.py)\n20 tables";
+        style=filled;
+        fillcolor="#E3F0FF";
+        color="#7FA7D4";
+        fontsize=11;
+
+        /* --- Master Data --- */
+        subgraph cluster_ebs_master {
+            label="Master Data";
+            style=dashed;
+            color="#7FA7D4";
+
+            ap_suppliers [shape=record, label="{ap_suppliers|PK: supplier_id}"];
+            ap_supplier_sites [shape=record, label="{ap_supplier_sites|PK: supplier_site_id\lFK: supplier_id}"];
+            mtl_system_items [shape=record, label="{mtl_system_items|PK: inventory_item_id}"];
+        }
+
+        /* --- Purchasing --- */
+        subgraph cluster_ebs_purchasing {
+            label="Purchasing";
+            style=dashed;
+            color="#7FA7D4";
+
+            po_headers [shape=record, label="{po_headers|PK: po_header_id\lFK: supplier_id}"];
+            po_lines [shape=record, label="{po_lines|PK: po_line_id\lFK: po_header_id}"];
+            po_line_locations [shape=record, label="{po_line_locations|PK: line_location_id\lFK: po_line_id}"];
+            po_distributions [shape=record, label="{po_distributions|PK: po_distribution_id\lFK: po_line_id}"];
+        }
+
+        /* --- Receiving --- */
+        subgraph cluster_ebs_receiving {
+            label="Receiving";
+            style=dashed;
+            color="#7FA7D4";
+
+            rcv_shipment_headers [shape=record, label="{rcv_shipment_headers|PK: shipment_header_id}"];
+            rcv_shipment_lines [shape=record, label="{rcv_shipment_lines|PK: shipment_line_id\lFK: shipment_header_id}"];
+            rcv_transactions [shape=record, label="{rcv_transactions|PK: transaction_id\lFK: po_header_id, po_line_id}"];
+        }
+
+        /* --- Payables --- */
+        subgraph cluster_ebs_payables {
+            label="Payables";
+            style=dashed;
+            color="#7FA7D4";
+
+            ap_invoices [shape=record, label="{ap_invoices|PK: invoice_id\lFK: supplier_id}"];
+            ap_invoice_lines [shape=record, label="{ap_invoice_lines|PK: invoice_line_id\lFK: invoice_id}"];
+            ap_invoice_distributions [shape=record, label="{ap_invoice_distributions|PK: invoice_distribution_id\lFK: invoice_id}"];
+            ap_invoice_payments [shape=record, label="{ap_invoice_payments|PK: invoice_payment_id\lFK: invoice_id}"];
+            ap_payment_schedules [shape=record, label="{ap_payment_schedules|PK: payment_schedule_id\lFK: invoice_id}"];
+            ap_checks [shape=record, label="{ap_checks|PK: check_id\lFK: supplier_id}"];
+        }
+
+        /* --- Sourcing --- */
+        subgraph cluster_ebs_sourcing {
+            label="Sourcing";
+            style=dashed;
+            color="#7FA7D4";
+
+            pon_auction_headers [shape=record, label="{pon_auction_headers|PK: auction_header_id}"];
+            pon_bid_headers [shape=record, label="{pon_bid_headers|PK: bid_number\lFK: auction_header_id}"];
+            okc_k_headers [shape=record, label="{okc_k_headers|PK: contract_id\lFK: supplier_id}"];
+            okc_k_lines [shape=record, label="{okc_k_lines|PK: contract_line_id\lFK: contract_id}"];
+        }
+    }
+
+    /* ========================================================
+       Module 2: ETL State (core/etl/tables.py) - 1 table
+       ======================================================== */
+
+    subgraph cluster_etl {
+        label="ETL State (core/etl/tables.py)\n1 table";
+        style=filled;
+        fillcolor="#E0F7FA";
+        color="#4DB6AC";
+        fontsize=11;
+
+        etl_sync_state [shape=record, label="{etl_sync_state|PK: domain}"];
+    }
+
+    /* ========================================================
+       Module 3: Observability (core/observability/tables.py) - 2 tables
+       ======================================================== */
+
+    subgraph cluster_observability {
+        label="Observability (core/observability/tables.py)\n2 tables";
+        style=filled;
+        fillcolor="#F5F5F5";
+        color="#AAAAAA";
+        fontsize=11;
+
+        trace_runs [shape=record, label="{trace_runs|PK: trace_id}"];
+        trace_spans [shape=record, label="{trace_spans|PK: span_id\lFK: trace_id}"];
+    }
+
+    /* ========================================================
+       Module 4: Memory (core/memory/) - 3 tables
+       ======================================================== */
+
+    subgraph cluster_memory {
+        label="Memory (core/memory/)\n3 tables";
+        style=filled;
+        fillcolor="#FCE4EC";
+        color="#C48B9F";
+        fontsize=11;
+
+        long_term_memories [shape=record, label="{long_term_memories|PK: id\luser_id isolation}"];
+        session_recaps [shape=record, label="{session_recaps|PK: id}"];
+        chat_index_fragments [shape=record, label="{chat_index_fragments|PK: id}"];
+    }
+
+    /* ========================================================
+       Module 5: Chat History (core/chat/) - 1 table
+       ======================================================== */
+
+    subgraph cluster_chat {
+        label="Chat History (core/chat/)\n1 table";
+        style=filled;
+        fillcolor="#FFFADD";
+        color="#C9A96E";
+        fontsize=11;
+
+        chat_messages [shape=record, label="{chat_messages|PK: id\lsession_id}"];
+    }
+
+    /* ========================================================
+       Module 6: New ERP (modules/p2p/schemas/new_erp/models.py) - 7 tables
+       ======================================================== */
+
+    subgraph cluster_new_erp {
+        label="New ERP (modules/p2p/schemas/new_erp/)\n7 tables";
+        style=filled;
+        fillcolor="#FFF8E1";
+        color="#FFB74D";
+        fontsize=11;
+
+        new_ap_suppliers [shape=record, label="{new_ap_suppliers|PK: supplier_id}"];
+        new_po_headers [shape=record, label="{new_po_headers|PK: po_header_id\lFK: supplier_id}"];
+        new_po_lines [shape=record, label="{new_po_lines|PK: po_line_id\lFK: po_header_id}"];
+        new_po_line_locations [shape=record, label="{new_po_line_locations|PK: line_location_id\lFK: po_line_id}"];
+        new_rcv_transactions [shape=record, label="{new_rcv_transactions|PK: transaction_id\lFK: po_header_id}"];
+        new_ap_invoices [shape=record, label="{new_ap_invoices|PK: invoice_id\lFK: supplier_id}"];
+        new_ap_checks [shape=record, label="{new_ap_checks|PK: check_id\lFK: supplier_id}"];
+    }
+
+    /* ========================================================
+       EBS Mirror - FK Relationships (solid arrows)
+       ======================================================== */
+
+    /* Master Data */
+    ap_supplier_sites -> ap_suppliers [label="supplier_id"];
+
+    /* Purchasing */
+    po_headers -> ap_suppliers [label="supplier_id"];
+    po_lines -> po_headers [label="po_header_id"];
+    po_line_locations -> po_lines [label="po_line_id"];
+    po_distributions -> po_lines [label="po_line_id"];
+
+    /* Receiving */
+    rcv_shipment_lines -> rcv_shipment_headers [label="shipment_header_id"];
+    rcv_transactions -> po_headers [label="po_header_id"];
+    rcv_transactions -> po_lines [label="po_line_id"];
+
+    /* Payables */
+    ap_invoices -> ap_suppliers [label="supplier_id"];
+    ap_invoice_lines -> ap_invoices [label="invoice_id"];
+    ap_invoice_distributions -> ap_invoices [label="invoice_id"];
+    ap_invoice_payments -> ap_invoices [label="invoice_id"];
+    ap_payment_schedules -> ap_invoices [label="invoice_id"];
+    ap_checks -> ap_suppliers [label="supplier_id"];
+
+    /* Sourcing */
+    pon_bid_headers -> pon_auction_headers [label="auction_header_id"];
+    okc_k_headers -> ap_suppliers [label="supplier_id"];
+    okc_k_lines -> okc_k_headers [label="contract_id"];
+
+    /* ========================================================
+       Observability - FK Relationships (solid arrows)
+       ======================================================== */
+
+    trace_spans -> trace_runs [label="trace_id"];
+
+    /* ========================================================
+       New ERP - FK Relationships (solid arrows)
+       ======================================================== */
+
+    new_po_headers -> new_ap_suppliers [label="supplier_id"];
+    new_po_lines -> new_po_headers [label="po_header_id"];
+    new_po_line_locations -> new_po_lines [label="po_line_id"];
+    new_rcv_transactions -> new_po_headers [label="po_header_id"];
+    new_ap_invoices -> new_ap_suppliers [label="supplier_id"];
+    new_ap_checks -> new_ap_suppliers [label="supplier_id"];
+
+    /* ========================================================
+       Cross-module references (dashed arrows)
+       Note: ETL sync_state.domain references EBS domains conceptually
+       ======================================================== */
+
+    etl_sync_state -> ap_suppliers [style=dashed, label="syncs domain\nmaster_data", constraint=false];
+    etl_sync_state -> po_headers [style=dashed, label="syncs domain\npurchasing", constraint=false];
+
+    /* ========================================================
+       Legend
+       ======================================================== */
+
+    subgraph cluster_legend {
+        label="Legend";
+        style=filled;
+        fillcolor="white";
+        color="#333333";
+        fontsize=11;
+
+        legend [shape=plaintext, label=<
+            <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+                <TR><TD BGCOLOR="#E3F0FF">EBS Mirror (20 tables)</TD></TR>
+                <TR><TD BGCOLOR="#E0F7FA">ETL State (1 table)</TD></TR>
+                <TR><TD BGCOLOR="#F5F5F5">Observability (2 tables)</TD></TR>
+                <TR><TD BGCOLOR="#FCE4EC">Memory (3 tables)</TD></TR>
+                <TR><TD BGCOLOR="#FFFADD">Chat History (1 table)</TD></TR>
+                <TR><TD BGCOLOR="#FFF8E1">New ERP (7 tables)</TD></TR>
+                <TR><TD>&#8594; Solid: FK within module</TD></TR>
+                <TR><TD>&#8674; Dashed: Cross-module reference</TD></TR>
+            </TABLE>
+        >];
+    }
+}

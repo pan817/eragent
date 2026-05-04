@@ -16,7 +16,7 @@ from typing import Any
 from core.logging_utils import get_logger
 from core.observability.tracing import record_span, _truncate_text
 from core.orchestrator.dag.registry import ToolRegistry
-from modules.p2p.errors import ReportGenerationError
+from core.orchestrator.dag.errors import ReportGenerationError
 
 _logger = get_logger(__name__)
 

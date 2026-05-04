@@ -1,12 +1,12 @@
 """长期记忆表定义（SQLAlchemy Core）。
 
-memories：通用记忆存储；reports：分析报告存储。
+memories / reports / session_summaries / chat_index_dead_letter。
 """
 
 from __future__ import annotations
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, MetaData, Numeric, String, Table, Text
 from sqlalchemy.dialects.postgresql import JSON
 
 
@@ -152,4 +152,64 @@ session_entities_table = Table(
         nullable=False,
         server_default=sa.func.now(),
     ),
+)
+
+
+# ── 会话摘要（SESSION_RECAP 结构化镜像）──────────────────────────────
+# memories 表存自然语言摘要（便于检索注入），本表存结构化字段（便于 admin 查询/统计）。
+
+session_summaries_table = Table(
+    "session_summaries",
+    metadata_obj,
+    Column("session_id", String(36), primary_key=True),
+    Column("user_id", String(128), nullable=False),
+    Column("summary_text", Text, nullable=False),
+    Column("key_entities", JSON, nullable=False, server_default=sa.text("'{}'")),
+    Column("tags", JSON, nullable=False, server_default=sa.text("'[]'")),
+    Column("analysis_count", Integer, nullable=False, server_default=sa.text("0")),
+    Column("confidence", Numeric(3, 2), nullable=True),
+    Column("memory_id", String(36), nullable=True),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
+Index(
+    "session_summaries_user",
+    session_summaries_table.c.user_id,
+    session_summaries_table.c.updated_at.desc(),
+)
+Index(
+    "session_summaries_tags",
+    session_summaries_table.c.tags,
+    postgresql_using="gin",
+)
+
+
+# ── chat 索引死信表 ──────────────────────────────────────────────────
+# 向量索引写入失败重试 N 次后转入死信表，等待人工介入或后台重试。
+
+chat_index_dead_letter_table = Table(
+    "chat_index_dead_letter",
+    metadata_obj,
+    Column("id", String(36), primary_key=True),
+    Column("fragment_data", JSON, nullable=False),
+    Column("error_message", Text, nullable=True),
+    Column("retry_count", Integer, nullable=False, server_default=sa.text("0")),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    Column("last_retry_at", DateTime(timezone=True), nullable=True),
 )

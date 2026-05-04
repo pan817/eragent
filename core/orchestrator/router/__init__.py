@@ -30,10 +30,8 @@ _BYPASS_CONFIDENCE = 0.95
 
 _logger = get_logger(__name__)
 
-# ── P2P 规则常量（从 modules/p2p/intent_rules.py 导入） ──────────────
-from modules.p2p.intent_rules import (
-    ANALYSIS_KEYWORDS as _ANALYSIS_KEYWORDS,
-)
+# ── 分析关键词（由 IntentRouter.__init__ 从 provider 注入） ──────────
+_ANALYSIS_KEYWORDS: set[str] = set()
 
 
 # ── 前置 bypass 检测（按 intent_kind 分类，跳过 L1/L2 直达对应分支） ──
@@ -252,11 +250,21 @@ class IntentRouter:
     L0 bypass + UnifiedRouter，提供 parse() 方法保持接口兼容。
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        provider: Any = None,
+    ) -> None:
         self._settings: Settings = settings or get_settings()
+        self._provider: Any = provider
         self._case_store: Any = None  # 延迟注入的 DAGCaseStore
         self._unified_router: Any = None  # 统一 LLM 路由器（延迟初始化）
         _ir = self._settings.intent_routing
+
+        global _ANALYSIS_KEYWORDS  # noqa: PLW0603
+        if provider is not None:
+            _ANALYSIS_KEYWORDS = provider.get_analysis_keywords()
+
         _logger.info(
             "intent_routing settings: l3_dag_min=%.2f generic_tpl=%s",
             _ir.l3_dag_min_confidence,
@@ -342,7 +350,9 @@ class IntentRouter:
             # 统一 LLM 调用（一次完成意图分类 + 参数提取 + 指代消解）
             if self._unified_router is None:
                 from core.orchestrator.unified_router import UnifiedRouter
-                self._unified_router = UnifiedRouter(settings=self._settings)
+                self._unified_router = UnifiedRouter(
+                    settings=self._settings, provider=self._provider,
+                )
 
             signal = self._unified_router.route(
                 query=query,

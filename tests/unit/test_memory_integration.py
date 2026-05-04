@@ -305,7 +305,7 @@ class TestMemoryType:
         assert MemoryType.DOMAIN_FACT == "domain_fact"
 
     def test_enum_count(self) -> None:
-        assert len(MemoryType) == 5
+        assert len(MemoryType) == 6
 
     def test_str_comparison(self) -> None:
         assert MemoryType.CORRECTION == "correction"
@@ -332,3 +332,119 @@ class TestComputeExpiresAt:
     def test_correction_has_ttl(self, repo: MemoryRepository) -> None:
         expires = repo.compute_expires_at(MemoryType.CORRECTION)
         assert expires is not None
+
+
+# ── TD-001: 类型隔离 — _search_by_type_hybrid 不混入其他类型 ──
+
+
+class TestTypeIsolation:
+    """验证 _search_by_type_hybrid 只返回指定 memory_type 的记忆。"""
+
+    def test_search_by_type_does_not_mix_types(self, repo: MemoryRepository) -> None:
+        """写入多种类型记忆，search_by_type 的 analysis_insight 结果不含其他类型。"""
+        repo.save(
+            user_id="u1", session_id="s1",
+            memory_type=MemoryType.ENTITY_PROFILE,
+            content="SUP-001 供应商画像数据",
+            entity_id="SUP-001",
+        )
+        repo.save(
+            user_id="u1", session_id="s1",
+            memory_type=MemoryType.ANALYSIS_INSIGHT,
+            content="SUP-001 价格差异趋势下降",
+        )
+        repo.save(
+            user_id="u1", session_id="s1",
+            memory_type=MemoryType.CORRECTION,
+            content="SUP-001 的折扣不算偏差",
+            metadata={"corrected_analysis_type": "price_variance"},
+        )
+
+        results = repo.search_by_type(
+            user_id="u1", query="SUP-001 价格",
+            entity_ids=["SUP-001"],
+        )
+
+        # analysis_insight 桶只包含 analysis_insight 类型
+        for item in results.get("analysis_insight", []):
+            assert item["memory_type"] == MemoryType.ANALYSIS_INSIGHT
+
+        # entity_profile 桶只包含 entity_profile 类型
+        for item in results.get("entity_profile", []):
+            assert item["memory_type"] == MemoryType.ENTITY_PROFILE
+
+        # correction 桶只包含 correction 类型
+        for item in results.get("correction", []):
+            assert item["memory_type"] == MemoryType.CORRECTION
+
+
+# ── TD-002: analysis_insight 时效窗口过滤 + 注入标注 ──────────
+
+
+class TestInsightRecencyFilter:
+    """验证 analysis_insight 召回受 insight_recall_max_days 约束。"""
+
+    def test_old_insight_filtered_by_recall_window(self, engine: sa.engine.Engine) -> None:
+        """超过 recall_max_days 的 insight 不被 search_by_type 返回。"""
+        repo = MemoryRepository(
+            engine=engine, min_content_len=0, dedupe_window_seconds=0,
+            insight_recall_max_days=7,
+        )
+
+        # 写入一条 insight
+        mid = repo.save(
+            user_id="u1", session_id="s1",
+            memory_type=MemoryType.ANALYSIS_INSIGHT,
+            content="旧结论：物料信息缺失",
+        )
+        assert mid is not None
+
+        # 手动将 created_at 改为 10 天前
+        from core.memory.tables import memories_table
+        old_time = now_cn() - timedelta(days=10)
+        with engine.connect() as conn:
+            conn.execute(
+                memories_table.update()
+                .where(memories_table.c.id == mid)
+                .values(created_at=old_time)
+            )
+            conn.commit()
+
+        results = repo.search_by_type(user_id="u1", query="物料信息")
+        # 超过 7 天窗口，不应返回
+        assert len(results.get("analysis_insight", [])) == 0
+
+    def test_recent_insight_passes_recall_window(self, engine: sa.engine.Engine) -> None:
+        """窗口内的 insight 正常返回。"""
+        repo = MemoryRepository(
+            engine=engine, min_content_len=0, dedupe_window_seconds=0,
+            insight_recall_max_days=7,
+        )
+
+        repo.save(
+            user_id="u1", session_id="s1",
+            memory_type=MemoryType.ANALYSIS_INSIGHT,
+            content="新鲜结论：价格差异趋势上升",
+        )
+
+        results = repo.search_by_type(user_id="u1", query="价格差异趋势")
+        insights = results.get("analysis_insight", [])
+        assert len(insights) >= 1
+        assert insights[0]["memory_type"] == MemoryType.ANALYSIS_INSIGHT
+
+    def test_injection_annotates_insight_with_age(self) -> None:
+        """format_memory_injection 对 analysis_insight 标注天数和提示文案。"""
+        old_time = now_cn() - timedelta(days=3)
+        memories = {
+            "analysis_insight": [
+                {"content": "价格差异趋势下降", "created_at": old_time, "memory_type": "analysis_insight"},
+            ],
+            "correction": [],
+            "entity_profile": [],
+            "domain_fact": [],
+            "user_preference": [],
+        }
+        text = format_memory_injection(memories)
+        assert "以本次查询的实际数据为准" in text
+        assert "(3天前)" in text
+        assert "价格差异趋势下降" in text

@@ -37,11 +37,23 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+from collections.abc import Callable
+
+# chat 消息写入后的索引钩子类型
+ChatMessageHook = Callable[[str, str, str, str, str], None]
+# 签名：(session_id, message_id, role, content, user_id) -> None
+
+
 class ChatRepository:
     """会话历史 CRUD 仓库。"""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        on_message_hook: ChatMessageHook | None = None,
+    ) -> None:
         self._sf = session_factory
+        self._on_message_hook = on_message_hook
 
     # ------------------------------------------------------------------
     # 按指定 ID 创建会话（供 /analyze 自动落库使用）
@@ -445,6 +457,19 @@ class ChatRepository:
                 )
             )
             s.commit()
+
+        if self._on_message_hook is not None:
+            for msg_info in created_msgs:
+                try:
+                    self._on_message_hook(
+                        session_id,
+                        msg_info["id"],
+                        msg_info["role"],
+                        msg_info["content"],
+                        user_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         updated_session = self.get_session(user_id, session_id)
         return {

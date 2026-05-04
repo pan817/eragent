@@ -30,6 +30,8 @@ class MemoryManager:
 
         # 懒初始化的内部组件
         self._feedback_detector: Any = None
+        self._chat_indexer: Any = None
+        self._session_summarizer: Any = None
 
     # ── 分析前：构建记忆上下文 ──────────────────────────────
 
@@ -157,6 +159,240 @@ class MemoryManager:
                 name=f"mem_feedback_{session_id}",
             )
 
+    # ── chat 消息索引（fire-and-forget）─────────────────────
+
+    def on_chat_message(
+        self,
+        session_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        user_id: str,
+    ) -> None:
+        """每条 chat 消息写入后触发的索引钩子。fire-and-forget。"""
+        if not self._settings.memory.chat_history.indexing_enabled:
+            return
+        indexer = self._get_chat_indexer()
+        if indexer is not None:
+            indexer.enqueue(
+                session_id=session_id,
+                message_id=message_id,
+                role=role,
+                content=content,
+                user_id=user_id,
+            )
+
+    # ── SESSION_RECAP idle 触发 ──────────────────────────────
+
+    async def on_session_idle(self, session_id: str, user_id: str) -> None:
+        """会话不活跃超过阈值后触发摘要抽取。
+
+        由 TaskRegistry idle watcher 调用。fire-and-forget 语义，
+        所有异常内部捕获，不向调用方泄露。
+        """
+        if not self._settings.memory.session_recap.enabled:
+            return
+        try:
+            summarizer = self._get_session_summarizer()
+            await summarizer.extract(session_id=session_id, user_id=user_id)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "session recap extraction failed (non-blocking) session=%s: %s",
+                session_id, exc,
+            )
+
+    # ── 跨会话历史对话检索 ──────────────────────────────────
+
+    async def search_chat_history(
+        self,
+        user_id: str,
+        query: str,
+        entity_ids: list[str] | None = None,
+        days: int | None = 30,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """跨会话历史对话检索（双通道：精确 + 语义 + 时间衰减）。
+
+        同步执行，带超时保护。失败/超时返回空列表，不抛异常。
+        """
+        cfg = self._settings.memory.chat_history
+        timeout = cfg.search_timeout_seconds
+        try:
+            return await asyncio.wait_for(
+                self._search_chat_history_impl(
+                    user_id, query, entity_ids, days, limit,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            _logger.warning("chat history search timeout (%.1fs)", timeout)
+            return []
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("chat history search failed: %s", exc)
+            return []
+
+    async def _search_chat_history_impl(
+        self,
+        user_id: str,
+        query: str,
+        entity_ids: list[str] | None,
+        days: int | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """内部实现：双通道检索 + 时间衰减。"""
+        from datetime import timedelta
+
+        from core.time_utils import now_cn
+
+        since = now_cn() - timedelta(days=days) if days else None
+        seen_session_ids: set[str] = set()
+        results: list[dict[str, Any]] = []
+
+        # 通道 A（精确）：按 entity_ids 过滤 session_entities
+        if entity_ids:
+            exact_hits = await asyncio.to_thread(
+                self._channel_a_exact, user_id, entity_ids, since, limit * 2,
+            )
+            for hit in exact_hits:
+                if hit["session_id"] not in seen_session_ids:
+                    hit["match_type"] = "exact"
+                    hit["base_score"] = 1.0
+                    results.append(hit)
+                    seen_session_ids.add(hit["session_id"])
+
+        # 通道 B（语义补充）：仅当 A 未填满
+        if len(results) < limit:
+            remaining = limit * 2 - len(results)
+            semantic_hits = await asyncio.to_thread(
+                self._channel_b_semantic, user_id, query, since, remaining,
+            )
+            for hit in semantic_hits:
+                if hit["session_id"] not in seen_session_ids:
+                    hit["match_type"] = "semantic"
+                    results.append(hit)
+                    seen_session_ids.add(hit["session_id"])
+
+        # 时间衰减 rerank
+        decay_cfg = self._settings.memory.recency_decay
+        from core.memory.recency import apply_recency_decay
+
+        apply_recency_decay(
+            results,
+            lambda_val=decay_cfg.lambda_val,
+            enabled=decay_cfg.enabled,
+        )
+
+        return results[:limit]
+
+    def _channel_a_exact(
+        self,
+        user_id: str,
+        entity_ids: list[str],
+        since: Any | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """通道 A：按 entity_ids 精确匹配 session_entities → 关联 chat_sessions。"""
+        try:
+            import sqlalchemy as sa
+
+            from core.chat.tables import chat_sessions_table
+            from core.database.engine import get_engine
+            from core.memory.tables import session_entities_table
+
+            engine = get_engine(self._settings.postgresql)
+            j = chat_sessions_table.join(
+                session_entities_table,
+                chat_sessions_table.c.id == session_entities_table.c.session_id,
+            )
+            filters = [
+                chat_sessions_table.c.user_id == user_id,
+                chat_sessions_table.c.deleted_at.is_(None),
+            ]
+            if since is not None:
+                filters.append(chat_sessions_table.c.updated_at >= since)
+
+            entity_conditions = []
+            for eid in entity_ids:
+                entity_conditions.append(
+                    sa.cast(session_entities_table.c.entities, sa.Text).like(f"%{eid}%")
+                )
+            if entity_conditions:
+                filters.append(sa.or_(*entity_conditions))
+
+            stmt = (
+                sa.select(
+                    chat_sessions_table.c.id.label("session_id"),
+                    chat_sessions_table.c.title.label("session_title"),
+                    chat_sessions_table.c.last_message_preview.label("snippet"),
+                    session_entities_table.c.entities,
+                    chat_sessions_table.c.updated_at.label("created_at"),
+                )
+                .select_from(j)
+                .where(sa.and_(*filters))
+                .order_by(chat_sessions_table.c.updated_at.desc())
+                .limit(limit)
+            )
+            with engine.connect() as conn:
+                rows = conn.execute(stmt).fetchall()
+            return [
+                {
+                    "session_id": r.session_id,
+                    "session_title": r.session_title or "",
+                    "snippet": r.snippet or "",
+                    "entities": r.entities or {},
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("channel_a_exact error: %s", exc)
+            return []
+
+    def _channel_b_semantic(
+        self,
+        user_id: str,
+        query: str,
+        since: Any | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """通道 B：Chroma chat_history 向量语义召回。"""
+        indexer = self._get_chat_indexer()
+        if indexer is None:
+            return []
+
+        store = indexer._get_vector_store()
+        if store is None:
+            return []
+
+        where_filter: dict[str, Any] = {"user_id": user_id}
+        try:
+            hits = store.search(query=query, top_k=limit, where=where_filter)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("channel_b_semantic error: %s", exc)
+            return []
+
+        results: list[dict[str, Any]] = []
+        for hit in hits:
+            meta = hit.get("metadata", {})
+            distance = hit.get("distance", 1.0)
+            base_score = max(0.0, 1.0 - distance)
+            results.append({
+                "session_id": meta.get("session_id", ""),
+                "session_title": "",
+                "snippet": (hit.get("text", "") or "")[:200],
+                "entities": {},
+                "created_at": meta.get("created_at", ""),
+                "base_score": base_score,
+            })
+
+        if since is not None:
+            from datetime import datetime
+
+            since_str = since.isoformat() if isinstance(since, datetime) else str(since)
+            results = [r for r in results if str(r.get("created_at", "")) >= since_str]
+
+        return results
+
     # ── 会话管理（委托 ShortTermMemory）─────────────────────
 
     def load_session(self, session_id: str) -> dict[str, Any]:
@@ -200,6 +436,8 @@ class MemoryManager:
 
     def close(self) -> None:
         """关闭所有内部组件（进程退出时调用）。"""
+        if self._chat_indexer is not None:
+            self._chat_indexer.close()
         self._short_term.close()
 
     # ── 内部方法（private）──────────────────────────────────
@@ -320,3 +558,19 @@ class MemoryManager:
 
             self._feedback_detector = FeedbackDetector()
         return self._feedback_detector
+
+    def _get_chat_indexer(self) -> Any:
+        """获取全局 ChatHistoryIndexer 单例。"""
+        if self._chat_indexer is None:
+            from core.memory import get_chat_indexer
+
+            self._chat_indexer = get_chat_indexer()
+        return self._chat_indexer
+
+    def _get_session_summarizer(self) -> Any:
+        """懒初始化 SessionSummaryExtractor。"""
+        if self._session_summarizer is None:
+            from core.memory.session_summary import SessionSummaryExtractor
+
+            self._session_summarizer = SessionSummaryExtractor(self._settings)
+        return self._session_summarizer

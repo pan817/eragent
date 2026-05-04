@@ -1,0 +1,161 @@
+// ERP Agent - Graphiti ETL Pipeline Architecture
+// 布局策略：TB 从上到下，触发源 → 编排 → 三阶段流水线 → 外部系统
+// Render: dot -Tpng -Gdpi=150 arch_etl.dot -o arch_etl.png
+digraph etl_pipeline {
+    rankdir=TB;
+    nodesep=0.4;
+    ranksep=0.6;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="Graphiti ETL Pipeline 架构图"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── ① 触发源 ───────────────────────────────────────────────────
+    subgraph cluster_triggers {
+        label="① 触发源"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E3F0FF"; color="#7FA7D4";
+        trigger_scheduler [label="ETLScheduler\n定时触发 (每 10 分钟增量)", shape=box, fontsize=11];
+        trigger_api       [label="API 触发\nPOST /api/v1/ptp-agent/etl/trigger", shape=cds, fontsize=10];
+        trigger_cli       [label="手动触发\nCLI / script", shape=box, fontsize=10];
+    }
+
+    // ── ② ETLPipeline 编排器 ────────────────────────────────────────
+    subgraph cluster_pipeline {
+        label="② ETLPipeline 编排器"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E0F7FA"; color="#4DB6AC";
+        pipeline_core [label="ETLPipeline\n(core/etl/pipeline.py)", shape=box, fontsize=12, fillcolor="#B2DFDB"];
+        pipeline_full [label="全量模式\n初始加载，无水位线过滤", shape=box, fontsize=9];
+        pipeline_incr [label="增量模式\nLAST_UPDATE_DATE 水位线", shape=box, fontsize=9];
+    }
+
+    // ── ③ Stage 1: Extractors (5 域提取器) ──────────────────────────
+    subgraph cluster_extractors {
+        label="③ Stage 1: Extractors (5 域提取器，按依赖顺序)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E0F7FA"; color="#4DB6AC";
+
+        ext_base [label="BaseExtractor\n(base.py)", shape=box, fontsize=9, fillcolor="#B2DFDB"];
+
+        subgraph cluster_ext_domains {
+            label=""; style="invis";
+            ext_master [label="① master_data.py\n供应商 / 物料", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+            ext_purch  [label="② purchasing.py\nPO 头 / 行 / 分配", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+            ext_recv   [label="③ receiving.py\n收货 / 发运", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+            ext_pay    [label="④ payables.py\n发票 / 付款 / 支票", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+            ext_src    [label="⑤ sourcing.py\n合同 / 竞价 / 投标", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+        }
+    }
+
+    // ── ④ Stage 2: Transformers ─────────────────────────────────────
+    subgraph cluster_transformers {
+        label="④ Stage 2: Transformers"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E0F7FA"; color="#4DB6AC";
+        trans_structured [label="StructuredTransformer\n声明式映射 (registry.py)", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+        trans_llm        [label="LLMTextExtractor\nLLM 关系抽取\n(复杂文本字段)", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+    }
+
+    // ── ⑤ Stage 3: Loaders ──────────────────────────────────────────
+    subgraph cluster_loaders {
+        label="⑤ Stage 3: Loaders"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E0F7FA"; color="#4DB6AC";
+        loader_graphiti [label="GraphitiLoader\nEpisode API 写入", shape=box, fontsize=11, fillcolor="#B2DFDB"];
+    }
+
+    // ── ⑥ 状态管理 ─────────────────────────────────────────────────
+    subgraph cluster_state {
+        label="⑥ 状态管理"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E0F7FA"; color="#4DB6AC";
+        state_table   [label="etl_sync_state 表\n水位线持久化 (按域)", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+        state_metrics [label="ETL Metrics\n(core/etl/metrics.py)", shape=box, fontsize=10, fillcolor="#B2EBF2"];
+    }
+
+    // ── ⑦ 外部系统 ─────────────────────────────────────────────────
+    subgraph cluster_external {
+        label="⑦ 外部系统"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+        ext_pg    [label="PostgreSQL\n(20 张 EBS 镜像表)", shape=cylinder, fontsize=10];
+        ext_neo4j [label="Neo4j (via Graphiti)\n15 节点类型 + 19 边类型", shape=cylinder, fontsize=10];
+        ext_llm   [label="LLM\n(关系抽取用)", shape=component, fontsize=10, fillcolor="#F3E5F5"];
+    }
+
+    // ── 图例 ────────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        lg_a [label="", shape=plain]; lg_b [label="", shape=plain];
+        lg_c [label="", shape=plain]; lg_d [label="", shape=plain];
+        lg_e [label="", shape=plain]; lg_f [label="", shape=plain];
+        lg_g [label="", shape=plain]; lg_h [label="", shape=plain];
+        lg_a -> lg_b [label="数据流", color="#D32F2F", penwidth=2.2];
+        lg_c -> lg_d [label="控制流", color="#444444"];
+        lg_e -> lg_f [label="域依赖顺序", color="#1976D2", style="dashed"];
+        lg_g -> lg_h [label="状态/监控", color="#888888", style="dotted"];
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    //                       边
+    // ─────────────────────────────────────────────────────────────────
+
+    // 触发源 → Pipeline
+    trigger_scheduler -> pipeline_core [color="#D32F2F", penwidth=2.2, weight=10, label="定时调度"];
+    trigger_api       -> pipeline_core [color="#D32F2F", penwidth=2.2, weight=8, label="HTTP 触发"];
+    trigger_cli       -> pipeline_core [color="#D32F2F", penwidth=2.2, weight=6, label="手动执行"];
+
+    // Pipeline 内部模式
+    pipeline_core -> pipeline_full [color="#444444", label="初始化"];
+    pipeline_core -> pipeline_incr [color="#444444", label="周期同步"];
+
+    // Pipeline → Extractors
+    pipeline_core -> ext_master [color="#D32F2F", penwidth=2.2, weight=10];
+    pipeline_core -> ext_purch  [color="#D32F2F", penwidth=2.2, weight=9];
+    pipeline_core -> ext_recv   [color="#D32F2F", penwidth=2.2, weight=8];
+    pipeline_core -> ext_pay    [color="#D32F2F", penwidth=2.2, weight=7];
+    pipeline_core -> ext_src    [color="#D32F2F", penwidth=2.2, weight=6];
+
+    // Extractor 域依赖顺序 (蓝虚线，编号)
+    ext_master -> ext_purch [color="#1976D2", style="dashed", label="1→2", constraint=false];
+    ext_purch  -> ext_recv  [color="#1976D2", style="dashed", label="2→3", constraint=false];
+    ext_recv   -> ext_pay   [color="#1976D2", style="dashed", label="3→4", constraint=false];
+    ext_pay    -> ext_src   [color="#1976D2", style="dashed", label="4→5", constraint=false];
+
+    // BaseExtractor 继承
+    ext_base -> ext_master [color="#888888", style="dotted", arrowhead="empty", constraint=false];
+    ext_base -> ext_purch  [color="#888888", style="dotted", arrowhead="empty", constraint=false];
+    ext_base -> ext_recv   [color="#888888", style="dotted", arrowhead="empty", constraint=false];
+    ext_base -> ext_pay    [color="#888888", style="dotted", arrowhead="empty", constraint=false];
+    ext_base -> ext_src    [color="#888888", style="dotted", arrowhead="empty", constraint=false];
+
+    // Extractors → Transformers (数据流)
+    ext_master -> trans_structured [color="#D32F2F", penwidth=2.2, weight=5];
+    ext_purch  -> trans_structured [color="#D32F2F", penwidth=2.2, weight=5];
+    ext_recv   -> trans_structured [color="#D32F2F", penwidth=2.2, weight=5];
+    ext_pay    -> trans_structured [color="#D32F2F", penwidth=2.2, weight=5];
+    ext_src    -> trans_structured [color="#D32F2F", penwidth=2.2, weight=5];
+
+    ext_master -> trans_llm [color="#D32F2F", penwidth=1.5, style="dashed", weight=3];
+    ext_purch  -> trans_llm [color="#D32F2F", penwidth=1.5, style="dashed", weight=3];
+
+    // Transformers → Loader
+    trans_structured -> loader_graphiti [color="#D32F2F", penwidth=2.2, weight=10, label="结构化实体/关系"];
+    trans_llm        -> loader_graphiti [color="#D32F2F", penwidth=2.2, weight=8, label="LLM 提取的关系"];
+
+    // Loader → 外部 Neo4j
+    loader_graphiti -> ext_neo4j [color="#D32F2F", penwidth=2.2, weight=10, label="Episode API 写入"];
+
+    // Extractors ← 外部 PostgreSQL (数据源)
+    ext_pg -> ext_master [color="#D32F2F", penwidth=2.0, dir="back", label="SQL 查询"];
+    ext_pg -> ext_purch  [color="#D32F2F", penwidth=2.0, dir="back"];
+    ext_pg -> ext_recv   [color="#D32F2F", penwidth=2.0, dir="back"];
+    ext_pg -> ext_pay    [color="#D32F2F", penwidth=2.0, dir="back"];
+    ext_pg -> ext_src    [color="#D32F2F", penwidth=2.0, dir="back"];
+
+    // LLMTextExtractor → 外部 LLM
+    trans_llm -> ext_llm [color="#444444", label="关系抽取调用"];
+
+    // Pipeline → 状态管理
+    pipeline_core -> state_table   [color="#888888", style="dotted", label="读写水位线"];
+    pipeline_core -> state_metrics [color="#888888", style="dotted", label="埋点上报"];
+
+    // 状态表 → PostgreSQL
+    state_table -> ext_pg [color="#888888", style="dotted", label="持久化"];
+}

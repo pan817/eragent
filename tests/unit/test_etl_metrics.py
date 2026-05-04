@@ -95,6 +95,25 @@ class TestAdminMetricsEndpoint:
         assert "/admin/etl/metrics" in routes
 
 
+def _make_mock_provider() -> MagicMock:
+    from modules.p2p.provider import P2PModuleProvider
+
+    real = P2PModuleProvider()
+    provider = MagicMock()
+    provider.get_entity_types.return_value = real.get_entity_types()
+    provider.get_analysis_keywords.return_value = real.get_analysis_keywords()
+    provider.get_analysis_type_descriptions.return_value = real.get_analysis_type_descriptions()
+    provider.get_role_descriptions.return_value = real.get_role_descriptions()
+    provider.get_lookup_rules.return_value = real.get_lookup_rules()
+    provider.get_dag_templates.return_value = real.get_dag_templates()
+    provider.get_generic_dag_templates.return_value = real.get_generic_dag_templates()
+    provider.get_reference_patterns.return_value = real.get_reference_patterns()
+    provider.get_tools.return_value = []
+    provider.get_graphiti_client.return_value = None
+    provider.is_query_backend_available.return_value = False
+    return provider
+
+
 class TestOrchestratorGraphContext:
     def test_enrich_returns_empty_without_client(self):
         """When no GraphitiClient is injected, returns empty string."""
@@ -105,7 +124,7 @@ class TestOrchestratorGraphContext:
         settings = Settings(
             app_name="test", debug=True,
         )
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         signal = MagicMock()
         signal.analysis_type = "three_way_match"
@@ -120,14 +139,15 @@ class TestOrchestratorGraphContext:
         """When GraphitiClient is available, queries for supplier profile."""
         from core.orchestrator.orchestrator import Orchestrator
         from config.settings import Settings
-        from modules.p2p.tools._inject import set_graphiti_client
 
         mock_client = MagicMock()
         mock_client.search = AsyncMock(return_value=[{"fact": "supplier data"}])
-        set_graphiti_client(mock_client)
+
+        provider = _make_mock_provider()
+        provider.get_graphiti_client.return_value = mock_client
 
         settings = Settings(app_name="test", debug=True)
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=provider)
 
         signal = MagicMock()
         signal.analysis_type = "three_way_match"
@@ -137,4 +157,3 @@ class TestOrchestratorGraphContext:
             orch._enrich_with_graph_context(signal, params)
         )
         assert "供应商画像" in result
-        set_graphiti_client(None)  # type: ignore[arg-type]

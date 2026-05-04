@@ -56,7 +56,9 @@ def e2e_client(real_settings: Settings):
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    init_database(engine, seed=0)
+    from modules.p2p.mock_data.generator import MockDataGenerator
+
+    init_database(engine, seed=0, data_generator_factory=MockDataGenerator)
     session_factory = get_session_factory(engine)
     set_repository(P2PRepository(session_factory))
 
@@ -99,7 +101,9 @@ class TestE2EThreeWayMatch:
         assert data["time_range"] == "最近 30 天"
         assert data["duration_ms"] > 0
         # LLM 应生成非空 Markdown 报告
-        assert len(data["report_markdown"]) > 50
+        report = data["report_markdown"]
+        assert len(report) > 50
+        assert "匹配" in report or "match" in report.lower()
 
 
 class TestE2EPriceVariance:
@@ -115,7 +119,9 @@ class TestE2EPriceVariance:
         data = resp.json()
         assert data["status"] == "success"
         assert data["analysis_type"] == "price_variance"
-        assert len(data["report_markdown"]) > 50
+        report = data["report_markdown"]
+        assert len(report) > 50
+        assert "差异" in report or "variance" in report.lower()
 
 
 class TestE2EPaymentCompliance:
@@ -131,7 +137,9 @@ class TestE2EPaymentCompliance:
         data = resp.json()
         assert data["status"] == "success"
         assert data["analysis_type"] == "payment_compliance"
-        assert len(data["report_markdown"]) > 50
+        report = data["report_markdown"]
+        assert len(report) > 50
+        assert "付款" in report or "合规" in report
 
 
 class TestE2ESupplierPerformance:
@@ -152,7 +160,9 @@ class TestE2ESupplierPerformance:
         data = resp.json()
         assert data["status"] == "success"
         assert data["analysis_type"] == "supplier_performance"
-        assert len(data["report_markdown"]) > 50
+        report = data["report_markdown"]
+        assert len(report) > 50
+        assert str(supplier_id) in report
 
 
 class TestE2EComprehensive:
@@ -169,6 +179,7 @@ class TestE2EComprehensive:
         assert data["status"] == "success"
         assert data["analysis_type"] == "comprehensive"
         assert len(data["report_markdown"]) > 100
+        assert data["summary"]["route_type"]
 
 
 class TestE2EPlanAndSolve:
@@ -200,6 +211,47 @@ class TestE2EPlanAndSolve:
         # 路由信息应被注入 summary（route_type 可能是 plan_and_solve / agent / DAG）
         route_type = data.get("summary", {}).get("route_type")
         assert route_type in {"plan_and_solve", "agent", "DAG", "lookup_shortcut"}
+
+
+class TestE2ELatestPOQuery:
+    """最新 PO 查询端到端测试。"""
+
+    def test_latest_one_po_e2e(self, e2e_client: TestClient) -> None:
+        """查询 "最新的一个po" → 验证 status=success 且 report 含 PO 编号模式。"""
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
+            "query": "最新的一个po",
+            "user_id": "e2e-tester",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        report = data["report_markdown"]
+        assert len(report) > 10
+        # 报告中应包含 PO 编号（常见格式：PO- 前缀或纯数字编号）
+        import re
+        assert re.search(r"PO[-_]?\d+", report, re.IGNORECASE), (
+            f"report 未包含 PO 编号模式: {report[:300]}"
+        )
+
+    def test_latest_5_po_e2e(self, e2e_client: TestClient) -> None:
+        """查询 "最新的5个PO" → 验证 status=success 且 report 含表格或列表内容。"""
+        resp = e2e_client.post("/api/v1/ptp-agent/analyze", json={
+            "query": "最新的5个PO",
+            "user_id": "e2e-tester",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        report = data["report_markdown"]
+        assert len(report) > 50
+        # 报告应包含表格（|）或列表（- 或数字编号）形式的多行内容
+        has_table = "|" in report
+        has_list = report.count("\n") >= 5
+        assert has_table or has_list, (
+            f"report 未包含表格或列表结构: {report[:300]}"
+        )
 
 
 class TestE2ECustomTimeRange:

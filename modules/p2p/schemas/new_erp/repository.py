@@ -411,8 +411,8 @@ class NewERPRepository:
                     .where(NewPoLineLocation.po_line_id == rcv.po_line_id)
                     .limit(1)
                 ).scalar()
-                if loc and rcv.transaction_date > loc.promised_date:
-                    delay = (rcv.transaction_date - loc.promised_date).days
+                if loc and rcv.transaction_date.date() > loc.promised_date:
+                    delay = (rcv.transaction_date.date() - loc.promised_date).days
                     issues.append(f"延迟 {delay} 天")
 
                 if issues:
@@ -506,7 +506,7 @@ class NewERPRepository:
                     continue
 
                 potential_saving = float(inv.invoice_amount) * discount_rate
-                if payment.check_date <= inv.discount_due_date:
+                if payment.check_date.date() <= inv.discount_due_date:
                     utilized += 1
                 else:
                     missed += 1
@@ -517,7 +517,7 @@ class NewERPRepository:
                         "invoice_amount": float(inv.invoice_amount),
                         "discount_due_date": inv.discount_due_date.isoformat(),
                         "check_date": payment.check_date.isoformat(),
-                        "days_late": (payment.check_date - inv.discount_due_date).days,
+                        "days_late": (payment.check_date.date() - inv.discount_due_date).days,
                         "missed_saving": round(potential_saving, 2),
                     })
 

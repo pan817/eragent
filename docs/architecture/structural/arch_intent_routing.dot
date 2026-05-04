@@ -1,0 +1,194 @@
+// ERP Agent - Intent Routing & Execution Paths
+// 意图路由决策树与执行路径
+// Render: dot -Tpng -Gdpi=150 arch_intent_routing.dot -o arch_intent_routing.png
+digraph intent_routing {
+    rankdir=TB;
+    nodesep=0.4;
+    ranksep=0.6;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent 意图路由决策树与执行路径"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── 输入 ────────────────────────────────────────────────────────
+    input [label="用户查询\n(user query)", shape=box, fontsize=12,
+           fillcolor="#E3F0FF", color="#7FA7D4"];
+
+    // ── Orchestrator 入口 ───────────────────────────────────────────
+    subgraph cluster_orchestrator {
+        label="Orchestrator 编排层"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+
+        orch_entry [label="Orchestrator.analyze\n(编排入口)", shape=box, fontsize=11,
+                    fillcolor="#FFF4B8"];
+
+        // L0 bypass (regex)
+        l0_bypass [label="L0 bypass\n正则快速检测", shape=diamond, fontsize=10,
+                   fillcolor="#FFFADD", color="#C9A96E"];
+
+        // UnifiedRouter (single LLM call)
+        unified_router [label="UnifiedRouter\n(单次 LLM 调用)\n意图分类 + 参数提取\n+ 指代消解 + 跨实体判断",
+                        shape=box, fontsize=10, fillcolor="#FFF4B8"];
+
+        // IntentKind decision
+        intent_decision [label="IntentKind\n分类结果", shape=diamond, fontsize=10,
+                         fillcolor="#FFFADD", color="#C9A96E"];
+    }
+
+    // ── 早退路径 ────────────────────────────────────────────────────
+    subgraph cluster_early_exit {
+        label="早退路径 (模板响应)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#F5F5F5"; color="#AAAAAA";
+
+        meta_resp [label="META\n系统能力说明", shape=box, fontsize=9,
+                   fillcolor="#E8EAF6"];
+        chitchat_resp [label="CHITCHAT\n友好拒答 + 引导回归", shape=box, fontsize=9,
+                       fillcolor="#E8EAF6"];
+        oos_resp [label="OUT_OF_SCOPE\n超出范围说明", shape=box, fontsize=9,
+                  fillcolor="#E8EAF6"];
+    }
+
+    // ── DATA_LOOKUP 快捷路径 ─────────────────────────────────────────
+    subgraph cluster_lookup {
+        label="DATA_LOOKUP 快捷路径"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF8E1"; color="#F9A825";
+
+        lookup_resolve [label="resolve_lookup_tool\n(推断工具名 + 参数)", shape=box, fontsize=9];
+        lookup_exec [label="execute_lookup\n(单工具直接调用)", shape=box, fontsize=9];
+        lookup_format [label="格式化结果\n(无需全量分析)", shape=box, fontsize=9];
+    }
+
+    // ── ANALYSIS 路由层 ──────────────────────────────────────────────
+    subgraph cluster_analysis_routing {
+        label="ANALYSIS 路由层"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+
+        // L1: keyword/regex rules
+        l1_rules [label="L1 关键词/正则规则\n(intent_rules.py)", shape=diamond, fontsize=9,
+                  fillcolor="#FFFADD", color="#C9A96E"];
+
+        // L2: DAG template lookup
+        l2_template [label="L2 DAG 模板查找\n(type_map 匹配)", shape=diamond, fontsize=9,
+                     fillcolor="#FFFADD", color="#C9A96E"];
+
+        // type_map detail
+        type_map [label="analysis_type 枚举:\n- three_way_match (三路匹配)\n- price_variance (价格差异)\n- payment_compliance (付款合规)\n- supplier_performance (供应商绩效)\n- spend_analysis (支出分析)\n- discount_utilization (折扣利用)",
+                  shape=note, fontsize=8, fillcolor="#FFFFF0"];
+
+        // L2.5: case store
+        l25_case [label="L2.5 DAGCaseStore\n历史案例检索", shape=box, fontsize=9,
+                  fillcolor="#E8F5E9"];
+
+        // L3: Planner
+        l3_planner [label="L3 Planner\n(一次 LLM 调用\n生成完整 DAG 计划)", shape=box, fontsize=9,
+                    fillcolor="#FFFADD"];
+
+        // Plan failure decision
+        plan_ok [label="计划生成\n是否成功?", shape=diamond, fontsize=9,
+                 fillcolor="#FFFADD", color="#C9A96E"];
+    }
+
+    // ── DAG 执行路径 ─────────────────────────────────────────────────
+    subgraph cluster_dag_exec {
+        label="DAG 执行路径 (高置信度)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E8F5E9"; color="#6FA87C";
+
+        dag_executor [label="DAGExecutor\n并行任务调度", shape=box, fontsize=11,
+                      fillcolor="#C8E6C9"];
+        dag_tasks [label="并行执行工具节点\n(28 个 @tool)", shape=box, fontsize=9];
+        report_agent [label="ReportAgent\n结果汇总生成报告", shape=box, fontsize=10,
+                      fillcolor="#C8E6C9"];
+    }
+
+    // ── ReAct 执行路径 ──────────────────────────────────────────────
+    subgraph cluster_react_exec {
+        label="ReAct 执行路径 (兜底/低置信度)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#F1F8E9"; color="#8EB56E";
+
+        react_agent [label="P2PAgent\n(create_agent + 装饰器中间件)\n多轮自主推理", shape=box, fontsize=11,
+                     fillcolor="#DCEDC8"];
+        react_tools [label="28 个 LangChain @tool\nPG(15) + Graph(12) + Chat(1)",
+                     shape=box, fontsize=9];
+        react_reasoning [label="自主决策\n工具选择 → 执行 → 观察\n→ 再推理 (循环)", shape=box, fontsize=9];
+    }
+
+    // ── 最终输出 ────────────────────────────────────────────────────
+    output [label="AnalysisResult\n(统一响应)", shape=box, fontsize=12,
+            fillcolor="#E3F0FF", color="#7FA7D4"];
+
+    // ── 图例 ────────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        lg_a [label="", shape=plain, width=0]; lg_b [label="", shape=plain, width=0];
+        lg_c [label="", shape=plain, width=0]; lg_d [label="", shape=plain, width=0];
+        lg_e [label="", shape=plain, width=0]; lg_f [label="", shape=plain, width=0];
+        lg_g [label="", shape=plain, width=0]; lg_h [label="", shape=plain, width=0];
+        lg_a -> lg_b [label="主路径 (红)", color="#D32F2F", penwidth=2.2];
+        lg_c -> lg_d [label="常规路径", color="#444444"];
+        lg_e -> lg_f [label="降级/兜底 (虚线)", color="#FF8F00", style="dashed", penwidth=1.5];
+        lg_g -> lg_h [label="早退路径", color="#888888", style="dotted"];
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //                         边连接
+    // ═══════════════════════════════════════════════════════════════
+
+    // 主路径 (红色粗线)
+    input -> orch_entry [color="#D32F2F", penwidth=2.2, weight=10];
+    orch_entry -> l0_bypass [color="#D32F2F", penwidth=2.2, weight=10];
+
+    // L0 bypass 分支
+    l0_bypass -> meta_resp [label="命中 META 正则", color="#888888", style="dotted"];
+    l0_bypass -> chitchat_resp [label="命中 CHITCHAT 正则", color="#888888", style="dotted"];
+    l0_bypass -> unified_router [label="未命中\n(继续路由)", color="#D32F2F", penwidth=2.2, weight=10];
+
+    // UnifiedRouter → IntentKind decision
+    unified_router -> intent_decision [color="#D32F2F", penwidth=2.2, weight=10];
+
+    // IntentKind 分支
+    intent_decision -> oos_resp [label="OUT_OF_SCOPE", color="#888888", style="dotted"];
+    intent_decision -> meta_resp [label="META", color="#888888", style="dotted"];
+    intent_decision -> chitchat_resp [label="CHITCHAT", color="#888888", style="dotted"];
+    intent_decision -> lookup_resolve [label="DATA_LOOKUP", color="#444444", weight=5];
+    intent_decision -> l1_rules [label="ANALYSIS", color="#D32F2F", penwidth=2.2, weight=10];
+
+    // DATA_LOOKUP 快捷路径
+    lookup_resolve -> lookup_exec [color="#444444"];
+    lookup_exec -> lookup_format [color="#444444"];
+    lookup_format -> output [color="#444444"];
+
+    // ANALYSIS: L1 → L2 → L2.5 → L3 → ReAct
+    l1_rules -> l2_template [label="命中 analysis_type", color="#D32F2F", penwidth=2.2, weight=8];
+    l1_rules -> l3_planner [label="未命中\n(comprehensive)", color="#FF8F00", style="dashed", penwidth=1.5];
+    l2_template -> type_map [color="#444444", style="dotted", constraint=false];
+    l2_template -> l25_case [label="有模板", color="#D32F2F", penwidth=2.2, weight=8];
+    l2_template -> l3_planner [label="无模板", color="#FF8F00", style="dashed", penwidth=1.5];
+    l25_case -> dag_executor [label="加载 DAG 模板\n(含历史案例)", color="#D32F2F", penwidth=2.2, weight=8];
+
+    // L3 Planner
+    l3_planner -> plan_ok [color="#D32F2F", penwidth=2.2, weight=8];
+    plan_ok -> dag_executor [label="成功\n(生成 DAG)", color="#D32F2F", penwidth=2.2, weight=8];
+    plan_ok -> react_agent [label="失败/低置信度\n(降级)", color="#FF8F00", style="dashed", penwidth=1.5];
+
+    // DAG 执行
+    dag_executor -> dag_tasks [color="#D32F2F", penwidth=2.2];
+    dag_tasks -> report_agent [color="#D32F2F", penwidth=2.2];
+    report_agent -> output [color="#D32F2F", penwidth=2.2, weight=10];
+
+    // ReAct 执行
+    react_agent -> react_tools [color="#444444"];
+    react_tools -> react_reasoning [color="#444444"];
+    react_reasoning -> react_tools [label="循环", color="#444444", style="dashed", constraint=false];
+    react_agent -> output [color="#FF8F00", style="dashed", penwidth=1.5, weight=5];
+
+    // 早退路径 → 输出
+    meta_resp -> output [color="#888888", style="dotted"];
+    chitchat_resp -> output [color="#888888", style="dotted"];
+    oos_resp -> output [color="#888888", style="dotted"];
+
+    // 概览/图查询特殊路由 (直通 ReAct)
+    intent_decision -> react_agent [label="ANALYSIS +\n概览/图查询意图\n(强制 ReAct)", color="#FF8F00",
+                                    style="dashed", penwidth=1.5, constraint=false];
+}

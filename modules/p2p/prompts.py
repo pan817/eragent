@@ -74,37 +74,7 @@ def get_ontology_context() -> str:
     return text
 
 
-def trim_to_token_budget(text: str, max_tokens: int, label: str) -> str:
-    """将文本裁剪到 token 预算内。
-
-    超出预算时按比例截断并发出 WARNING 日志，供后续分析。
-    未超出时原样返回。
-
-    Args:
-        text: 待裁剪文本。
-        max_tokens: token 上限。
-        label: 日志标签（如 "短期记忆" / "长期记忆"），用于区分来源。
-
-    Returns:
-        裁剪后的文本。
-    """
-    if not text or max_tokens <= 0:
-        return text
-
-    from core.observability.tracing import estimate_tokens
-
-    current = estimate_tokens(text)
-    if current <= max_tokens:
-        return text
-
-    ratio = max_tokens / current
-    cut_len = int(len(text) * ratio)
-    trimmed = text[:cut_len]
-    _logger.warning(
-        "%s 超出 token 预算，已裁剪: %d → %d tokens (字符 %d → %d)",
-        label, current, max_tokens, len(text), cut_len,
-    )
-    return trimmed
+from core.text_utils import trim_to_token_budget  # noqa: F401 — re-export
 
 
 def format_long_term_memory(records: list[dict[str, Any]]) -> str:
@@ -321,6 +291,9 @@ run_three_way_match / run_price_variance_analysis / run_payment_compliance_check
 
 ### 聚合统计（汇总分析）
 calculate_spend_analysis / analyze_vendor_concentration / calculate_po_cycle_time / detect_duplicate_invoices / analyze_discount_utilization
+
+### 历史会话检索（跨会话引用）
+search_my_chat_history
 """.strip()
 
 _HYBRID_STRATEGY_PROMPT = """
@@ -374,6 +347,9 @@ detect_graph_anomalies / query_risk_impact
 
 ### 对比与画像（多维度分析）
 compare_entities / query_supplier_profile / find_contract_coverage / find_competing_suppliers
+
+### 历史会话检索（跨会话引用）
+search_my_chat_history
 """.strip()
 
 

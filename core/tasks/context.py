@@ -18,7 +18,17 @@ current_assistant_message_id: contextvars.ContextVar[str | None] = (
     contextvars.ContextVar("current_assistant_message_id", default=None)
 )
 
+#: 当前分析请求的 user_id（Orchestrator 进入分析路径时注入）。
+current_user_id: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("current_user_id", default=None)
+)
+
 
 def get_current_message_id() -> str | None:
     """读取当前上下文的 assistant_message_id；未注入时返回 None。"""
     return current_assistant_message_id.get()
+
+
+def get_current_user_id() -> str | None:
+    """读取当前上下文的 user_id；未注入时返回 None。"""
+    return current_user_id.get()

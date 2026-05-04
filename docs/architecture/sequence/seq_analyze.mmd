@@ -1,0 +1,78 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as FastAPI Route
+    participant O as Orchestrator
+    participant MM as MemoryManager
+    participant IR as UnifiedRouter
+    participant E as Entity Pipeline
+    participant LK as Lookup
+    participant PL as Planner
+    participant DAG as DAGExecutor
+    participant RA as ReportAgent
+    participant React as P2PAgent (ReAct)
+    participant LLM as LLM
+
+    C->>API: POST /analyze (query, session_id, user_id)
+    API->>O: analyze(request)
+
+    %% Phase 0: 会话上下文加载
+    O->>MM: load_session_context(session_id)
+    MM-->>O: session entities + short-term context
+
+    %% Phase 1: 引用消解
+    O->>E: _resolve_references(query, session_context)
+    E-->>O: resolved_query
+
+    %% Phase 2: 意图路由 (单次 LLM)
+    O->>IR: route(resolved_query, history)
+    IR->>LLM: 意图分类 + 参数提取 + 实体消解
+    LLM-->>IR: IntentKind + analysis_type + params
+    IR-->>O: RoutingSignal
+
+    %% Phase 3: 实体充实
+    O->>E: _enrich_entities(signal.entities)
+    E-->>O: validated entities
+
+    %% Phase 4: 路由决策分支
+    alt META / CHITCHAT / OUT_OF_SCOPE
+        O-->>API: 模板响应 (早退)
+    else DATA_LOOKUP
+        O->>LK: resolve_lookup_tool(signal)
+        LK->>LK: execute_lookup()
+        LK-->>O: lookup_result
+        O-->>API: format_lookup_result()
+    else ANALYSIS (DAG 路径: L1/L2 命中)
+        O->>DAG: load_dag_template(analysis_type)
+        O->>DAG: execute(tasks, tools)
+        DAG->>DAG: parallel tool invocations
+        DAG->>RA: generate_summary_report(results)
+        RA->>LLM: 报告生成
+        LLM-->>RA: report_text
+        RA-->>DAG: report
+        DAG-->>O: aggregated_result
+    else ANALYSIS (Plan-and-Solve: L3)
+        O->>PL: plan(query, tools, context)
+        PL->>LLM: 生成 DAG 计划
+        LLM-->>PL: task_list
+        PL-->>O: dag_tasks
+        O->>DAG: execute(dag_tasks)
+        DAG->>RA: generate_summary_report(results)
+        RA-->>DAG: report
+        DAG-->>O: aggregated_result
+    else ANALYSIS (ReAct 兜底)
+        O->>React: run(query, tools, context)
+        loop tool-calling 循环
+            React->>LLM: 推理 + 选择工具
+            LLM-->>React: tool_call
+            React->>React: invoke tool
+        end
+        React-->>O: final_answer
+    end
+
+    %% Phase 5: 后处理
+    O->>MM: on_analysis_complete(result) [fire-and-forget]
+    O->>MM: save_session_entities(session_id, entities)
+    O->>MM: persist_report(result)
+    O-->>API: AnalysisResult
+    API-->>C: 200 JSON response

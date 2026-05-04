@@ -43,7 +43,7 @@ llm_fast:
   # token_estimate_ratio: 1.5
 
 neo4j:
-  enabled: false              # 总开关：false 时服务不依赖 Neo4j，相关功能短路
+  enabled: true               # 总开关：false 时服务不依赖 Neo4j，相关功能短路
   uri: "bolt://localhost:7687"
   username: "neo4j"
   # password: 通过环境变量 NEO4J_PASSWORD 注入
@@ -89,6 +89,7 @@ chroma:
     business_docs_p2p: "business_docs_p2p"
     analysis_reports: "analysis_reports"
     memory_long_term: "memory_long_term"
+    chat_history: "chat_history"
 
 postgresql:
   host: "localhost"
@@ -167,7 +168,7 @@ async_analysis:
   # - memory：进程内 asyncio.Queue，仅适用于 workers=1 的单进程部署
   # - redis：Redis Pub/Sub + 环形缓冲，支持 uvicorn --workers>1 多进程共享事件
   # 多 worker 部署必须使用 redis，否则 POST 落到 worker A 的任务事件无法
-  # 送达订阅落在 worker B 的 SSE 连接，前端只能看到心跳（详见 docs/issue/async_analyze_backend_issue.md）
+  # 送达订阅落在 worker B 的 SSE 连接，前端只能看到心跳（详见 docs/issues/async_analyze_backend_issue.md）
   event_backend: "memory"
   redis_url: "redis://localhost:6379/0"  # 仅 event_backend=redis 时需要
   redis_key_prefix: "eragent:events"     # Redis key 前缀，多实例隔离用
@@ -254,17 +255,19 @@ memory:
     skip_empty_conclusions: false  # 跳过 anomaly_count=0 且 summary 空的结论
     search_timeout_seconds: 0.2 # 检索注入整体超时（秒），超时返回空记忆
     type_budget_pct:            # 各类型 token 子预算（占 long_term 总预算百分比）
-      entity_profile: 40
+      entity_profile: 35
       user_preference: 20
       analysis_insight: 15
       correction: 15
       domain_fact: 10
+      session_recap: 5
     type_max_retrieved:         # 各类型检索最大条数
       entity_profile: 3
       user_preference: 2
       analysis_insight: 2
       correction: 2
       domain_fact: 3
+      session_recap: 3
   react:
     trim_enabled: true              # ReAct 循环内 LLM 输入裁剪总开关
     keep_recent_rounds: 2           # 保留最近几轮完整对话（含工具结果）
@@ -275,6 +278,7 @@ memory:
     correction_days: 180
     user_preference_days: 0
     domain_fact_days: 0
+    session_recap_days: 90
   consolidation:                    # 记忆整合配置
     enabled: true                   # 整合总开关
     min_new_memories: 20            # 触发条件：新增记忆数阈值
@@ -285,6 +289,33 @@ memory:
   feedback:                         # 用户反馈检测配置
     enabled: true                   # 反馈检测总开关
     min_confidence: 0.6             # LLM 提取最低置信度
+  chat_history:                     # 跨会话对话记忆配置
+    indexing_enabled: true          # chat 消息异步向量索引总开关
+    fragment_aggregation_seconds: 30  # 入队后多久 flush 一次
+    fragment_max_messages: 6        # 单片段最多消息数
+    embed_provider: ""              # 空表示沿用 chroma.embedding_provider
+    max_per_user_fragments: 5000    # 每用户最多保留片段数
+    search_timeout_seconds: 0.2     # search_chat_history 同步超时
+    search_default_limit: 5
+    search_max_limit: 10
+    search_default_days: 30
+    search_max_days: 365
+    dead_letter_retry_max: 3
+    dead_letter_backoff_seconds: 60
+  session_recap:                    # SESSION_RECAP 会话摘要配置
+    enabled: true                   # 抽取总开关
+    idle_threshold_seconds: 1800    # 会话不活跃多久后触发摘要（30 min）
+    min_messages: 4                 # 消息数下限
+    min_confidence: 0.6             # 抽取 confidence 下限
+    summary_max_chars: 500          # 摘要文本上限
+    summary_timeout_seconds: 30     # llm_fast 调用超时
+    watcher_interval_seconds: 300   # idle watcher 扫描间隔（5 min）
+  recency_decay:                    # 时间衰减检索
+    enabled: true
+    lambda: 0.02                    # exp(-lambda * days_ago)
+    apply_to:
+      - session_recap
+      - analysis_insight
 
 intent_routing:
   # L3 LLM classification confidence tiers

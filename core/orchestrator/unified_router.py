@@ -26,7 +26,7 @@ _ENTITY_FIELDS = frozenset({
 
 # intent_kind 合法枚举值（clarification 已废弃，不再作为 LLM 输出选项）
 _VALID_INTENT_KINDS = frozenset({
-    "analysis", "data_lookup",
+    "analysis", "data_lookup", "recall",
     "meta", "chitchat", "out_of_scope",
 })
 
@@ -41,6 +41,7 @@ _UNIFIED_PROMPT = """\
 ## intent_kind 枚举
 - analysis: 异常检测/合规检查/绩效评估等分析工作（落入下面 analysis_type 之一）。即使缺少时间/实体参数也判 analysis，系统有默认参数。意图模糊但涉及采购业务时也归此类，type 填 comprehensive。
 - data_lookup: 纯事实查询/单据检索（"查最新PO"/"列出发票"），不涉及异常或评估
+- recall: 跨会话历史回查（"上周/上次/那家/之前讨论的/我们讨论过"），用户明确引用过去某次对话的内容或结论。触发词：上次/上回/之前/那次/那家/我们讨论过/继续上次/上个月分析的
 - meta: 系统能力询问（"你支持哪些分析"）
 - chitchat: 闲聊/问候/非业务
 - out_of_scope: 明确指向非 P2P 模块（销售/HR/生产）
@@ -89,6 +90,7 @@ _UNIFIED_PROMPT = """\
 - "分析最近30天SUP-001的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"is_cross_entity":false,"resolved_query":"分析最近30天SUP-001的价格差异","missing_params":[],"po_number":null,"vendor_id":"SUP-001","invoice_num":null,"check_number":null,"receipt_number":null,"days":30,"limit":null,"order_by":null}}
 - "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"is_cross_entity":false,"resolved_query":"做一下三路匹配","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
 - "有没有该付钱还没付的账单" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"is_cross_entity":false,"resolved_query":"有没有该付钱还没付的账单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+- "上次我们分析的那家供应商，还有异常发票吗" → {{"intent_kind":"recall","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"上次我们分析的那家供应商，还有异常发票吗","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
 
 用户查询：{query}"""
 
@@ -231,8 +233,9 @@ class UnifiedRouter:
     一次 LLM 调用完成意图分类 + 参数提取 + 指代消解 + 跨实体判断。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, provider: Any = None) -> None:
         self._settings = settings
+        self._provider: Any = provider
         self._llm: Any = None
 
     def _ensure_llm(self) -> Any:
@@ -262,9 +265,14 @@ class UnifiedRouter:
         """
         from core.observability.tracing import _safe_jsonable, estimate_tokens, record_span
         from core.time_utils import get_timezone_name, now_cn
-        from modules.p2p.intent_rules import (
-            ANALYSIS_TYPE_DESCRIPTIONS,
-            ROLE_DESCRIPTIONS,
+
+        ANALYSIS_TYPE_DESCRIPTIONS = (
+            self._provider.get_analysis_type_descriptions()
+            if self._provider else []
+        )
+        ROLE_DESCRIPTIONS = (
+            self._provider.get_role_descriptions()
+            if self._provider else {}
         )
 
         try:

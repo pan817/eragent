@@ -198,7 +198,7 @@ async def stream_task_events(
 ) -> StreamingResponse:
     """SSE 事件流。断线重连可通过 ``Last-Event-ID`` 请求头重放。
 
-    健壮性保证（三道闸，详见 docs/issue/async_analyze_backend_issue.md）：
+    健壮性保证（三道闸，详见 docs/issues/async_analyze_backend_issue.md）：
     - 闸 1：握手前校验 trace_id 存在性，未知 trace_id 直接 404
     - 闸 2：连接建立后立刻合成一条 ``status`` 快照作为第一帧
       （不依赖 buffer replay，避免 buffer 已 drop 的场景空响应）

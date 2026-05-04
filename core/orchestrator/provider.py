@@ -92,10 +92,44 @@ class ModuleProvider(Protocol):
         ...
 
     def format_tools_for_planning(self, tools: list[Any]) -> str:
-        """将工具列表格式化为 Planning Prompt 中的 ``{tools_section}`` 文本。
+        """将工具列表格式化为 Planning Prompt 中的 ``{tools_section}`` 文本。"""
+        ...
 
-        实现方应按模块自身的工具分类方式分组（数据查询/规则检测/图查询等），
-        输出结构化文本，使 LLM 能从工具名、一句话说明和参数 schema 中判断
-        调用顺序与参数取值。
+    # ── 意图路由规则 ──
+
+    def get_analysis_keywords(self) -> set[str]:
+        """返回 L1 分析关键词集合（触发分析意图的关键词）。"""
+        ...
+
+    def get_analysis_type_descriptions(self) -> list[tuple[str, str]]:
+        """返回 analysis_type 枚举描述列表，用于 L3 LLM 分类 prompt。"""
+        ...
+
+    def get_role_descriptions(self) -> dict[str, str]:
+        """返回分析师角色描述映射。"""
+        ...
+
+    def get_lookup_rules(self) -> dict[str, Any]:
+        """返回 lookup 快捷路径所需的规则集。
+
+        Returns:
+            包含 high_confidence_keywords, exclusion_words,
+            graph_intent_words 三个键的字典。
         """
+        ...
+
+    # ── DAG 模板（通用概览） ──
+
+    def get_generic_dag_templates(self) -> dict[str, list[dict[str, Any]]]:
+        """返回不按 AnalysisType 索引的通用概览 DAG 模板映射。"""
+        ...
+
+    # ── 基础设施访问 ──
+
+    def get_graphiti_client(self) -> Any | None:
+        """获取 Graphiti 客户端实例，未初始化返回 None。"""
+        ...
+
+    def is_query_backend_available(self) -> bool:
+        """查询后端是否已注入（非 PG 模式需要 QueryBackend 注入）。"""
         ...

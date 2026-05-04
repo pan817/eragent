@@ -1,6 +1,6 @@
 """记忆类型枚举。
 
-5 种封闭分类，不允许运行时自由扩展。扩展类型需修改代码 + 配置。
+6 种封闭分类，不允许运行时自由扩展。扩展类型需修改代码 + 配置。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ class MemoryType(StrEnum):
     """长期记忆类型（封闭枚举）。
 
     每种类型有明确的写入来源、TTL、整合规则、检索策略——
-    类型不是标签，是行为契约。
+    类型不是标签，是行为契约。6 种类型覆盖知识维度 + 会话维度。
     """
 
     USER_PREFERENCE = "user_preference"
@@ -29,3 +29,6 @@ class MemoryType(StrEnum):
 
     DOMAIN_FACT = "domain_fact"
     """业务领域事实知识（企业规则、阈值、例外情况）。TTL: 不过期。"""
+
+    SESSION_RECAP = "session_recap"
+    """单次会话的话题摘要 + 关键实体 + 主要结论。TTL: 90 天 + 时间衰减。"""

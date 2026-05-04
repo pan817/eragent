@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 import pytest
 
 from api.schemas.analysis import AnalysisType
-from core.orchestrator.dag.registry import ToolRegistry, build_default_registry
+from core.orchestrator.dag.registry import ToolRegistry, build_registry_from_provider
 from core.orchestrator.dag.validator import DAGValidator
 from core.orchestrator.dag.templates import load_dag_template
 from core.orchestrator.dag.executor import DAGExecutor
@@ -45,8 +45,10 @@ class TestToolRegistry:
         with pytest.raises(KeyError):
             reg.register_alias("alias", "nonexistent")
 
-    def test_build_default_registry(self) -> None:
-        reg = build_default_registry()
+    def test_build_registry_from_provider(self) -> None:
+        from modules.p2p.provider import P2PModuleProvider
+
+        reg = build_registry_from_provider(P2PModuleProvider())
         # Tool count depends on query_backend config:
         # graphiti: 16 canonical + 5 aliases = 21
         # postgresql: 19 canonical + 5 aliases = 24
@@ -165,8 +167,14 @@ class TestDAGValidator:
 
 class TestDAGTemplates:
 
+    @pytest.fixture(autouse=True)
+    def _provider(self) -> None:
+        from modules.p2p.provider import P2PModuleProvider
+
+        self.provider = P2PModuleProvider()
+
     def test_load_three_way_match(self) -> None:
-        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {"days": 60, "vendor_id": "SUP-001"})
+        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {"days": 60, "vendor_id": "SUP-001"}, provider=self.provider)
         assert dag is not None
         assert len(dag) == 5
         # 参数应被替换
@@ -174,23 +182,23 @@ class TestDAGTemplates:
         assert dag[0]["inputs"]["vendor_id"] == "SUP-001"
 
     def test_load_price_variance(self) -> None:
-        dag = load_dag_template(AnalysisType.PRICE_VARIANCE, {})
+        dag = load_dag_template(AnalysisType.PRICE_VARIANCE, {}, provider=self.provider)
         assert dag is not None
         assert len(dag) == 3
 
     def test_load_payment_compliance(self) -> None:
-        dag = load_dag_template(AnalysisType.PAYMENT_COMPLIANCE, {})
+        dag = load_dag_template(AnalysisType.PAYMENT_COMPLIANCE, {}, provider=self.provider)
         assert dag is not None
         assert len(dag) == 4
 
     def test_load_supplier_performance(self) -> None:
-        dag = load_dag_template(AnalysisType.SUPPLIER_PERFORMANCE, {"vendor_id": "SUP-001"})
+        dag = load_dag_template(AnalysisType.SUPPLIER_PERFORMANCE, {"vendor_id": "SUP-001"}, provider=self.provider)
         assert dag is not None
         assert len(dag) == 3
 
     def test_load_comprehensive_no_entity_returns_none(self) -> None:
         """COMPREHENSIVE 无实体时返回 None（走 ReAct）。"""
-        dag = load_dag_template(AnalysisType.COMPREHENSIVE, {})
+        dag = load_dag_template(AnalysisType.COMPREHENSIVE, {}, provider=self.provider)
         assert dag is None
 
     def test_load_po_risk_dag(self) -> None:
@@ -198,6 +206,7 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"po_number": "PO-001", "days": 30},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 7  # 3 采集 + 3 分析 + 1 报告
@@ -211,6 +220,7 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"vendor_id": "SUP-001", "days": 30},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 5
@@ -223,6 +233,7 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"check_number": "PAY-001", "days": 30},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 4
@@ -235,6 +246,7 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"invoice_num": "INV-001", "days": 30},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 5
@@ -247,6 +259,7 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"check_number": "PAY-001", "po_number": "PO-001"},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 4  # payment_single DAG
@@ -256,12 +269,13 @@ class TestDAGTemplates:
         dag = load_dag_template(
             AnalysisType.COMPREHENSIVE,
             {"po_number": "PO-001", "vendor_id": "SUP-001"},
+            provider=self.provider,
         )
         assert dag is not None
         assert len(dag) == 7  # PO 风险 DAG
 
     def test_default_params(self) -> None:
-        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {})
+        dag = load_dag_template(AnalysisType.THREE_WAY_MATCH, {}, provider=self.provider)
         assert dag[0]["inputs"]["days"] == 30
         assert dag[0]["inputs"]["vendor_id"] == ""
 

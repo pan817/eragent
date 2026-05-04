@@ -260,7 +260,7 @@ class MockDataSettings(BaseSettings):
 class AnalysisSettings(BaseSettings):
     """分析任务配置。"""
 
-    default_time_range_days: int = 30
+    default_time_range_days: int = 30  # TECH-DEBT(#16): 30 days may be too narrow for recent POs
     max_time_range_days: int = 365
     # Agent + LLM 首次冷启动可能数十秒，5s 过短，调到 60s
     response_timeout_seconds: float = 900.0  # 需覆盖 LLM 含重试最坏情况(240s×3=720s) + 编排开销
@@ -362,7 +362,7 @@ class AsyncAnalysisSettings(BaseSettings):
     # registry._run 里 runner_factory 协程的硬超时秒数（覆盖 orchestrator + 持久化 + chat 收尾）。
     # 触达此超时即 cancel runner 协程，把 entry 标为 ERROR(RUNNER_STALLED)，
     # 防止内存 entry.state 永远停在 RUNNING 导致 poll 一直返回 running（见
-    # docs/issue/async_analyze_backend_issue.md 的僵尸 entry 章节）。
+    # docs/issues/async_analyze_backend_issue.md 的僵尸 entry 章节）。
     # 该阈值必须大于正常业务最坏耗时，否则会误杀；小于 orchestrator 内部
     # response_timeout_seconds 时，外层 guard 会提前于 orchestrator 自身超时触发。
     runner_hard_timeout_seconds: float = 600.0
@@ -491,6 +491,7 @@ class TTLSettings(BaseSettings):
     correction_days: int = 180
     user_preference_days: int = 0
     domain_fact_days: int = 0
+    session_recap_days: int = 90
 
     model_config = {"env_prefix": "MEMORY_TTL_"}
 
@@ -517,6 +518,51 @@ class FeedbackSettings(BaseSettings):
     model_config = {"env_prefix": "MEMORY_FEEDBACK_"}
 
 
+class ChatHistorySettings(BaseSettings):
+    """跨会话对话记忆 — chat 消息向量索引配置。"""
+
+    indexing_enabled: bool = True
+    fragment_aggregation_seconds: int = 30
+    fragment_max_messages: int = 6
+    embed_provider: str = ""
+    max_per_user_fragments: int = 5000
+    search_timeout_seconds: float = 0.2
+    search_default_limit: int = 5
+    search_max_limit: int = 10
+    search_default_days: int = 30
+    search_max_days: int = 365
+    dead_letter_retry_max: int = 3
+    dead_letter_backoff_seconds: int = 60
+
+    model_config = {"env_prefix": "MEMORY_CHAT_HISTORY_"}
+
+
+class SessionRecapSettings(BaseSettings):
+    """SESSION_RECAP 会话摘要抽取配置。"""
+
+    enabled: bool = True
+    idle_threshold_seconds: int = 1800
+    min_messages: int = 4
+    min_confidence: float = 0.6
+    summary_max_chars: int = 500
+    summary_timeout_seconds: int = 30
+    watcher_interval_seconds: int = 300
+
+    model_config = {"env_prefix": "MEMORY_SESSION_RECAP_"}
+
+
+class RecencyDecaySettings(BaseSettings):
+    """时间衰减检索配置。"""
+
+    enabled: bool = True
+    lambda_val: float = Field(default=0.02, alias="lambda")
+    apply_to: list[str] = Field(
+        default_factory=lambda: ["session_recap", "analysis_insight"],
+    )
+
+    model_config = {"env_prefix": "MEMORY_RECENCY_DECAY_", "populate_by_name": True}
+
+
 class MemorySettings(BaseSettings):
     """记忆管理配置。"""
 
@@ -541,17 +587,20 @@ class MemorySettings(BaseSettings):
     long_term_context_max_tokens_pct: int = 12     # 长期记忆最大占 context_window 的百分比（10→12）
     long_term_search_timeout_seconds: float = 0.2  # 检索注入整体超时（秒）
     # 各类型 token 子预算（占 long_term 总预算百分比）
-    long_term_type_budget_pct_entity_profile: int = 40
+    long_term_type_budget_pct_entity_profile: int = 35
     long_term_type_budget_pct_user_preference: int = 20
     long_term_type_budget_pct_analysis_insight: int = 15
     long_term_type_budget_pct_correction: int = 15
     long_term_type_budget_pct_domain_fact: int = 10
+    long_term_type_budget_pct_session_recap: int = 5
     # 各类型检索最大条数
     long_term_type_max_entity_profile: int = 3
     long_term_type_max_user_preference: int = 2
     long_term_type_max_analysis_insight: int = 2
+    long_term_insight_recall_max_days: int = 14
     long_term_type_max_correction: int = 2
     long_term_type_max_domain_fact: int = 3
+    long_term_type_max_session_recap: int = 3
 
     # ReAct 循环内 LLM 输入裁剪（MemoryMiddleware）
     react_trim_enabled: bool = True          # 总开关
@@ -562,6 +611,9 @@ class MemorySettings(BaseSettings):
     ttl: TTLSettings = Field(default_factory=TTLSettings)
     consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)
     feedback: FeedbackSettings = Field(default_factory=FeedbackSettings)
+    chat_history: ChatHistorySettings = Field(default_factory=ChatHistorySettings)
+    session_recap: SessionRecapSettings = Field(default_factory=SessionRecapSettings)
+    recency_decay: RecencyDecaySettings = Field(default_factory=RecencyDecaySettings)
 
     model_config = {"env_prefix": "MEMORY_"}
 

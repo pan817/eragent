@@ -54,6 +54,14 @@ include = ["api*", "core*", "config*", "modules*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "--cov=. --cov-report=term-missing --cov-fail-under=90"
+markers = [
+    "unit: unit tests (run on every commit)",
+    "functional: functional domain tests (real DB + tools, mock LLM)",
+    "regression: regression baseline tests (run on every PR)",
+    "integration: component integration tests (run on every PR)",
+    "e2e: end-to-end tests (requires LLM API Key, run before release)",
+    "slow: tests taking > 5s (can be skipped)",
+]
 
 [tool.coverage.run]
 source = ["."]

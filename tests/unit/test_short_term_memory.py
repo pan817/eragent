@@ -329,7 +329,7 @@ class TestLoadSessionContext:
         stm._settings.memory.short_term_context_trim_enabled = True
 
         with _patch_record_span(), patch(
-            "modules.p2p.prompts.trim_to_token_budget",
+            "core.text_utils.trim_to_token_budget",
             return_value="trimmed",
         ) as mock_trim:
             result = stm.load_session_context("s1")

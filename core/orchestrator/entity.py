@@ -252,23 +252,13 @@ async def enrich_entities(
     """
     from core.observability.tracing import record_span
 
-    # hybrid 模式下 PG 没有 ERP 业务数据，跳过 DB 验证和级联补充，
-    # 让 Agent 通过图工具自行查找实体。
-    try:
-        from config.settings import get_settings
-        mode = get_settings().graphiti_etl.query_backend
-        if mode not in ("postgresql",):
-            _logger.info("entity validation skipped: query_backend=%s (no ERP data in PG)", mode)
-            return
-    except Exception:
-        pass  # 配置读取失败时不阻塞，继续走 PG 验证
-
+    # PG 始终是 ERP 数据源（ETL 从 PG 同步到 Neo4j），
+    # 实体验证和级联补充始终走 P2PRepository（PG），与 query_backend 无关。
     try:
         if provider is not None:
             repo = provider.get_repository()
         else:
-            from modules.p2p.tools import _get_repository
-            repo = _get_repository()
+            return
     except Exception:
         return
 

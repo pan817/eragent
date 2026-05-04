@@ -369,6 +369,7 @@ class MemoryRepository:
         dedupe_window_seconds: int = 0,
         skip_empty_conclusions: bool = False,
         ttl_config: dict[str, int] | None = None,
+        insight_recall_max_days: int = 14,
     ) -> None:
         self._engine = engine
         self._vector_store = _VectorStoreProxy(instance=vector_store)
@@ -378,6 +379,7 @@ class MemoryRepository:
         self._dedupe_window_seconds = dedupe_window_seconds
         self._skip_empty_conclusions = skip_empty_conclusions
         self._ttl_config = ttl_config or self._DEFAULT_TTL
+        self._insight_recall_max_days = insight_recall_max_days
 
     def compute_expires_at(self, memory_type: str) -> datetime | None:
         """根据 memory_type 计算 expires_at。返回 None 表示不过期。"""
@@ -719,15 +721,21 @@ class MemoryRepository:
             _logger.warning("ltm.sparse_search.error user_id=%s error=%s", user_id, exc)
             return []
 
-    def _dense_search_ids(self, user_id: str, query: str, limit: int) -> list[str]:
+    def _dense_search_ids(
+        self, user_id: str, query: str, limit: int,
+        memory_type: str | None = None,
+    ) -> list[str]:
         _vs = self._vector_store.get()
         if _vs is None or not query:
             return []
+        where: dict[str, str] = {"user_id": user_id, "source": "memory"}
+        if memory_type:
+            where["memory_type"] = memory_type
         try:
             hits = _vs.search(
                 query=query,
                 top_k=limit,
-                where={"user_id": user_id, "source": "memory"},
+                where=where,
             )
         except Exception as exc:  # noqa: BLE001
             _inc("ltm.vector.search.error")
@@ -805,10 +813,18 @@ class MemoryRepository:
             user_id, "user_preference", limits.get("user_preference", 2),
         )
 
-        # analysis_insight: 纯语义
-        results["analysis_insight"] = self._search_by_type_hybrid(
-            user_id, query, "analysis_insight", limits.get("analysis_insight", 2),
+        # analysis_insight: 纯语义 + 时效窗口过滤
+        insight_candidates = self._search_by_type_hybrid(
+            user_id, query, "analysis_insight", limits.get("analysis_insight", 2) * 3,
         )
+        insight_max_days = self._insight_recall_max_days
+        if insight_max_days > 0:
+            cutoff = now_cn() - timedelta(days=insight_max_days)
+            insight_candidates = [
+                r for r in insight_candidates
+                if _is_within_cutoff(r.get("created_at"), cutoff)
+            ]
+        results["analysis_insight"] = insight_candidates[:limits.get("analysis_insight", 2)]
 
         return results
 
@@ -923,10 +939,8 @@ class MemoryRepository:
         self, user_id: str, query: str, memory_type: str, limit: int,
     ) -> list[dict[str, Any]]:
         """按 memory_type 过滤的 hybrid 检索。"""
-        # 稀疏检索
         sparse_ids = self._sparse_search_ids_typed(user_id, query, memory_type, limit * 2)
-        # 稠密检索
-        dense_ids = self._dense_search_ids(user_id, query, limit * 2)
+        dense_ids = self._dense_search_ids(user_id, query, limit * 2, memory_type=memory_type)
 
         if not sparse_ids and not dense_ids:
             return []
@@ -936,7 +950,10 @@ class MemoryRepository:
         if not top_ids:
             return []
         rows = self._fetch_by_ids(user_id, top_ids)
-        return [rows[mid] for mid in top_ids if mid in rows]
+        return [
+            rows[mid] for mid in top_ids
+            if mid in rows and rows[mid].get("memory_type") == memory_type
+        ]
 
     def _sparse_search_ids_typed(
         self, user_id: str, query: str, memory_type: str, limit: int,
@@ -1231,6 +1248,7 @@ def get_memory_repository() -> MemoryRepository:
             "user_preference": settings.memory.ttl.user_preference_days,
             "domain_fact": settings.memory.ttl.domain_fact_days,
         }
+        repo._insight_recall_max_days = settings.memory.long_term_insight_recall_max_days
         repo.init_tables()
         _memory_repository_singleton = repo
     return _memory_repository_singleton

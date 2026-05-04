@@ -1,10 +1,10 @@
-"""Tests for ETL pipeline components: extractors, transformer, loader, registry."""
+"""Tests for ETL pipeline components: extractors, transformer, loader, registry, pipeline."""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,6 +21,7 @@ from core.etl.models import (
 from core.etl.transformers.registry import MAPPING_REGISTRY
 from core.etl.transformers.structured import StructuredTransformer
 from core.etl.loaders.graphiti_loader import GraphitiLoader
+from core.etl.pipeline import ETLPipeline
 
 
 # ============================================================
@@ -413,7 +414,7 @@ class TestGraphitiLoader:
         assert "SUP-002" in episode.body
 
     def test_load_writes_via_cypher(self):
-        """load() should write nodes via Cypher MERGE, not add_episode."""
+        """load() should write nodes via batch Cypher UNWIND, not add_episode."""
         mock_client = MagicMock()
         mock_client.execute_cypher = AsyncMock()
         mock_client.add_episode = AsyncMock()
@@ -428,8 +429,10 @@ class TestGraphitiLoader:
         result = loop.run_until_complete(loader.load(nodes, []))
         assert result.loaded == 2
         assert result.failed == 0
-        # Cypher called once per node
-        assert mock_client.execute_cypher.await_count == 2
+        # Batch UNWIND: one Cypher call for the entire batch
+        assert mock_client.execute_cypher.await_count == 1
+        cypher_arg = mock_client.execute_cypher.call_args[0][0]
+        assert "UNWIND" in cypher_arg
         # add_episode should NOT be called for structured data
         mock_client.add_episode.assert_not_awaited()
 
@@ -464,3 +467,174 @@ class TestGraphitiLoader:
         loaded = loop.run_until_complete(loader.load_free_text(records))
         assert loaded == 1
         mock_client.add_episode.assert_awaited_once()
+
+
+# ============================================================
+# ETLPipeline orchestration
+# ============================================================
+
+
+def _make_extractor(domain: str, tables: list[str]) -> MagicMock:
+    """Create a mock BaseExtractor."""
+    ext = MagicMock()
+    ext.domain.return_value = domain
+    ext.table_names.return_value = tables
+
+    async def _full(table_name: str):
+        yield [{"id": 1, "last_update_date": datetime(2025, 1, 1, tzinfo=timezone.utc)}]
+
+    ext.extract_full = _full
+    ext.extract_incremental = _full
+    return ext
+
+
+def _make_pipeline(
+    extractors: dict[str, MagicMock],
+    *,
+    llm_extractor: MagicMock | None = None,
+    has_edges: bool = False,
+    has_free_text: bool = False,
+) -> tuple[ETLPipeline, MagicMock, MagicMock]:
+    """Build a pipeline with mock loader/state/transformer."""
+    transformer = MagicMock()
+    edge_list = (
+        [GraphitiEdge(edge_type="HAS", source_type="A", source_id="1",
+                       target_type="B", target_id="2")]
+        if has_edges else []
+    )
+    free_text = (
+        [TextRecord(source_node_type="PO", source_node_id="1",
+                    field_name="note", text="sample")]
+        if has_free_text else []
+    )
+    transformer.transform.return_value = TransformResult(
+        nodes=[GraphitiNode(entity_type="Test", entity_id="1", properties={"k": "v"})],
+        edges=edge_list,
+        free_text_records=free_text,
+    )
+
+    mock_client = MagicMock()
+    mock_client.execute_cypher = AsyncMock()
+    mock_client.clear_graph = AsyncMock()
+    loader = GraphitiLoader(mock_client)
+    loader.create_edges = AsyncMock(return_value=len(edge_list))
+    loader.load = AsyncMock(return_value=LoadResult(loaded=1, failed=0))
+    loader.load_free_text = AsyncMock(return_value=1)
+
+    state = MagicMock()
+    state.update_watermark = AsyncMock()
+    state.get_watermark = AsyncMock(return_value=None)
+    state.needs_full_sync = AsyncMock(return_value=True)
+
+    pipeline = ETLPipeline(
+        extractors=extractors,
+        transformer=transformer,
+        loader=loader,
+        state_manager=state,
+        llm_extractor=llm_extractor,
+    )
+    return pipeline, loader, state
+
+
+class TestETLPipelineOrchestration:
+    """Tests for pipeline-level orchestration (P0/P1/P2)."""
+
+    def test_full_sync_master_data_first(self):
+        """P1: master_data completes before other domains start."""
+        call_order: list[str] = []
+
+        md_ext = _make_extractor("master_data", ["AP_SUPPLIERS"])
+        pur_ext = _make_extractor("purchasing", ["PO_HEADERS_ALL"])
+        rec_ext = _make_extractor("receiving", ["RCV_SHIPMENT_HEADERS"])
+
+        extractors = {
+            "master_data": md_ext,
+            "purchasing": pur_ext,
+            "receiving": rec_ext,
+        }
+        pipeline, loader, state = _make_pipeline(extractors)
+
+        orig_sync_domain = pipeline._sync_domain.__func__
+
+        async def _tracking_sync(self_inner, extractor, **kwargs):
+            domain = extractor.domain()
+            call_order.append(f"start:{domain}")
+            await orig_sync_domain(self_inner, extractor, **kwargs)
+            call_order.append(f"end:{domain}")
+
+        loop = asyncio.get_event_loop()
+        with patch.object(type(pipeline), "_sync_domain", _tracking_sync):
+            result = loop.run_until_complete(pipeline.run_full_sync())
+
+        assert call_order.index("end:master_data") < call_order.index("start:purchasing")
+        assert call_order.index("end:master_data") < call_order.index("start:receiving")
+        assert not result.failed_tables
+
+    def test_domain_edges_deferred_until_all_nodes_written(self):
+        """P2: edges created only after all table nodes in the domain are done."""
+        md_ext = _make_extractor("master_data", ["AP_SUPPLIERS", "HR_ALL_ORGANIZATION_UNITS"])
+        pipeline, loader, state = _make_pipeline({"master_data": md_ext}, has_edges=True)
+
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(pipeline.run_full_sync())
+
+        assert len(result.succeeded_tables) == 2
+        assert not result.failed_tables
+        loader.create_edges.assert_awaited()
+
+    def test_llm_extraction_skipped_when_no_extractor(self):
+        """P0: free_text_records don't trigger load_free_text when llm_extractor is None."""
+        md_ext = _make_extractor("master_data", ["OKC_K_HEADERS_B"])
+        pipeline, loader, state = _make_pipeline(
+            {"master_data": md_ext}, llm_extractor=None, has_free_text=True,
+        )
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(pipeline.run_full_sync())
+
+        loader.load_free_text.assert_not_awaited()
+
+    def test_llm_extraction_called_when_extractor_present(self):
+        """P0: free_text_records trigger load_free_text when llm_extractor is set."""
+        md_ext = _make_extractor("master_data", ["OKC_K_HEADERS_B"])
+        mock_llm = MagicMock()
+        pipeline, loader, state = _make_pipeline(
+            {"master_data": md_ext}, llm_extractor=mock_llm, has_free_text=True,
+        )
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(pipeline.run_full_sync())
+
+        loader.load_free_text.assert_awaited()
+
+    def test_table_failure_does_not_block_domain(self):
+        """A failing table should appear in failed_tables, others succeed."""
+        md_ext = _make_extractor("master_data", ["AP_SUPPLIERS", "BAD_TABLE"])
+
+        async def _failing_full(table_name: str):
+            if table_name == "BAD_TABLE":
+                raise RuntimeError("DB error")
+            yield [{"id": 1, "last_update_date": datetime(2025, 1, 1, tzinfo=timezone.utc)}]
+
+        md_ext.extract_full = _failing_full
+        pipeline, loader, state = _make_pipeline({"master_data": md_ext})
+
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(pipeline.run_full_sync())
+
+        assert "BAD_TABLE" in result.failed_tables
+        assert "AP_SUPPLIERS" in result.succeeded_tables
+
+    def test_incremental_sync_all_domains_parallel(self):
+        """Incremental sync runs all domains in parallel via asyncio.gather."""
+        md_ext = _make_extractor("master_data", ["AP_SUPPLIERS"])
+        pur_ext = _make_extractor("purchasing", ["PO_HEADERS_ALL"])
+        extractors = {"master_data": md_ext, "purchasing": pur_ext}
+        pipeline, loader, state = _make_pipeline(extractors)
+
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(pipeline.run_incremental_sync())
+
+        assert result.total_nodes == 2
+        assert len(result.succeeded_tables) == 2
+        assert not result.failed_tables

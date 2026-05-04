@@ -1,0 +1,177 @@
+// ERP Agent - Memory Subsystem Architecture (v2)
+// 四条数据流：检索注入 / 提取整合 / 反馈检测 / 会话生命周期
+// Render: dot -Tpng -Gdpi=150 arch_memory.dot -o arch_memory.png
+digraph eragent_memory {
+    rankdir=TB;
+    nodesep=0.4;
+    ranksep=0.6;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent — Memory 子系统架构"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── ① 调用方 (Orchestrator 三个调用点) ──────────────────────────
+    subgraph cluster_caller {
+        label="① 调用方 (Orchestrator)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+        caller_pre  [label="分析前\nbuild_context()\n注入记忆到上下文",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+        caller_post [label="分析后\non_analysis_complete()\n提取 + 整合",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+        caller_msg  [label="每轮消息\non_user_message()\n反馈检测",
+                     shape=box, fontsize=11, fillcolor="#FFF4B8"];
+    }
+
+    // ── ② MemoryManager 门面 ────────────────────────────────────────
+    subgraph cluster_facade {
+        label="② MemoryManager (统一门面)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FCE4EC"; color="#C48B9F";
+        mgr [label="MemoryManager\n协调所有记忆子组件\n异步 fire-and-forget",
+             shape=box, fontsize=12, fillcolor="#F8BBD0"];
+    }
+
+    // ── ③ 记忆子组件 ────────────────────────────────────────────────
+    subgraph cluster_components {
+        label="③ 记忆子组件"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FCE4EC"; color="#C48B9F";
+
+        // 存储组件
+        ltm        [label="LongTermMemory\nPostgreSQL 持久化\nper user_id 隔离\n向量检索 via _VectorStoreProxy",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        stm        [label="ShortTermMemory\nLangGraph PostgresSaver\nper session_id 隔离",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+
+        // 提取组件
+        extractor  [label="MemoryExtractor\n从分析结果提取记忆\n各类型独立 try/except",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        feedback   [label="FeedbackDetector\n关键词预筛 + LLM 精确分类\ncorrection / preference / fact",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+
+        // 会话生命周期组件
+        recap      [label="SessionSummaryExtractor\n会话结束时生成摘要\n→ SESSION_RECAP",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        indexer    [label="ChatHistoryIndexer\n索引对话片段\n支持跨会话回忆",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        idle       [label="IdleSessionWatcher\n会话空闲超时检测\n触发 recap 生成",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+
+        // 中间件 & 持久化
+        middleware [label="MemoryMiddleware\nLangChain Agent\n中间件钩子",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        mem_repo   [label="MemoryRepository\n记忆 CRUD 持久层",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+        rpt_repo   [label="ReportRepository\n分析报告持久层",
+                    shape=box, fontsize=10, fillcolor="#F8BBD0"];
+    }
+
+    // ── ④ MemoryType 枚举 (6 种) ───────────────────────────────────
+    subgraph cluster_types {
+        label="④ MemoryType (6 种封闭枚举 + TTL)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#ECEFF1"; color="#90A4AE";
+        t_pref   [label="USER_PREFERENCE\n用户偏好 | 不过期",
+                  shape=box, fontsize=9, fillcolor="#FFF9C4"];
+        t_ep     [label="ENTITY_PROFILE\n实体画像 | 90天",
+                  shape=box, fontsize=9, fillcolor="#B3E5FC"];
+        t_ai     [label="ANALYSIS_INSIGHT\n趋势发现 | 60天",
+                  shape=box, fontsize=9, fillcolor="#D1C4E9"];
+        t_corr   [label="CORRECTION\n用户修正 | 180天",
+                  shape=box, fontsize=9, fillcolor="#FFCDD2"];
+        t_fact   [label="DOMAIN_FACT\n业务规则 | 不过期",
+                  shape=box, fontsize=9, fillcolor="#DCEDC8"];
+        t_recap  [label="SESSION_RECAP\n会话摘要 | 90天\n+ recency decay",
+                  shape=box, fontsize=9, fillcolor="#FFE0B2"];
+    }
+
+    // ── ⑤ 外部存储 ──────────────────────────────────────────────────
+    subgraph cluster_ext {
+        label="⑤ 外部存储"; fontsize=10;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+        e_pg       [label="PostgreSQL\nmemories / consolidation_log\nchat_index / session_recap\ncheckpoints",
+                    shape=cylinder, fontsize=9, fillcolor="#D1C4E9"];
+        e_chroma   [label="Chroma\n向量检索\n(语义相似度)",
+                    shape=cylinder, fontsize=9, fillcolor="#D1C4E9"];
+        e_saver    [label="LangGraph\nPostgresSaver\n(短期记忆)",
+                    shape=cylinder, fontsize=9, fillcolor="#D1C4E9"];
+        e_llm      [label="LLM (轻量模型)\n反馈分类 / 摘要生成\n/ 语义合并",
+                    shape=component, fontsize=9, fillcolor="#D1C4E9"];
+    }
+
+    // ── ⑥ 图例 ──────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        lg_a [label="", shape=plain, width=0.01]; lg_b [label="", shape=plain, width=0.01];
+        lg_c [label="", shape=plain, width=0.01]; lg_d [label="", shape=plain, width=0.01];
+        lg_e [label="", shape=plain, width=0.01]; lg_f [label="", shape=plain, width=0.01];
+        lg_g [label="", shape=plain, width=0.01]; lg_h [label="", shape=plain, width=0.01];
+        lg_a -> lg_b [label="检索/注入流 (同步)", color="#2E7D32", penwidth=2.2];
+        lg_c -> lg_d [label="提取流 (异步)", color="#1565C0", style="dashed", penwidth=1.5];
+        lg_e -> lg_f [label="反馈流 (异步)", color="#E65100", style="dashed", penwidth=1.5];
+        lg_g -> lg_h [label="会话生命周期", color="#6A1B9A", style="bold", penwidth=1.5];
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //                           边 (数据流)
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── 调用方 → MemoryManager ──────────────────────────────────────
+    caller_pre  -> mgr [color="#2E7D32", penwidth=2.2, weight=10,
+                        label="await\nbuild_context()"];
+    caller_post -> mgr [color="#1565C0", style="dashed", penwidth=1.5, weight=8,
+                        label="on_analysis_complete()"];
+    caller_msg  -> mgr [color="#E65100", style="dashed", penwidth=1.5, weight=8,
+                        label="on_user_message()"];
+
+    // ── 流程 A: 检索/注入流 (绿色实线) ──────────────────────────────
+    mgr       -> ltm       [color="#2E7D32", penwidth=2.2, weight=10,
+                            label="search_by_type()\nasync + 超时保护"];
+    ltm       -> e_pg      [color="#2E7D32", penwidth=1.5, label="SQL 查询"];
+    ltm       -> e_chroma  [color="#2E7D32", penwidth=1.5, label="向量相似度"];
+
+    // ── 流程 B: 提取流 (蓝色虚线) ──────────────────────────────────
+    mgr       -> extractor [color="#1565C0", style="dashed", penwidth=1.5, weight=5,
+                            label="asyncio.create_task"];
+    extractor -> ltm       [color="#1565C0", style="dashed", penwidth=1.5,
+                            label="save()"];
+    extractor -> mem_repo  [color="#1565C0", style="dashed", penwidth=1.5,
+                            label="持久化"];
+    mem_repo  -> e_pg      [color="#444444", label="INSERT/UPDATE"];
+
+    // ── 流程 C: 反馈流 (橙色虚线) ──────────────────────────────────
+    mgr       -> feedback  [color="#E65100", style="dashed", penwidth=1.5, weight=5,
+                            label="detect_signal()"];
+    feedback  -> e_llm     [color="#E65100", style="dashed", penwidth=1.5,
+                            label="LLM 精确分类\n(预筛通过时)"];
+    feedback  -> ltm       [color="#E65100", style="dashed", penwidth=1.5,
+                            label="写入 CORRECTION\n/ USER_PREFERENCE"];
+
+    // ── 流程 D: 会话生命周期 (紫色粗线) ─────────────────────────────
+    idle      -> recap     [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="空闲超时触发"];
+    recap     -> ltm       [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="写入 SESSION_RECAP"];
+    recap     -> e_llm     [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="LLM 摘要生成"];
+    mgr       -> idle      [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="注册会话监听"];
+    mgr       -> indexer   [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="索引对话片段"];
+    indexer   -> e_pg      [color="#6A1B9A", penwidth=1.5, style="bold",
+                            label="chat_index 表"];
+
+    // ── 短期记忆 ────────────────────────────────────────────────────
+    mgr       -> stm       [color="#444444", label="委托 (会话级操作)"];
+    stm       -> e_saver   [color="#444444", label="load / save / clear"];
+
+    // ── 中间件钩子 ──────────────────────────────────────────────────
+    mgr       -> middleware [color="#444444", style="dotted", label="Agent 执行钩子"];
+
+    // ── 报告持久化 ──────────────────────────────────────────────────
+    rpt_repo  -> e_pg      [color="#444444", label="reports 表"];
+
+    // ── MemoryType → LongTermMemory (类型约束) ──────────────────────
+    {t_pref; t_ep; t_ai; t_corr; t_fact; t_recap} -> ltm
+        [color="#AAAAAA", style="dotted", arrowsize=0.6,
+         label="", constraint=false];
+}

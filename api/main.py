@@ -61,7 +61,7 @@ def _check_event_backend_matches_workers(event_backend: str) -> None:
 
     多 worker 部署下 memory backend 会导致 POST 与 SSE 可能落在不同 worker
     进程，订阅方永远收不到发布方的事件（前端 Issue 1 的根因，详见
-    docs/issue/async_analyze_backend_issue.md）。
+    docs/issues/async_analyze_backend_issue.md）。
 
     2026-04 生产复盘决定升级为 RuntimeError：WARNING 容易被忽略，
     一旦用户点击"异步分析"就会表现为"界面转圈 15 分钟后失败"，
@@ -80,7 +80,7 @@ def _check_event_backend_matches_workers(event_backend: str) -> None:
             f"async_analysis.event_backend=memory 与 workers={workers} 不兼容: "
             "多 worker 下 SSE 事件无法跨进程送达,前端将只能收到心跳事件。"
             "请在 config.yaml 设置 async_analysis.event_backend=redis 并提供 redis_url,"
-            "或把 workers 降回 1。详见 docs/issue/async_analyze_backend_issue.md"
+            "或把 workers 降回 1。详见 docs/issues/async_analyze_backend_issue.md"
         )
 
 
@@ -143,8 +143,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_trace_store(session_factory)
     _logger.info("trace store ready (TimingMiddleware observable)")
 
+    # 初始化 ChatHistoryIndexer 全局单例
+    from core.memory import init_chat_indexer, get_chat_indexer
+    if settings.memory.chat_history.indexing_enabled:
+        init_chat_indexer(settings)
+        _logger.info("chat history indexer ready")
+
     # 初始化会话历史 Repository（全局 + 路由模块双注入）
-    chat_repo = ChatRepository(session_factory)
+    def _chat_message_hook(
+        session_id: str, message_id: str, role: str, content: str, user_id: str,
+    ) -> None:
+        indexer = get_chat_indexer()
+        if indexer is not None:
+            indexer.enqueue(session_id, message_id, role, content, user_id)
+
+    chat_repo = ChatRepository(
+        session_factory,
+        on_message_hook=_chat_message_hook if settings.memory.chat_history.indexing_enabled else None,
+    )
     init_chat_repository(chat_repo)
     from api.routes.sessions import init_chat_repo
     init_chat_repo(chat_repo)
@@ -280,10 +296,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings.graphiti_etl.enabled,
             settings.neo4j.enabled,
         )
+        if settings.graphiti_etl.query_backend != "postgresql":
+            _logger.warning(
+                "query_backend=%s but Neo4j/ETL not active — "
+                "structured tools will fall back to PostgreSQL which may have no ERP data. "
+                "Consider setting graphiti_etl.query_backend=postgresql",
+                settings.graphiti_etl.query_backend,
+            )
+
+    # 初始化 idle session watcher（SESSION_RECAP 自动摘要）
+    idle_watcher = None
+    if settings.memory.session_recap.enabled:
+        from core.memory.idle_watcher import IdleSessionWatcher
+
+        idle_watcher = IdleSessionWatcher(settings)
+        idle_watcher.start()
+        _logger.info(
+            "idle session watcher ready: interval=%ds threshold=%ds",
+            settings.memory.session_recap.watcher_interval_seconds,
+            settings.memory.session_recap.idle_threshold_seconds,
+        )
 
     _logger.info("lifespan startup complete — serving traffic")
     yield
     _logger.info("lifespan shutdown: draining tasks")
+
+    if idle_watcher is not None:
+        await idle_watcher.shutdown()
 
     # Shutdown ETL
     if etl_scheduler is not None:
@@ -364,25 +403,44 @@ async def health_check() -> dict[str, Any]:
 
 
 @app.post("/api/v1/ptp-agent/init-data", tags=["data"])
-async def init_data() -> dict[str, Any]:
+async def init_data(sync_to_neo4j: bool = True) -> dict[str, Any]:
     """初始化模拟数据。
 
     清空所有业务表并重新灌入种子数据。
     数据条数和随机种子由 config.yaml 中 mock_data 配置决定。
+
+    Args:
+        sync_to_neo4j: 数据生成后是否自动触发 ETL full sync 到 Neo4j，默认 True。
+            仅在 ETL 已启用时生效。
 
     Returns:
         各表插入的记录数。
     """
     settings = get_settings()
     engine = app.state.db_engine
+    from modules.p2p.mock_data.generator import MockDataGenerator
+
     counts = reset_and_seed(
         engine,
         seed=settings.mock_data.seed,
         count=settings.mock_data.record_count,
+        data_generator_factory=MockDataGenerator,
     )
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "message": f"已重新生成 {settings.mock_data.record_count} 条模拟数据",
         "seed": settings.mock_data.seed,
         "tables": counts,
     }
+
+    if sync_to_neo4j:
+        scheduler = getattr(app.state, "etl_scheduler", None)
+        if scheduler is not None:
+            etl_result = await scheduler.trigger_manual_sync("full")
+            result["etl"] = etl_result
+            result["message"] += "，已触发 ETL full sync"
+        else:
+            result["etl"] = None
+            result["etl_skipped_reason"] = "ETL not enabled (neo4j.enabled=false?)"
+
+    return result

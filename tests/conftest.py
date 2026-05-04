@@ -27,8 +27,13 @@ from core.database import (  # noqa: E402
 from core.database.engine import create_engine_from_dsn  # noqa: E402
 from core.time_utils import configure_timezone  # noqa: E402
 
-# 加载 P2P 模块 fixtures
-pytest_plugins = ["tests.fixtures.p2p"]
+# 加载公共 fixture 模块
+pytest_plugins = [
+    "tests.fixtures.p2p",
+    "tests.fixtures.queries",
+    "tests.fixtures.tool_chain",
+    "tests.fixtures.llm_stubs",
+]
 
 # 统一测试时区
 configure_timezone("Asia/Shanghai")
@@ -72,8 +77,10 @@ def db_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    from modules.p2p.mock_data.generator import MockDataGenerator
+
     install_sqlite_timezone_hook(engine)
-    init_database(engine, seed=0, count=50)
+    init_database(engine, seed=0, count=50, data_generator_factory=MockDataGenerator)
     yield engine
     engine.dispose()
 

@@ -25,7 +25,9 @@ def client() -> TestClient:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    init_database(engine, seed=0)
+    from modules.p2p.mock_data.generator import MockDataGenerator
+
+    init_database(engine, seed=0, data_generator_factory=MockDataGenerator)
     session_factory = get_session_factory(engine)
     set_repository(P2PRepository(session_factory))
 

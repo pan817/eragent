@@ -394,7 +394,7 @@ async def test_sse_stream_delivers_done(app_env) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 健壮性三道闸（详见 docs/issue/async_analyze_backend_issue.md）
+# 健壮性三道闸（详见 docs/issues/async_analyze_backend_issue.md）
 # ---------------------------------------------------------------------------
 
 

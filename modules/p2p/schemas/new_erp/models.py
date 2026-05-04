@@ -42,7 +42,7 @@ class NewPoHeader(Base):
     )
     vendor_name: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="APPROVED")
-    creation_date: Mapped[date] = mapped_column(Date, nullable=False)
+    creation_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), nullable=False, default="CNY")
     last_update_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -94,7 +94,7 @@ class NewRcvTransaction(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     accepted_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     rejected_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    transaction_date: Mapped[date] = mapped_column(Date, nullable=False)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)
     last_update_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -110,7 +110,7 @@ class NewApInvoice(Base):
     )
     vendor_name: Mapped[str] = mapped_column(String(100), nullable=False)
     invoice_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    invoice_date: Mapped[date] = mapped_column(Date, nullable=False)
+    invoice_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
     discount_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     approval_status: Mapped[str] = mapped_column(
@@ -130,7 +130,7 @@ class NewApPayment(Base):
         String(20), ForeignKey("new_ap_suppliers.vendor_id"), nullable=False,
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    check_date: Mapped[date] = mapped_column(Date, nullable=False)
+    check_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     payment_method_code: Mapped[str] = mapped_column(
         String(20), nullable=False, default="BANK_TRANSFER",
     )

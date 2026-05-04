@@ -35,6 +35,40 @@ def _make_l3_signal(query: str = "测试查询") -> QuerySignal:
     )
 
 
+def _make_mock_provider() -> MagicMock:
+    """创建满足 ModuleProvider Protocol 的 mock provider。
+
+    静态数据方法（模板、关键词、实体类型等）委托给真实 P2PModuleProvider，
+    仅 mock 需要外部资源的方法（agent、report_agent、repository 等）。
+    """
+    from modules.p2p.provider import P2PModuleProvider
+
+    real = P2PModuleProvider()
+    provider = MagicMock()
+    provider.get_entity_types.return_value = real.get_entity_types()
+    provider.get_analysis_keywords.return_value = real.get_analysis_keywords()
+    provider.get_analysis_type_descriptions.return_value = real.get_analysis_type_descriptions()
+    provider.get_role_descriptions.return_value = real.get_role_descriptions()
+    provider.get_lookup_rules.return_value = real.get_lookup_rules()
+    provider.get_dag_templates.return_value = real.get_dag_templates()
+    provider.get_generic_dag_templates.return_value = real.get_generic_dag_templates()
+    provider.get_reference_patterns.return_value = real.get_reference_patterns()
+    provider.get_planning_prompt_template.return_value = real.get_planning_prompt_template()
+    provider.format_tools_for_planning.side_effect = real.format_tools_for_planning
+    provider.trim_to_token_budget.side_effect = real.trim_to_token_budget
+    provider.build_memory_content.side_effect = real.build_memory_content
+    provider.build_memory_metadata.side_effect = real.build_memory_metadata
+    provider.get_tools.return_value = []
+    provider.get_graphiti_client.return_value = None
+    provider.is_query_backend_available.return_value = False
+    return provider
+
+
+@pytest.fixture()
+def provider() -> MagicMock:
+    return _make_mock_provider()
+
+
 @pytest.fixture()
 def settings() -> Settings:
     return Settings()
@@ -44,24 +78,29 @@ class TestOrchestratorInit:
     """初始化测试。"""
 
     def test_init_with_settings(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         assert orch._settings is settings
 
     def test_init_without_settings(self) -> None:
         mock_settings = Settings()
         with patch("core.orchestrator.orchestrator.get_settings", return_value=mock_settings):
-            orch = Orchestrator()
+            orch = Orchestrator(provider=_make_mock_provider())
         assert orch._settings is mock_settings
 
+    def test_init_without_provider_raises(self) -> None:
+        with pytest.raises(ValueError, match="provider is required"):
+            Orchestrator(settings=Settings())
+
     def test_lazy_agent_property(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        mock_agent = MagicMock()
+        provider = _make_mock_provider()
+        provider.get_agent.return_value = mock_agent
+        orch = Orchestrator(settings=settings, provider=provider)
         assert orch._agent is None
 
-        mock_p2p = MagicMock()
-        with patch("modules.p2p.agent.P2PAgent", return_value=mock_p2p):
-            agent = orch._lazy_agent
-        assert agent is mock_p2p
-        assert orch._lazy_agent is mock_p2p
+        agent = orch._lazy_agent
+        assert agent is mock_agent
+        assert orch._lazy_agent is mock_agent
 
 
 class TestOrchestratorReActPath:
@@ -70,7 +109,7 @@ class TestOrchestratorReActPath:
     @pytest.mark.asyncio
     async def test_react_success(self, settings: Settings) -> None:
         """Level 3 走 ReAct 路径应成功，且 summary 包含路由监控信息。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [],
             "supplier_kpis": [],
@@ -97,7 +136,7 @@ class TestOrchestratorReActPath:
     @pytest.mark.asyncio
     async def test_react_with_explicit_type(self, settings: Settings) -> None:
         """显式指定 analysis_type 时应优先使用。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [], "summary": {}, "report_markdown": "",
             "completed_tasks": [], "failed_tasks": [],
@@ -116,7 +155,7 @@ class TestOrchestratorReActPath:
     @pytest.mark.asyncio
     async def test_react_with_time_range(self, settings: Settings) -> None:
         """指定 time_range_days 应传递给 Agent。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [], "summary": {}, "report_markdown": "",
             "completed_tasks": [], "failed_tasks": [],
@@ -131,7 +170,10 @@ class TestOrchestratorReActPath:
     @pytest.mark.asyncio
     async def test_react_failure(self, settings: Settings) -> None:
         """Agent 异常时应返回 FAILED。"""
-        orch = Orchestrator(settings=settings)
+        provider = _make_mock_provider()
+        provider.get_dag_templates.return_value = {"type_map": {}, "entity_map": {}}
+        provider.get_generic_dag_templates.return_value = {}
+        orch = Orchestrator(settings=settings, provider=provider)
         orch._agent = _make_mock_agent(side_effect=RuntimeError("boom"))
 
         with patch.object(orch._intent_router, "route", return_value=_make_l3_signal()):
@@ -145,7 +187,7 @@ class TestOrchestratorReActPath:
     @pytest.mark.asyncio
     async def test_react_with_session_id(self, settings: Settings) -> None:
         """请求中的 session_id 应被使用。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [], "summary": {}, "report_markdown": "",
             "completed_tasks": [], "failed_tasks": [],
@@ -195,7 +237,7 @@ class TestOrchestratorIntentKindBranches:
     @pytest.mark.asyncio
     async def test_chitchat_early_return(self, settings: Settings) -> None:
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={})
         orch._agent = mock_agent
 
@@ -213,7 +255,7 @@ class TestOrchestratorIntentKindBranches:
     @pytest.mark.asyncio
     async def test_meta_returns_capability_template(self, settings: Settings) -> None:
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={})
         orch._agent = mock_agent
 
@@ -234,7 +276,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """纯 OUT_OF_SCOPE（query 不含分析关键词）走早退模板。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={})
         orch._agent = mock_agent
 
@@ -255,7 +297,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """OUT_OF_SCOPE + query 含分析关键词 → 降级为 ANALYSIS/COMPREHENSIVE。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={
             "anomalies": [], "supplier_kpis": [], "summary": {},
             "report_markdown": "# Comprehensive",
@@ -282,7 +324,7 @@ class TestOrchestratorIntentKindBranches:
         遵循"尽量回复"原则，意图模糊时归入 analysis/comprehensive 由 ReAct 执行。
         """
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={
             "anomalies": [], "supplier_kpis": [], "summary": {},
             "report_markdown": "# Comprehensive Analysis",
@@ -310,7 +352,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """DATA_LOOKUP 应走 ReAct 路径（让 Agent 自由调 query_* 工具），不走 DAG。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={
             "anomalies": [],
             "supplier_kpis": [],
@@ -342,7 +384,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """L3 ANALYSIS 但 confidence<0.5 时强制走 ReAct，不进 DAG 模板。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = _make_mock_agent(return_value={
             "anomalies": [],
             "summary": {},
@@ -371,7 +413,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """用户显式 analysis_type 时，即使 LLM 判 DATA_LOOKUP 也走分析路径（DAG）。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         signal = self._make_signal(IntentKind.DATA_LOOKUP, confidence=0.9)
         with patch.object(orch._intent_router, "route", return_value=signal):
@@ -390,7 +432,7 @@ class TestOrchestratorIntentKindBranches:
     ) -> None:
         """显式指定 analysis_type 时，CLARIFICATION 也不早退，走 DAG 分析。"""
         from core.orchestrator.signal import IntentKind
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         signal = self._make_signal(
             IntentKind.CLARIFICATION,
@@ -520,7 +562,7 @@ class TestOrchestratorSessionContext:
 
     def test_load_context_no_checkpointer(self, settings: Settings) -> None:
         """checkpointer 不可用时应返回空上下文。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._checkpointer = None
 
         ctx = orch._load_session_context("s1")
@@ -528,7 +570,7 @@ class TestOrchestratorSessionContext:
 
     def test_load_context_no_history(self, settings: Settings) -> None:
         """无历史时返回空上下文。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.return_value = None
         orch._memory._short_term._checkpointer = mock_checkpointer
@@ -544,7 +586,7 @@ class TestOrchestratorSessionContext:
 
         from core.memory.tables import metadata_obj, session_entities_table
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_checkpointer = MagicMock()
 
         # 模拟 checkpointer 返回历史
@@ -581,7 +623,7 @@ class TestOrchestratorSessionContext:
 
     def test_load_context_failure_not_blocking(self, settings: Settings) -> None:
         """checkpointer 读取异常不应阻塞。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_checkpointer = MagicMock()
         mock_checkpointer.get_tuple.side_effect = RuntimeError("db error")
         orch._memory._short_term._checkpointer = mock_checkpointer
@@ -592,7 +634,7 @@ class TestOrchestratorSessionContext:
     @pytest.mark.asyncio
     async def test_context_po_entity_triggers_dag(self, settings: Settings) -> None:
         """'分析这个po' + 上下文有 PO 号 → 指代消解后走 PO 综合 DAG。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         # Mock DAG executor
         mock_executor = MagicMock()
@@ -647,7 +689,7 @@ class TestOrchestratorDAGShortTermMemory:
     @pytest.mark.asyncio
     async def test_dag_saves_to_short_term_memory(self, settings: Settings) -> None:
         """DAG 执行后应通过 agent.update_state 写入 checkpointer。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         mock_agent_graph = MagicMock()
         mock_agent_graph.update_state = MagicMock()
@@ -671,7 +713,7 @@ class TestOrchestratorDAGShortTermMemory:
     @pytest.mark.asyncio
     async def test_dag_short_term_memory_failure_not_blocking(self, settings: Settings) -> None:
         """agent 不可用时不应阻塞主流程。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_agent = MagicMock()
         mock_agent._get_or_build_agent.return_value = None
         orch._agent = mock_agent
@@ -691,7 +733,7 @@ class TestOrchestratorDAGPath:
     @pytest.mark.asyncio
     async def test_dag_execution_success(self, settings: Settings) -> None:
         """Level 1 命中应走 DAG 路径。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         # Mock DAG executor
         mock_executor = MagicMock()
@@ -729,7 +771,7 @@ class TestOrchestratorDAGPath:
     @pytest.mark.asyncio
     async def test_dag_partial_success(self, settings: Settings) -> None:
         """DAG 部分失败应返回 PARTIAL_SUCCESS。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         mock_executor = MagicMock()
         mock_executor.execute = AsyncMock(return_value={
@@ -762,7 +804,7 @@ class TestOrchestratorDAGPath:
     @pytest.mark.asyncio
     async def test_comprehensive_skips_dag(self, settings: Settings) -> None:
         """COMPREHENSIVE 类型无实体时走 ReAct。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._agent = _make_mock_agent(return_value={
             "anomalies": [], "summary": {}, "report_markdown": "react",
             "completed_tasks": [], "failed_tasks": [],
@@ -965,7 +1007,7 @@ class TestDAGContextBudget:
         """_record_dag_context_budget 应在活跃 trace 中记录 context_budget span。"""
         from core.observability.tracing import TimingMiddleware, _current_trace
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mw = orch._timing_middleware
         mw._print = False
         mw.start_run()
@@ -1089,7 +1131,7 @@ class TestSessionContextTrim:
         """短摘要不应被裁剪。"""
         from langchain_core.messages import AIMessage, HumanMessage
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_cp = MagicMock()
         mock_tuple = MagicMock()
         mock_tuple.checkpoint = {
@@ -1111,7 +1153,7 @@ class TestSessionContextTrim:
         from langchain_core.messages import AIMessage, HumanMessage
         from core.observability.tracing import estimate_tokens
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_cp = MagicMock()
         # 构造超长 AI 回复（~30000 字符 >> 15% of 32768 tokens）
         long_response = "分析报告内容详情" * 3000
@@ -1200,7 +1242,7 @@ class TestOrchestratorTimeout:
 
         settings.analysis.response_timeout_seconds = 0.1  # 100ms
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
 
         async def slow_inner(**kwargs):
             await asyncio.sleep(5)
@@ -1223,14 +1265,14 @@ class TestCheckpointerLifecycle:
     """Checkpointer 初始化与关闭测试。"""
 
     def test_ensure_checkpointer_failure_returns_none(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         with patch.object(orch, "_get_checkpointer", side_effect=RuntimeError("pg down")):
             result = orch._ensure_checkpointer()
         assert result is None
 
     def test_close_checkpointer_exception(self, settings: Settings) -> None:
         """关闭 checkpointer 异常不应阻塞。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_cm = MagicMock()
         mock_cm.__exit__ = MagicMock(side_effect=RuntimeError("close error"))
         orch._memory._short_term._checkpointer_cm = mock_cm
@@ -1242,7 +1284,7 @@ class TestCheckpointerLifecycle:
 
     def test_close_checkpointer_idempotent(self, settings: Settings) -> None:
         """重复关闭不应报错。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         orch._close_checkpointer()  # cm 为 None，应静默返回
 
 
@@ -1256,7 +1298,7 @@ class TestPersistReport:
         """持久化失败不应抛异常。"""
         from api.schemas.analysis import AnalysisResult, AnalysisStatus, AnalysisType
 
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         result = AnalysisResult(
             report_id="r1", status=AnalysisStatus.SUCCESS,
             analysis_type=AnalysisType.COMPREHENSIVE,
@@ -1277,7 +1319,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_po_not_found_discarded(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.return_value = []
         params = {"po_number": "PO-9999", "days": 30}
@@ -1288,7 +1330,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_po_found_kept(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.return_value = [{"po_number": "PO-001"}]
         params = {"po_number": "PO-001", "days": 30}
@@ -1299,7 +1341,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_supplier_not_found_discarded(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.return_value = []
         params = {"vendor_id": "SUP-999", "days": 30}
@@ -1310,7 +1352,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_invoice_not_found_discarded(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_invoices.return_value = [{"invoice_num": "INV-OTHER"}]
         params = {"invoice_num": "INV-999", "days": 30}
@@ -1321,7 +1363,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_payment_not_found_discarded(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_payments.return_value = []
         params = {"check_number": "PAY-999", "days": 30}
@@ -1332,7 +1374,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_receipt_not_found_discarded(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_receipts.return_value = [{"receipt_id": "RCV-OTHER"}]
         params = {"receipt_number": "RCV-999", "days": 30}
@@ -1343,7 +1385,7 @@ class TestValidateEntities:
 
     @pytest.mark.asyncio
     async def test_db_error_non_blocking(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.side_effect = RuntimeError("db error")
         params = {"po_number": "PO-001", "days": 30}
@@ -1373,39 +1415,39 @@ class TestEnrichEntities:
 
     @pytest.mark.asyncio
     async def test_payment_to_invoice(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        provider = _make_mock_provider()
         mock_repo = MagicMock()
         mock_repo.query_payments.return_value = [{"invoice_num": "INV-001"}]
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_invoices.return_value = []
         mock_repo.query_receipts.return_value = []
+        provider.get_repository.return_value = mock_repo
+        orch = Orchestrator(settings=settings, provider=provider)
 
         params = {"check_number": "PAY-001", "days": 30}
-
-        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
-            await orch._enrich_entities(params)
+        await orch._enrich_entities(params)
 
         assert params.get("invoice_num") == "INV-001"
 
     @pytest.mark.asyncio
     async def test_po_to_supplier(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        provider = _make_mock_provider()
         mock_repo = MagicMock()
         mock_repo.query_purchase_orders.return_value = [{"vendor_id": "SUP-001"}]
         mock_repo.query_invoices.return_value = []
         mock_repo.query_receipts.return_value = []
         mock_repo.query_payments.return_value = []
+        provider.get_repository.return_value = mock_repo
+        orch = Orchestrator(settings=settings, provider=provider)
 
         params = {"po_number": "PO-001", "days": 30}
-
-        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
-            await orch._enrich_entities(params)
+        await orch._enrich_entities(params)
 
         assert params.get("vendor_id") == "SUP-001"
 
     @pytest.mark.asyncio
     async def test_receipt_to_po_and_supplier(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        provider = _make_mock_provider()
         mock_repo = MagicMock()
         mock_repo.query_receipts.return_value = [
             {"receipt_id": "RCV-001", "po_number": "PO-001", "vendor_id": "SUP-001"}
@@ -1413,18 +1455,18 @@ class TestEnrichEntities:
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_invoices.return_value = []
         mock_repo.query_payments.return_value = []
+        provider.get_repository.return_value = mock_repo
+        orch = Orchestrator(settings=settings, provider=provider)
 
         params = {"receipt_number": "RCV-001", "days": 30}
-
-        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
-            await orch._enrich_entities(params)
+        await orch._enrich_entities(params)
 
         assert params.get("po_number") == "PO-001"
         assert params.get("vendor_id") == "SUP-001"
 
     @pytest.mark.asyncio
     async def test_invoice_to_po_and_supplier(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        provider = _make_mock_provider()
         mock_repo = MagicMock()
         mock_repo.query_invoices.return_value = [
             {"invoice_num": "INV-001", "po_number": "PO-002", "vendor_id": "SUP-002"}
@@ -1432,23 +1474,24 @@ class TestEnrichEntities:
         mock_repo.query_purchase_orders.return_value = []
         mock_repo.query_receipts.return_value = []
         mock_repo.query_payments.return_value = []
+        provider.get_repository.return_value = mock_repo
+        orch = Orchestrator(settings=settings, provider=provider)
 
         params = {"invoice_num": "INV-001", "days": 30}
-
-        with patch("modules.p2p.tools._get_repository", return_value=mock_repo):
-            await orch._enrich_entities(params)
+        await orch._enrich_entities(params)
 
         assert params.get("po_number") == "PO-002"
         assert params.get("vendor_id") == "SUP-002"
 
     @pytest.mark.asyncio
     async def test_repo_init_failure(self, settings: Settings) -> None:
-        """_get_repository 失败不阻塞。"""
-        orch = Orchestrator(settings=settings)
+        """provider.get_repository() 失败不阻塞。"""
+        provider = _make_mock_provider()
+        provider.get_repository.side_effect = RuntimeError("no repo")
+        orch = Orchestrator(settings=settings, provider=provider)
         params = {"po_number": "PO-001", "days": 30}
 
-        with patch("modules.p2p.tools._get_repository", side_effect=RuntimeError("no repo")):
-            await orch._enrich_entities(params)
+        await orch._enrich_entities(params)
 
         assert params["po_number"] == "PO-001"  # 原样保留
 

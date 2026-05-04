@@ -1,0 +1,65 @@
+sequenceDiagram
+    autonumber
+    participant O as Orchestrator
+    participant DAG as DAGExecutor
+    participant TR as ToolRegistry
+    participant T1 as Tool A (regular)
+    participant T2 as Tool B (regular)
+    participant T3 as Tool C (depends on A)
+    participant RA as ReportAgent
+    participant CS as DAGCaseStore
+    participant LLM as LLM
+
+    O->>DAG: execute(tasks, query, analysis_type)
+
+    %% Phase 1: 并行任务分发
+    par 独立任务并行执行
+        DAG->>TR: get("tool_a")
+        TR-->>DAG: tool_a_fn
+        DAG->>T1: ainvoke(params)
+        T1-->>DAG: result_a
+
+    and
+        DAG->>TR: get("tool_b")
+        TR-->>DAG: tool_b_fn
+        DAG->>T2: ainvoke(params)
+        T2-->>DAG: result_b
+    end
+
+    %% Phase 2: 依赖任务等待
+    Note over DAG,T3: Tool C 声明依赖 Tool A
+    DAG->>DAG: await dependency_event(tool_a)
+    DAG->>TR: get("tool_c")
+    TR-->>DAG: tool_c_fn
+    DAG->>T3: ainvoke(params + result_a)
+    T3-->>DAG: result_c
+
+    %% Phase 3: 超时处理
+    alt 工具超时
+        DAG->>DAG: asyncio.wait_for timeout
+        DAG->>DAG: 标记 task failed, 继续其他任务
+    end
+
+    %% Phase 4: 报告生成
+    DAG->>RA: generate_summary_report(all_results, query)
+    RA->>LLM: 汇总分析结果生成报告
+    LLM-->>RA: report_markdown
+    RA-->>DAG: report_text
+
+    %% Phase 5: 结果聚合
+    DAG->>DAG: aggregate results + compute status
+    alt 全部成功
+        DAG->>DAG: status = SUCCESS
+    else 部分失败
+        DAG->>DAG: status = PARTIAL_SUCCESS
+    else 全部失败
+        DAG->>DAG: status = FAILED
+    end
+
+    %% Phase 6: 案例存储
+    opt skip_case_store = False 且 status = SUCCESS
+        DAG->>CS: store_successful_case(query, tasks, results)
+        CS-->>DAG: case_id
+    end
+
+    DAG-->>O: {status, outputs, report, failed_tasks}

@@ -56,6 +56,36 @@ class TestQueryMethods:
         assert all(p["invoice_num"] == "INV-2024-0001" for p in payments)
 
 
+class TestLimitAndOrderBy:
+    """limit + order_by 参数组合测试。"""
+
+    def test_order_by_date_desc(self, repository: P2PRepository) -> None:
+        pos = repository.query_purchase_orders(days=0, limit=5, order_by="date_desc")
+        assert len(pos) == 5
+        dates = [po["creation_date"] for po in pos]
+        assert dates == sorted(dates, reverse=True)
+
+    def test_order_by_amount_desc(self, repository: P2PRepository) -> None:
+        pos = repository.query_purchase_orders(days=0, limit=5, order_by="amount_desc")
+        assert len(pos) == 5
+        amounts = [po["po_amount"] for po in pos]
+        assert amounts == sorted(amounts, reverse=True)
+
+    def test_limit_returns_exact_count(self, repository: P2PRepository) -> None:
+        for limit in (1, 5, 10):
+            pos = repository.query_purchase_orders(days=0, limit=limit)
+            assert len(pos) == limit, f"limit={limit} returned {len(pos)}"
+
+    def test_limit_zero_means_no_limit(self, repository: P2PRepository) -> None:
+        pos = repository.query_purchase_orders(days=0, limit=0)
+        assert len(pos) == 50
+
+    def test_days_filter_narrow_window(self, repository: P2PRepository) -> None:
+        pos_all = repository.query_purchase_orders(days=0)
+        pos_1d = repository.query_purchase_orders(days=1)
+        assert len(pos_1d) <= len(pos_all)
+
+
 class TestFlattenedMethods:
     """扁平化数据方法测试（供规则引擎使用）。"""
 
@@ -121,8 +151,9 @@ class TestResetAndSeed:
     def test_reset_and_seed_clears_old_data(self, db_engine) -> None:
         """reset_and_seed 应先清空旧数据再重新插入。"""
         from core.database.init_db import reset_and_seed
+        from modules.p2p.mock_data.generator import MockDataGenerator
         # 第二次调用：清空 + 重建，记录数应与 count 一致
-        counts = reset_and_seed(db_engine, seed=0, count=20)
+        counts = reset_and_seed(db_engine, seed=0, count=20, data_generator_factory=MockDataGenerator)
         assert counts["po_headers"] == 20
         assert counts["ap_invoices"] == 20
         assert counts["ap_checks"] == 20
@@ -130,7 +161,8 @@ class TestResetAndSeed:
     def test_reset_and_seed_different_count(self, db_engine) -> None:
         """不同 count 应产生不同记录数。"""
         from core.database.init_db import reset_and_seed
-        reset_and_seed(db_engine, seed=0, count=30)
+        from modules.p2p.mock_data.generator import MockDataGenerator
+        reset_and_seed(db_engine, seed=0, count=30, data_generator_factory=MockDataGenerator)
         from sqlalchemy.orm import sessionmaker
         repo = P2PRepository(sessionmaker(bind=db_engine, expire_on_commit=False))
         assert len(repo.query_purchase_orders(days=0)) == 30

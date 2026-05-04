@@ -27,6 +27,9 @@ from core.orchestrator.lookup import (
     format_lookup_result,
     resolve_lookup_tool,
 )
+from modules.p2p.provider import P2PModuleProvider
+
+_p2p_provider = P2PModuleProvider()
 
 
 # ── resolve_lookup_tool 测试 ──────────────────────────────────────────
@@ -38,7 +41,8 @@ class TestResolveLookupTool:
     def test_path_a_po_number(self) -> None:
         """路径 A：有 po_number → query_purchase_orders，days=0（不限时间）。"""
         result = resolve_lookup_tool(
-            {"po_number": "PO-2024-001", "days": 30}, "查看PO-2024-001"
+            {"po_number": "PO-2024-001", "days": 30}, "查看PO-2024-001",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -49,7 +53,8 @@ class TestResolveLookupTool:
     def test_path_a_invoice_number(self) -> None:
         """路径 A：有 invoice_number → query_invoices，days=0（不限时间）。"""
         result = resolve_lookup_tool(
-            {"invoice_num": "INV-001", "days": 7}, "查看发票INV-001"
+            {"invoice_num": "INV-001", "days": 7}, "查看发票INV-001",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -60,7 +65,8 @@ class TestResolveLookupTool:
     def test_path_a_payment_number(self) -> None:
         """路径 A：有 payment_number → query_payments。"""
         result = resolve_lookup_tool(
-            {"check_number": "PAY-001", "days": 30}, "查看付款单PAY-001"
+            {"check_number": "PAY-001", "days": 30}, "查看付款单PAY-001",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -70,7 +76,8 @@ class TestResolveLookupTool:
     def test_path_a_supplier_id(self) -> None:
         """路径 A：仅有 supplier_id → __supplier_combo__。"""
         result = resolve_lookup_tool(
-            {"vendor_id": "SUP-001", "days": 30}, "查看供应商SUP-001"
+            {"vendor_id": "SUP-001", "days": 30}, "查看供应商SUP-001",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -82,6 +89,7 @@ class TestResolveLookupTool:
         result = resolve_lookup_tool(
             {"po_number": "PO-001", "vendor_id": "SUP-001", "days": 30},
             "查看PO-001",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, _ = result
@@ -92,6 +100,7 @@ class TestResolveLookupTool:
         result = resolve_lookup_tool(
             {"po_number": "PO-001", "days": 30, "limit": 1, "order_by": "date_desc"},
             "查看最新的一个PO",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -101,7 +110,7 @@ class TestResolveLookupTool:
 
     def test_no_match_returns_none(self) -> None:
         """无实体无法命中 → None（由 orchestrator 进入 PS 或 ReAct）。"""
-        result = resolve_lookup_tool({"days": 30}, "帮我查一下")
+        result = resolve_lookup_tool({"days": 30}, "帮我查一下", provider=_p2p_provider)
         assert result is None
 
     def test_receipt_number_falls_into_path_b(self) -> None:
@@ -109,6 +118,7 @@ class TestResolveLookupTool:
         result = resolve_lookup_tool(
             {"receipt_number": "RCV-001", "days": 7},
             "查看最近 7 天的收货单",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, _ = result
@@ -125,7 +135,7 @@ class TestPathBFourFilters:
 
     def test_hit_latest_n_po(self) -> None:
         """漏斗全满足：'最新 5 个 PO' → query_purchase_orders。"""
-        result = resolve_lookup_tool({"days": 30}, "最新的 5 个 PO")
+        result = resolve_lookup_tool({"days": 30}, "最新的 5 个 PO", provider=_p2p_provider)
         assert result is not None
         tool_name, kwargs = result
         assert tool_name == "query_purchase_orders"
@@ -134,7 +144,7 @@ class TestPathBFourFilters:
 
     def test_hit_largest_amount_payments(self) -> None:
         """漏斗全满足：'金额最大的 3 笔付款' → query_payments。"""
-        result = resolve_lookup_tool({"days": 30}, "金额最大的 3 笔付款")
+        result = resolve_lookup_tool({"days": 30}, "金额最大的 3 笔付款", provider=_p2p_provider)
         assert result is not None
         tool_name, kwargs = result
         assert tool_name == "query_payments"
@@ -144,6 +154,7 @@ class TestPathBFourFilters:
         """漏斗 #2 放宽：明确时间窗（"最近 7 天"）+ 无数量修饰也命中。"""
         result = resolve_lookup_tool(
             {"days": 7}, "查询最近 7 天的发票",
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, _ = result
@@ -151,7 +162,7 @@ class TestPathBFourFilters:
 
     def test_hit_supplier_list(self) -> None:
         """'本月的供应商列表' → 时间窗命中漏斗 #2。"""
-        result = resolve_lookup_tool({}, "本月的供应商列表")
+        result = resolve_lookup_tool({}, "本月的供应商列表", provider=_p2p_provider)
         assert result is not None
         tool_name, _ = result
         assert tool_name == "query_vendor_master"
@@ -162,19 +173,20 @@ class TestPathBFourFilters:
         """漏斗 #1 miss：同时含 PO + 发票 → 多类别放行。"""
         result = resolve_lookup_tool(
             {"days": 7}, "列出最近 7 天的采购订单和发票",
+            provider=_p2p_provider,
         )
         assert result is None
 
     def test_miss_no_entity_category(self) -> None:
         """漏斗 #1 miss：query 中无任何实体类别词。"""
-        result = resolve_lookup_tool({"days": 7}, "最近 7 天有什么值得关注的")
+        result = resolve_lookup_tool({"days": 7}, "最近 7 天有什么值得关注的", provider=_p2p_provider)
         assert result is None
 
     # ─ 漏斗 #2 miss：无数量/排序 + 无时间窗 ─
 
     def test_miss_no_quantity_no_time_window(self) -> None:
         """漏斗 #2 miss：只有实体词，无数量/排序/时间窗。"""
-        result = resolve_lookup_tool({"days": 30}, "查一下发票")
+        result = resolve_lookup_tool({"days": 30}, "查一下发票", provider=_p2p_provider)
         assert result is None
 
     # ─ 漏斗 #3 miss：黑名单词（回归 bad case）─
@@ -183,6 +195,7 @@ class TestPathBFourFilters:
         """历史 bad case 回归：'查询最近 7 天的采购订单概况' 必须 miss。"""
         assert resolve_lookup_tool(
             {"days": 7}, "查询最近 7 天的采购订单概况",
+            provider=_p2p_provider,
         ) is None
 
     def test_miss_blacklist_analysis_words(self) -> None:
@@ -196,7 +209,7 @@ class TestPathBFourFilters:
             "最近付款合规情况",
             "评估最新发票",
         ):
-            assert resolve_lookup_tool({"days": 7}, q) is None, q
+            assert resolve_lookup_tool({"days": 7}, q, provider=_p2p_provider) is None, q
 
     # ─ 漏斗 #4 miss：关系追溯词 ─
 
@@ -207,7 +220,7 @@ class TestPathBFourFilters:
             "查看最近 5 个 PO 的上下游关系",
             "溯源最近的付款路径",
         ):
-            assert resolve_lookup_tool({"days": 7}, q) is None, q
+            assert resolve_lookup_tool({"days": 7}, q, provider=_p2p_provider) is None, q
 
     # ─ 路径 A 和路径 B 优先级 ─
 
@@ -215,6 +228,7 @@ class TestPathBFourFilters:
         """有实体编号时走路径 A，不经过漏斗。"""
         result = resolve_lookup_tool(
             {"po_number": "PO-001"}, "PO-001 的异常情况",  # "异常/情况" 本是黑名单词
+            provider=_p2p_provider,
         )
         assert result is not None
         tool_name, kwargs = result
@@ -267,6 +281,7 @@ class TestParseQueryConstraints:
         """有实体编号时，query 中解析出的 limit/order_by 也会透传。"""
         result = resolve_lookup_tool(
             {"po_number": "PO-001"}, "查询 PO-001 最新的一个记录",
+            provider=_p2p_provider,
         )
         assert result is not None
         _, kwargs = result
@@ -403,6 +418,20 @@ class TestExecuteLookup:
         assert result is not None
         assert "PO-001" in result
         mock_tool.ainvoke.assert_called_once_with({"days": 30})
+
+    @pytest.mark.asyncio
+    async def test_empty_result_returns_none(self) -> None:
+        """工具返回空列表时 execute_lookup 应返回 None（触发 fallback）。"""
+        mock_tool = AsyncMock()
+        mock_tool.ainvoke.return_value = "[]"
+
+        registry = MagicMock()
+        registry.get.return_value = mock_tool
+
+        result = await execute_lookup(
+            "query_purchase_orders", {"days": 1}, registry,
+        )
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_tool_not_registered(self) -> None:

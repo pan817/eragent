@@ -203,7 +203,7 @@ class TestP2PAgentBuild:
             agent = P2PAgent(settings=settings)
 
         tools = agent._build_tools()
-        assert len(tools) == 27  # hybrid mode: 15 PG + 12 Graph tools
+        assert len(tools) == 28  # hybrid mode: 15 PG + 12 Graph + 1 Chat tools
 
     def test_get_system_prompt(self) -> None:
         """build_system_prompt 应返回包含角色定义的字符串。"""

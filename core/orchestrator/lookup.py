@@ -98,6 +98,7 @@ def _resolve_high_confidence_keyword_tool(
     query: str,
     limit: int,
     order_by: str,
+    lookup_rules: dict[str, Any] | None = None,
 ) -> str | None:
     """路径 B 四重漏斗：判断是否可按关键词映射到工具。
 
@@ -107,15 +108,17 @@ def _resolve_high_confidence_keyword_tool(
         query: 用户查询文本。
         limit: 已解析的数量约束（0 表示未指定）。
         order_by: 已解析的排序约束（"" 表示未指定）。
+        lookup_rules: provider.get_lookup_rules() 返回的规则字典。
 
     Returns:
         工具名或 None。
     """
-    from modules.p2p.intent_rules import (
-        LOOKUP_EXCLUSION_WORDS,
-        LOOKUP_GRAPH_INTENT_WORDS,
-        LOOKUP_HIGH_CONFIDENCE_KEYWORDS,
-    )
+    if lookup_rules is None:
+        return None
+
+    LOOKUP_HIGH_CONFIDENCE_KEYWORDS = lookup_rules["high_confidence_keywords"]
+    LOOKUP_EXCLUSION_WORDS = lookup_rules["exclusion_words"]
+    LOOKUP_GRAPH_INTENT_WORDS = lookup_rules["graph_intent_words"]
 
     q_lower = query.lower()
 
@@ -147,6 +150,7 @@ def _resolve_high_confidence_keyword_tool(
 def resolve_lookup_tool(
     params: dict[str, Any],
     query: str,
+    provider: Any = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """根据实体编号或高置信度关键词确定应调用的工具和参数。
 
@@ -199,10 +203,12 @@ def resolve_lookup_tool(
         })
 
     # ── 路径 B：四重漏斗高置信度关键词映射 ─────────────────────
-    hc_tool = _resolve_high_confidence_keyword_tool(query, limit, order_by)
+    lookup_rules = provider.get_lookup_rules() if provider else None
+    hc_tool = _resolve_high_confidence_keyword_tool(query, limit, order_by, lookup_rules)
     if hc_tool is not None:
-        # 命中 → days 沿用 params 中的值（路由/用户指定），兜底 30
-        kwargs = {"days": params.get("days", 30) or 30}
+        # 命中 → days 沿用 orchestrator 已决策的值；0 表示不限时间（合法值）
+        days_val = params.get("days")
+        kwargs = {"days": days_val if days_val is not None else 30}
         return hc_tool, _with_constraints(kwargs)
 
     # 两条路径都未命中 → 交给 Plan and Solve
@@ -234,11 +240,15 @@ async def execute_lookup(
             return None
 
         result_json = await tool_fn.ainvoke(tool_kwargs)
-        return format_lookup_result(
+        result_md = format_lookup_result(
             result_json, tool_name,
             limit=tool_kwargs.get("limit", 0),
             order_by=tool_kwargs.get("order_by", ""),
         )
+        if result_md.startswith("未找到"):
+            _logger.info("lookup shortcut: empty result for tool=%s", tool_name)
+            return None
+        return result_md
     except Exception as exc:
         _logger.warning(
             "lookup shortcut execution failed: tool=%s error=%s",
@@ -282,6 +292,11 @@ async def _execute_supplier_combo(
         limit=limit, order_by=order_by,
     )
 
+    vendor_empty = vendor_md.startswith("未找到")
+    po_empty = po_md.startswith("未找到")
+    if vendor_empty and po_empty:
+        return None
+
     return f"{vendor_md}\n\n{po_md}"
 
 
@@ -289,39 +304,40 @@ async def _execute_supplier_combo(
 
 
 # 各工具的表格列定义：(显示名, JSON 字段名)
+# 字段名必须与 P2PRepository / Neo4jStructuredBackend 实际返回的 dict key 一致
 _COLUMN_DEFS: dict[str, list[tuple[str, str]]] = {
     "query_purchase_orders": [
         ("PO 编号", "po_number"),
         ("供应商", "vendor_name"),
-        ("金额", "total_amount"),
+        ("金额", "po_amount"),
         ("状态", "status"),
-        ("日期", "order_date"),
+        ("日期", "creation_date"),
     ],
     "query_invoices": [
         ("发票号", "invoice_num"),
         ("PO 编号", "po_number"),
-        ("金额", "total_amount"),
-        ("状态", "status"),
-        ("日期", "invoice_date"),
+        ("金额", "invoice_amount"),
+        ("状态", "approval_status"),
+        ("日期", "creation_date"),
     ],
     "query_payments": [
         ("付款单号", "check_number"),
         ("发票号", "invoice_num"),
         ("金额", "amount"),
-        ("状态", "status"),
+        ("付款方式", "payment_method_code"),
         ("日期", "check_date"),
     ],
     "query_receipts": [
-        ("收货单号", "receipt_number"),
+        ("收货单号", "gr_number"),
         ("PO 编号", "po_number"),
-        ("数量", "quantity"),
-        ("状态", "status"),
+        ("数量", "gr_quantity"),
+        ("质检", "quality_passed"),
         ("日期", "receipt_date"),
     ],
     "query_vendor_master": [
         ("供应商 ID", "vendor_id"),
         ("名称", "vendor_name"),
-        ("站点", "site"),
+        ("编码", "segment1"),
         ("付款条款", "terms_id"),
         ("状态", "enabled_flag"),
     ],

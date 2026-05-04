@@ -36,12 +36,12 @@ from core.database.models import (
     RcvShipmentLine,
     RcvTransaction,
 )
-from modules.p2p.mock_data.generator import MockDataGenerator
+from typing import Any, Callable
 
 
 def _parse_date(date_str: str) -> date:
-    """将 'YYYY-MM-DD' 字符串转为 date 对象。"""
-    return date.fromisoformat(date_str)
+    """将 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS' 字符串转为 date 对象。"""
+    return date.fromisoformat(date_str[:10])
 
 
 def _parse_datetime(date_str: str) -> datetime:
@@ -57,10 +57,10 @@ def _parse_datetime_opt(val: str | None) -> datetime | None:
 
 
 def _parse_date_opt(val: str | None) -> date | None:
-    """将可选的 'YYYY-MM-DD' 字符串转为 date 对象或 None。"""
+    """将可选的 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS' 字符串转为 date 对象或 None。"""
     if val is None:
         return None
-    return date.fromisoformat(val)
+    return date.fromisoformat(val[:10])
 
 
 # 按外键依赖顺序排列（先删子表，再删父表）
@@ -95,10 +95,8 @@ def _truncate_all(session: Session) -> None:
     session.commit()
 
 
-def _insert_data(session: Session, seed: int, count: int) -> None:
-    """使用 MockDataGenerator 生成数据并批量插入。"""
-    gen = MockDataGenerator(seed=seed)
-    raw = gen.generate_all(count=count)
+def _insert_data(session: Session, raw: dict[str, list]) -> None:
+    """将预生成的数据批量插入数据库。"""
 
     # 供应商
     for s in raw["suppliers"]:
@@ -155,7 +153,7 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
             vendor_id=h["vendor_id"],
             vendor_name=h["vendor_name"],
             status=h["status"],
-            creation_date=_parse_date(h["creation_date"]),
+            creation_date=_parse_datetime(h["creation_date"]),
             total_amount=h["total_amount"],
             currency=h["currency"],
             type_lookup_code=h.get("type_lookup_code"),
@@ -242,7 +240,7 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
             quantity=t["quantity"],
             accepted_quantity=t["accepted_quantity"],
             rejected_quantity=t["rejected_quantity"],
-            transaction_date=_parse_date(t["transaction_date"]),
+            transaction_date=_parse_datetime(t["transaction_date"]),
             vendor_id=t["vendor_id"],
             source_document_code=t.get("source_document_code"),
             last_update_date=_parse_datetime_opt(t.get("last_update_date")),
@@ -257,7 +255,7 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
             vendor_id=inv["vendor_id"],
             vendor_name=inv["vendor_name"],
             invoice_amount=inv["invoice_amount"],
-            invoice_date=_parse_date(inv["invoice_date"]),
+            invoice_date=_parse_datetime(inv["invoice_date"]),
             due_date=_parse_date(inv["due_date"]),
             discount_due_date=_parse_date_opt(inv.get("discount_due_date")),
             approval_status=inv["approval_status"],
@@ -301,7 +299,7 @@ def _insert_data(session: Session, seed: int, count: int) -> None:
             invoice_num=p["invoice_num"],
             vendor_id=p["vendor_id"],
             amount=p["amount"],
-            check_date=_parse_date(p["check_date"]),
+            check_date=_parse_datetime(p["check_date"]),
             payment_method_code=p["payment_method_code"],
             status_lookup_code=p.get("status_lookup_code"),
             currency_code=p.get("currency_code"),
@@ -464,21 +462,37 @@ def create_tables(engine: Engine) -> None:
     logger.info("Alembic migrations applied successfully.")
 
 
-def reset_and_seed(engine: Engine, seed: int = 42, count: int = 500) -> dict[str, int]:
+def reset_and_seed(
+    engine: Engine,
+    seed: int = 42,
+    count: int = 500,
+    data_generator_factory: Callable[..., Any] | None = None,
+) -> dict[str, int]:
     """清空所有业务表并重新灌入种子数据。
 
     Args:
         engine: SQLAlchemy Engine。
         seed: 随机种子，确保数据可重复。
         count: 生成的采购订单数量（发票、付款等同步生成相同数量）。
+        data_generator_factory: 数据生成器类（需接受 seed 参数，返回的
+            实例须提供 ``generate_all(count=int)`` 方法）。
+            由 API 层传入，解耦 core 对具体业务模块的依赖。
 
     Returns:
         各表插入的记录数。
     """
+    if data_generator_factory is None:
+        raise ValueError(
+            "data_generator_factory is required — pass the module-specific "
+            "generator class (e.g. MockDataGenerator) from the API / test layer"
+        )
+    gen = data_generator_factory(seed=seed)
+    raw = gen.generate_all(count=count)
+
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     with session_factory() as session:
         _truncate_all(session)
-        _insert_data(session, seed=seed, count=count)
+        _insert_data(session, raw)
 
         # 统计各表记录数
         counts = {}
@@ -488,13 +502,19 @@ def reset_and_seed(engine: Engine, seed: int = 42, count: int = 500) -> dict[str
         return counts
 
 
-def init_database(engine: Engine, seed: int = 42, count: int = 500) -> None:
+def init_database(
+    engine: Engine,
+    seed: int = 42,
+    count: int = 500,
+    data_generator_factory: Callable[..., Any] | None = None,
+) -> None:
     """建表 + 灌入种子数据（向后兼容，测试用）。
 
     Args:
         engine: SQLAlchemy Engine。
         seed: 随机种子。
         count: 生成的记录数。
+        data_generator_factory: 数据生成器类。
     """
     create_tables(engine)
-    reset_and_seed(engine, seed=seed, count=count)
+    reset_and_seed(engine, seed=seed, count=count, data_generator_factory=data_generator_factory)

@@ -93,8 +93,3 @@ def build_registry_from_provider(provider: Any) -> ToolRegistry:
     return registry
 
 
-def build_default_registry() -> ToolRegistry:
-    """兼容入口：无 Provider 时从 P2P 模块直接构建注册表。"""
-    from modules.p2p.provider import P2PModuleProvider
-
-    return build_registry_from_provider(P2PModuleProvider())

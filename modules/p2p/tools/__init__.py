@@ -2,6 +2,7 @@
 
 - postgresql 模式：15 个 PG 工具（SQL 查询 + 规则检测 + 聚合分析）
 - hybrid 模式：15 个 PG 工具 + 12 个 Graph 工具 = 27 个
+- 跨模式通用：1 个 chat history 工具（recall 场景）
 """
 
 from modules.p2p.tools._inject import (
@@ -55,6 +56,9 @@ from modules.p2p.tools.graph.comparison import (
     find_competing_suppliers,
     find_contract_coverage,
 )
+from modules.p2p.tools.chat_history import search_my_chat_history
+
+CHAT_TOOLS = [search_my_chat_history]
 
 
 def get_tools_for_mode(mode: str) -> list:
@@ -64,12 +68,13 @@ def get_tools_for_mode(mode: str) -> list:
         mode: "postgresql"、"hybrid" 或 "graphiti"（向后兼容，等同 hybrid）。
 
     Returns:
-        工具函数列表。postgresql 模式返回 15 个 PG 工具，其余返回 27 个（15 PG + 12 Graph）。
+        工具函数列表。postgresql 模式返回 16 个（15 PG + 1 chat），
+        其余返回 28 个（15 PG + 12 Graph + 1 chat）。
     """
     if mode == "postgresql":
-        return list(PG_TOOLS)
+        return list(PG_TOOLS) + CHAT_TOOLS
     else:  # hybrid / graphiti (backward compat)
-        return list(PG_TOOLS) + list(GRAPH_TOOLS)
+        return list(PG_TOOLS) + list(GRAPH_TOOLS) + CHAT_TOOLS
 
 
 __all__ = [
@@ -84,4 +89,6 @@ __all__ = [
     "get_tools_for_mode",
     "PG_TOOLS",
     "GRAPH_TOOLS",
+    "CHAT_TOOLS",
+    "search_my_chat_history",
 ]

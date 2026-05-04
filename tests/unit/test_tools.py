@@ -35,28 +35,57 @@ class TestQueryTools:
     """数据查询工具测试。"""
 
     async def test_query_purchase_orders(self) -> None:
-        """应返回有效的 JSON 字符串。"""
-        result = await query_purchase_orders.ainvoke({"vendor_id": "", "status": "", "days": 30})
+        result = await query_purchase_orders.ainvoke({"vendor_id": "", "status": "", "days": 0})
         data = json.loads(result)
-        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert "po_number" in data[0]
+        assert "creation_date" in data[0]
+        assert "vendor_id" in data[0]
 
     async def test_query_receipts(self) -> None:
-        """应返回有效的 JSON 字符串。"""
-        result = await query_receipts.ainvoke({"po_number": "", "vendor_id": "", "days": 30})
+        result = await query_receipts.ainvoke({"po_number": "", "vendor_id": "", "days": 0})
         data = json.loads(result)
-        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert "po_number" in data[0]
+        assert "gr_number" in data[0]
 
     async def test_query_invoices(self) -> None:
-        """应返回有效的 JSON 字符串。"""
-        result = await query_invoices.ainvoke({"po_number": "", "vendor_id": "", "status": "", "days": 30})
+        result = await query_invoices.ainvoke({"po_number": "", "vendor_id": "", "status": "", "days": 0})
         data = json.loads(result)
-        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert "invoice_num" in data[0]
 
     async def test_query_payments(self) -> None:
-        """应返回有效的 JSON 字符串。"""
-        result = await query_payments.ainvoke({"invoice_num": "", "vendor_id": "", "days": 30})
+        result = await query_payments.ainvoke({"invoice_num": "", "vendor_id": "", "days": 0})
         data = json.loads(result)
-        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert "amount" in data[0]
+        assert data[0]["amount"] > 0
+
+    async def test_query_po_with_limit(self) -> None:
+        result = await query_purchase_orders.ainvoke(
+            {"vendor_id": "", "status": "", "days": 0, "limit": 3},
+        )
+        data = json.loads(result)
+        assert len(data) == 3
+
+    async def test_query_po_with_order_by_date_desc(self) -> None:
+        result = await query_purchase_orders.ainvoke(
+            {"vendor_id": "", "status": "", "days": 0, "limit": 5, "order_by": "date_desc"},
+        )
+        data = json.loads(result)
+        assert len(data) == 5
+        dates = [row["creation_date"] for row in data]
+        assert dates == sorted(dates, reverse=True)
+
+    async def test_query_po_with_order_by_amount_desc(self) -> None:
+        result = await query_purchase_orders.ainvoke(
+            {"vendor_id": "", "status": "", "days": 0, "limit": 3, "order_by": "amount_desc"},
+        )
+        data = json.loads(result)
+        assert len(data) == 3
+        amounts = [row["po_amount"] for row in data]
+        assert amounts == sorted(amounts, reverse=True)
 
 
 class TestAnalysisTools:

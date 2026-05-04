@@ -49,10 +49,11 @@ def _replace_params(tasks: list[dict[str, Any]], params: dict[str, Any]) -> list
 def load_dag_template(
     analysis_type: AnalysisType,
     params: dict[str, Any],
+    provider: Any = None,
 ) -> list[dict[str, Any]] | None:
     """加载并参数化 DAG 模板。
 
-    从 P2P 模块获取模板映射。
+    从 ModuleProvider 获取模板映射。
 
     选择逻辑（优先级从高到低）：
     1. COMPREHENSIVE + check_number → 单笔付款单合规 DAG
@@ -62,10 +63,13 @@ def load_dag_template(
     5. 按 analysis_type 匹配分析类型维度模板
     6. 无匹配 → 返回 None（由调用方降级到 agent）
     """
-    from modules.p2p.dag_templates import get_entity_template_map, get_template_map
-
-    template_map = get_template_map()
-    entity_template_map = get_entity_template_map()
+    if provider is not None:
+        dag_templates = provider.get_dag_templates()
+        template_map = dag_templates.get("type_map", {})
+        entity_template_map = dag_templates.get("entity_map", {})
+    else:
+        template_map = {}
+        entity_template_map = {}
 
     effective_params = {
         "days": params.get("days", 30),
@@ -106,19 +110,24 @@ def load_dag_template(
 def load_generic_template(
     template_key: str,
     params: dict[str, Any],
+    provider: Any = None,
 ) -> list[dict[str, Any]] | None:
     """加载并参数化通用概览模板（不按 AnalysisType 索引）。
+
+    从 ModuleProvider 获取通用模板映射。
 
     Args:
         template_key: 模板键名（如 "recent_procurement_health"）。
         params: 参数字典（至少含 days）。
+        provider: ModuleProvider 实例。
 
     Returns:
-        参数化后的 DAG 任务列表，或 None（键不存在）。
+        参数化后的 DAG 任务列表，或 None（键不存在或 provider 为 None）。
     """
-    from modules.p2p.dag_templates import get_generic_template_map
+    if provider is None:
+        return None
 
-    generic_map = get_generic_template_map()
+    generic_map = provider.get_generic_dag_templates()
     template = generic_map.get(template_key)
     if template is None:
         return None

@@ -140,6 +140,11 @@ class Orchestrator:
         if settings is None:
             settings = get_settings()
         self._settings: Settings = settings
+        if provider is None:
+            raise ValueError(
+                "provider is required — pass a ModuleProvider instance "
+                "(e.g. P2PModuleProvider) from the API / test layer"
+            )
         self._provider: Any = provider
         self._agent: Any = None
         self._dag_executor: Any = None
@@ -153,7 +158,9 @@ class Orchestrator:
 
     def _init_components(self) -> None:
         """初始化轻量级组件。"""
-        self._intent_router: IntentRouter = IntentRouter(settings=self._settings)
+        self._intent_router: IntentRouter = IntentRouter(
+            settings=self._settings, provider=self._provider,
+        )
         self._timing_middleware: TimingMiddleware = TimingMiddleware(
             agent_name="p2p_agent"
         )
@@ -238,33 +245,19 @@ class Orchestrator:
     def _lazy_agent(self) -> Any:
         """延迟初始化 Agent 实例（Level 3 ReAct 兜底）。"""
         if self._agent is None:
-            if self._provider is not None:
-                self._agent = self._provider.get_agent(
-                    settings=self._settings,
-                    timing_middleware=self._timing_middleware,
-                    checkpointer=self._ensure_checkpointer(),
-                )
-            else:
-                # 兼容无 Provider 的测试场景
-                from modules.p2p.agent import P2PAgent
-
-                self._agent = P2PAgent(
-                    settings=self._settings,
-                    timing_middleware=self._timing_middleware,
-                    checkpointer=self._ensure_checkpointer(),
-                )
+            self._agent = self._provider.get_agent(
+                settings=self._settings,
+                timing_middleware=self._timing_middleware,
+                checkpointer=self._ensure_checkpointer(),
+            )
         return self._agent
 
     @property
     def _lazy_tool_registry(self) -> Any:
         """延迟初始化 ToolRegistry（供 DAG Executor 和 Lookup 快捷路径共用）。"""
         if self._registry is None:
-            if self._provider is not None:
-                from core.orchestrator.dag.registry import build_registry_from_provider
-                self._registry = build_registry_from_provider(self._provider)
-            else:
-                from core.orchestrator.dag.registry import build_default_registry
-                self._registry = build_default_registry()
+            from core.orchestrator.dag.registry import build_registry_from_provider
+            self._registry = build_registry_from_provider(self._provider)
         return self._registry
 
     @property
@@ -293,14 +286,9 @@ class Orchestrator:
 
             registry = self._lazy_tool_registry
             if self._report_agent is None:
-                if self._provider is not None:
-                    self._report_agent = self._provider.get_report_agent(
-                        settings=self._settings,
-                    )
-                else:
-                    from modules.p2p.report_agent import ReportAgent
-
-                    self._report_agent = ReportAgent(settings=self._settings)
+                self._report_agent = self._provider.get_report_agent(
+                    settings=self._settings,
+                )
             case_store = DAGCaseStore(settings=self._settings)
             self._dag_executor = DAGExecutor(
                 registry=registry,
@@ -370,6 +358,9 @@ class Orchestrator:
             report_id,
         )
 
+        from core.tasks.context import current_user_id
+
+        _user_id_token = current_user_id.set(request.user_id)
         try:
             result = await asyncio.wait_for(
                 self._analyze_inner(
@@ -450,6 +441,7 @@ class Orchestrator:
                 duration_ms=duration_ms,
             )
         finally:
+            current_user_id.reset(_user_id_token)
             timing_middleware.finish_run(status=trace_status, error=trace_error)
 
     async def _analyze_inner(
@@ -469,12 +461,12 @@ class Orchestrator:
                 self._load_session_context, session_id
             )
 
-            # 0.5 检测是否为非分析意图（回溯/闲聊等）
+            # 0.5 检测是否为非分析意图（正则快速路径仅判 META/CHITCHAT）
             from core.orchestrator.router import _is_non_analysis_query
-            is_recall = _is_non_analysis_query(request.query)
+            is_bypass = _is_non_analysis_query(request.query)
 
-            # 1. 指代消解：非分析意图时跳过实体继承
-            if is_recall:
+            # 1. 指代消解：正则快速路径判定时跳过实体继承
+            if is_bypass:
                 enhanced_query = request.query
                 relevant_entities: dict[str, Any] = {}
                 _logger.info(
@@ -500,6 +492,10 @@ class Orchestrator:
                 analyst_role=request.analyst_role,
                 session_entities=session_ctx.get("entities", {}),
             )
+
+            # 2.1 RECALL 由 unified_router LLM 判定（决策 6=A）
+            from core.orchestrator.signal import IntentKind as _IK
+            is_recall = signal.intent_kind == _IK.RECALL
 
             # 2.5 按 intent_kind 早退路由：META / CHITCHAT / OUT_OF_SCOPE 由模板生成响应即可。
             # ANALYSIS / DATA_LOOKUP / RECALL 继续走完整执行路径。
@@ -613,10 +609,18 @@ class Orchestrator:
                 has_specific_entity = any(
                     signal.entities.get(k) for k in _entity_keys
                 )
-                time_range_days = (
-                    0 if has_specific_entity
-                    else self._settings.analysis.default_time_range_days
+                # DATA_LOOKUP + 有 limit/order_by 约束（"查最新N个"）：
+                # 用户意图是按排序取 Top-N，不应加默认时间窗限制
+                _is_lookup = signal.intent_kind == _IntentKind.DATA_LOOKUP
+                has_ranking_constraint = bool(
+                    signal.entities.get("limit") or signal.entities.get("order_by")
                 )
+                if has_specific_entity:
+                    time_range_days = 0
+                elif _is_lookup and has_ranking_constraint:
+                    time_range_days = 0
+                else:
+                    time_range_days = self._settings.analysis.default_time_range_days
             parsed_params["days"] = time_range_days
 
             # 如果统一 LLM 完成了指代消解，用 resolved_query 替换 enhanced_query
@@ -722,9 +726,24 @@ class Orchestrator:
 
             # DATA_LOOKUP 快捷路径：开关开启 + 非跨实体查询时尝试直调工具
             # 跨实体查询（is_cross_entity=true）需多步推理，降级到 ReAct
+            # query_backend 为非 PG 但 QueryBackend 未注入时跳过（Neo4j 未连接，PG 无 ERP 数据）
+            # output_mode 为 detailed/brief/table 时跳过（用户需要完整报告，不适合简表直答）
+            _lookup_backend_available = True
+            if self._settings.graphiti_etl.query_backend != "postgresql":
+                if not self._provider.is_query_backend_available():
+                    _lookup_backend_available = False
+                    _logger.info(
+                        "lookup shortcut skipped: query_backend=%s but QueryBackend not injected",
+                        self._settings.graphiti_etl.query_backend,
+                    )
+
+            _lookup_output_ok = request.output_mode in ("auto", "chat")
+
             if (is_data_lookup
                     and self._settings.intent_routing.lookup_shortcut_enabled
-                    and not signal.is_cross_entity):
+                    and not signal.is_cross_entity
+                    and _lookup_backend_available
+                    and _lookup_output_ok):
                 lookup_result = await self._try_lookup_shortcut(
                     query=request.query,
                     params=parsed_params,
@@ -986,7 +1005,7 @@ class Orchestrator:
         from core.observability.tracing import record_span
         from core.orchestrator.lookup import resolve_lookup_tool, execute_lookup
 
-        resolved = resolve_lookup_tool(params, query)
+        resolved = resolve_lookup_tool(params, query, provider=self._provider)
         if resolved is None:
             return None
 
@@ -1231,14 +1250,14 @@ class Orchestrator:
                 )
             elif generic_template_key:
                 # 通用概览模板（批 5）
-                dag_tasks = load_generic_template(generic_template_key, params)
+                dag_tasks = load_generic_template(generic_template_key, params, provider=self._provider)
                 if dag_tasks is not None:
                     _logger.info(
                         "generic template loaded: key=%s tasks=%d",
                         generic_template_key, len(dag_tasks),
                     )
             else:
-                dag_tasks = load_dag_template(analysis_type, params)
+                dag_tasks = load_dag_template(analysis_type, params, provider=self._provider)
             if dag_tasks is None:
                 _logger.info("no DAG template for %s, fallback to agent", analysis_type.value)
                 is_agent_path = True
@@ -1464,11 +1483,8 @@ class Orchestrator:
         on extracted entities. Only called on the DAG path when
         ``context_enrichment_enabled`` is ``True``.
         """
-        from modules.p2p.tools._inject import _get_graphiti_client
-
-        try:
-            client = _get_graphiti_client()
-        except RuntimeError:
+        client = self._provider.get_graphiti_client()
+        if client is None:
             return ""
 
         context_parts: list[str] = []
@@ -1569,24 +1585,10 @@ class Orchestrator:
             from core.memory import get_long_term_memory
 
             ltm = get_long_term_memory()
-            if self._provider is not None:
-                content = self._provider.build_memory_content(
-                    query=query, response=response, summary={},
-                )
-                metadata = self._provider.build_memory_metadata(
-                    query=query,
-                    analysis_type=analysis_type.value,
-                    anomalies=[],
-                    summary={},
-                    time_range_days=time_range_days,
-                )
-            else:
-                from modules.p2p.agent import _build_memory_content, _build_memory_metadata
-
-                content = _build_memory_content(
-                    query=query, response=response, summary={},
-                )
-                metadata = _build_memory_metadata(
+            content = self._provider.build_memory_content(
+                query=query, response=response, summary={},
+            )
+            metadata = self._provider.build_memory_metadata(
                     query=query,
                     analysis_type=analysis_type.value,
                     anomalies=[],

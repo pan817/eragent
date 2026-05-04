@@ -1,0 +1,298 @@
+digraph MultiSchemaArchitecture {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=9];
+    label="多数据源切换架构";
+    labelloc=t;
+    fontsize=14;
+
+    // =========================================================
+    // 消费者层
+    // =========================================================
+    subgraph cluster_consumers {
+        label="消费者层（仅依赖 Protocol）";
+        style=filled;
+        fillcolor="#F1F8E9";
+        color="#8EB56E";
+        fontsize=11;
+
+        pg_tools [
+            label="PG 工具集\n（15 个 @tool）\nquery / analysis / advanced",
+            shape=component,
+            style=filled,
+            fillcolor="#F1F8E9",
+            color="#8EB56E"
+        ];
+        graph_tools [
+            label="图查询工具集\n（12 个 @tool）\nsearch / entity / traversal\nanomaly / comparison",
+            shape=component,
+            style=filled,
+            fillcolor="#F1F8E9",
+            color="#8EB56E"
+        ];
+        rules [
+            label="业务规则引擎（4）\nThreeWayMatch\nPriceVariance\nPaymentCompliance\nSupplierPerformance",
+            shape=component,
+            style=filled,
+            fillcolor="#F1F8E9",
+            color="#8EB56E"
+        ];
+    }
+
+    // =========================================================
+    // Protocol 抽象层
+    // =========================================================
+    subgraph cluster_protocol {
+        label="Protocol 抽象层";
+        style=filled;
+        fillcolor="#FFF8E1";
+        color="#FFB74D";
+        fontsize=11;
+
+        repo_protocol [
+            label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+                <TR><TD BGCOLOR="#FFB74D"><B>P2PRepositoryProtocol</B></TD></TR>
+                <TR><TD ALIGN="LEFT">modules/p2p/schemas/protocol.py</TD></TR>
+                <TR><TD ALIGN="LEFT">
+                    query_purchase_orders()<BR/>
+                    query_receipts()<BR/>
+                    query_invoices()<BR/>
+                    query_payments()<BR/>
+                    query_suppliers()<BR/>
+                    get_contract_prices()<BR/>
+                    get_flattened_purchase_orders()<BR/>
+                    get_flattened_receipts()<BR/>
+                    get_flattened_invoices()<BR/>
+                    get_flattened_payments()<BR/>
+                    invalidate_contract_price_cache()<BR/>
+                    analyze_receipt_anomalies()<BR/>
+                    detect_duplicate_invoices()<BR/>
+                    analyze_discount_utilization()<BR/>
+                    analyze_vendor_concentration()<BR/>
+                    calculate_po_cycle_time()
+                </TD></TR>
+            </TABLE>>,
+            shape=plaintext
+        ];
+
+        graph_protocol [
+            label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+                <TR><TD BGCOLOR="#FFB74D"><B>GraphSchemaProtocol</B></TD></TR>
+                <TR><TD ALIGN="LEFT">
+                    node(concept) → str<BR/>
+                    edge(relationship) → str<BR/>
+                    biz_id_fields(node_type) → list[str]
+                </TD></TR>
+            </TABLE>>,
+            shape=plaintext
+        ];
+    }
+
+    // =========================================================
+    // 实现 A — Oracle EBS
+    // =========================================================
+    subgraph cluster_oracle_ebs {
+        label="实现 A — Oracle EBS\nmodules/p2p/schemas/oracle_ebs/";
+        style=filled;
+        fillcolor="#EDE7F6";
+        color="#B8A9D1";
+        fontsize=11;
+
+        ebs_models [
+            label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">
+                <TR><TD BGCOLOR="#B8A9D1"><B>models.py（20 ORM 模型）</B></TD></TR>
+                <TR><TD ALIGN="LEFT" BALIGN="LEFT">
+                    ap_suppliers / po_headers / po_lines<BR/>
+                    po_line_locations / rcv_transactions<BR/>
+                    ap_invoices / ap_checks / po_distributions<BR/>
+                    rcv_shipment_headers / rcv_shipment_lines<BR/>
+                    ap_invoice_lines / ap_invoice_distributions<BR/>
+                    ap_invoice_payments / ap_payment_schedules<BR/>
+                    ap_supplier_sites / mtl_system_items<BR/>
+                    pon_auction_headers / pon_bid_headers<BR/>
+                    okc_k_headers / okc_k_lines
+                </TD></TR>
+            </TABLE>>,
+            shape=plaintext
+        ];
+
+        ebs_repo [
+            label="repository.py\nimplements P2PRepositoryProtocol",
+            shape=box,
+            style="filled,rounded",
+            fillcolor="#EDE7F6",
+            color="#B8A9D1"
+        ];
+
+        ebs_graph [
+            label="graph_schema.py\nimplements GraphSchemaProtocol",
+            shape=box,
+            style="filled,rounded",
+            fillcolor="#EDE7F6",
+            color="#B8A9D1"
+        ];
+
+        ebs_repo -> ebs_models [style=dashed, arrowhead=none, label="uses"];
+    }
+
+    // =========================================================
+    // 实现 B — New ERP
+    // =========================================================
+    subgraph cluster_new_erp {
+        label="实现 B — New ERP\nmodules/p2p/schemas/new_erp/";
+        style=filled;
+        fillcolor="#EDE7F6";
+        color="#B8A9D1";
+        fontsize=11;
+
+        nerp_models [
+            label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">
+                <TR><TD BGCOLOR="#B8A9D1"><B>models.py（7 ORM 模型）</B></TD></TR>
+                <TR><TD ALIGN="LEFT" BALIGN="LEFT">
+                    new_ap_suppliers / new_po_headers<BR/>
+                    new_po_lines / new_po_line_locations<BR/>
+                    new_rcv_transactions<BR/>
+                    new_ap_invoices / new_ap_checks
+                </TD></TR>
+            </TABLE>>,
+            shape=plaintext
+        ];
+
+        nerp_repo [
+            label="repository.py\nimplements P2PRepositoryProtocol",
+            shape=box,
+            style="filled,rounded",
+            fillcolor="#EDE7F6",
+            color="#B8A9D1"
+        ];
+
+        nerp_graph [
+            label="graph_schema.py\nimplements GraphSchemaProtocol",
+            shape=box,
+            style="filled,rounded",
+            fillcolor="#EDE7F6",
+            color="#B8A9D1"
+        ];
+
+        nerp_repo -> nerp_models [style=dashed, arrowhead=none, label="uses"];
+    }
+
+    // =========================================================
+    // 配置/切换层
+    // =========================================================
+    subgraph cluster_config {
+        label="配置切换层";
+        style=filled;
+        fillcolor="#F5F5F5";
+        color="#AAAAAA";
+        fontsize=11;
+
+        provider [
+            label="P2PModuleProvider\nmodules/p2p/provider.py\n启动时根据配置选择实现",
+            shape=box,
+            style="filled,rounded",
+            fillcolor="#F5F5F5",
+            color="#AAAAAA"
+        ];
+
+        config [
+            label="config.yaml / Settings\ndata_source: oracle_ebs | new_erp",
+            shape=note,
+            style=filled,
+            fillcolor="#F5F5F5",
+            color="#AAAAAA"
+        ];
+
+        config -> provider [label="读取", style=dotted];
+    }
+
+    // =========================================================
+    // 依赖关系：消费者 → Protocol（实线依赖箭头）
+    // =========================================================
+    pg_tools -> repo_protocol [label="依赖", style=solid];
+    graph_tools -> graph_protocol [label="依赖", style=solid];
+    graph_tools -> repo_protocol [label="依赖", style=solid];
+    rules -> repo_protocol [label="依赖", style=solid];
+
+    // =========================================================
+    // 实现关系：Protocol → Implementation（空三角，虚线）
+    // =========================================================
+    ebs_repo -> repo_protocol [
+        dir=back,
+        arrowtail=empty,
+        style=dashed,
+        label="实现"
+    ];
+    ebs_graph -> graph_protocol [
+        dir=back,
+        arrowtail=empty,
+        style=dashed,
+        label="实现"
+    ];
+    nerp_repo -> repo_protocol [
+        dir=back,
+        arrowtail=empty,
+        style=dashed,
+        label="实现"
+    ];
+    nerp_graph -> graph_protocol [
+        dir=back,
+        arrowtail=empty,
+        style=dashed,
+        label="实现"
+    ];
+
+    // =========================================================
+    // Provider 选择实现
+    // =========================================================
+    provider -> ebs_repo [label="选择 A", style=dotted, color="#666666"];
+    provider -> nerp_repo [label="选择 B", style=dotted, color="#666666"];
+    provider -> ebs_graph [label="选择 A", style=dotted, color="#666666"];
+    provider -> nerp_graph [label="选择 B", style=dotted, color="#666666"];
+
+    // =========================================================
+    // 图例
+    // =========================================================
+    subgraph cluster_legend {
+        label="图例";
+        style=filled;
+        fillcolor="white";
+        color="#333333";
+        fontsize=10;
+
+        legend [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="4" CELLPADDING="2">
+                <TR>
+                    <TD BGCOLOR="#F1F8E9" BORDER="1">　　</TD>
+                    <TD ALIGN="LEFT">消费者层（工具 / 规则引擎）</TD>
+                </TR>
+                <TR>
+                    <TD BGCOLOR="#FFF8E1" BORDER="1">　　</TD>
+                    <TD ALIGN="LEFT">Protocol 抽象层</TD>
+                </TR>
+                <TR>
+                    <TD BGCOLOR="#EDE7F6" BORDER="1">　　</TD>
+                    <TD ALIGN="LEFT">具体实现（数据源）</TD>
+                </TR>
+                <TR>
+                    <TD BGCOLOR="#F5F5F5" BORDER="1">　　</TD>
+                    <TD ALIGN="LEFT">配置 / 切换控制</TD>
+                </TR>
+                <TR>
+                    <TD>———</TD>
+                    <TD ALIGN="LEFT">实线箭头：依赖</TD>
+                </TR>
+                <TR>
+                    <TD>- - -▷</TD>
+                    <TD ALIGN="LEFT">虚线空三角：实现（realization）</TD>
+                </TR>
+                <TR>
+                    <TD>· · ·</TD>
+                    <TD ALIGN="LEFT">点线：配置驱动选择</TD>
+                </TR>
+            </TABLE>>,
+            shape=plaintext
+        ];
+    }
+}

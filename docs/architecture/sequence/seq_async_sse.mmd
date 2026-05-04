@@ -1,0 +1,90 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as FastAPI (analyze_async)
+    participant REG as TaskRegistry
+    participant TE as TaskEntry
+    participant EB as EventBus
+    participant O as Orchestrator
+    participant DAG as DAGExecutor
+    participant PG as PostgreSQL (trace_runs)
+
+    %% ===== Phase 1: 任务提交 =====
+    rect rgb(227, 242, 253)
+    Note over C,PG: Phase 1: 任务提交
+    C->>API: POST /analyze/async {query, session_id, user_id}
+    API->>REG: submit(request, trace_id, runner_factory)
+    REG->>TE: create TaskEntry(state=QUEUED)
+    REG->>PG: seed_trace_run(trace_id) [跨 worker 可见]
+    REG->>EB: publish(trace_id, StatusEvent: QUEUED)
+    REG->>REG: asyncio.create_task(_run(entry))
+    REG-->>API: TaskEntry
+    API-->>C: 202 {trace_id, status_url, events_url}
+    end
+
+    %% ===== Phase 2: SSE 订阅 =====
+    rect rgb(243, 229, 245)
+    Note over C,EB: Phase 2: 客户端订阅 SSE
+    C->>API: GET /analyze/tasks/{trace_id}/events?Last-Event-ID=0
+    API->>REG: get_snapshot(trace_id)
+    REG-->>API: TaskSnapshot (state, created_at)
+    API->>EB: subscribe(trace_id, last_event_id=0)
+    Note over EB: 重放 buffer 中 seq > 0 的历史事件
+    EB-->>API: replay_events[]
+    API-->>C: SSE: data: {type: "status", state: "running", seq: 1}
+    end
+
+    %% ===== Phase 3: 后台执行 =====
+    rect rgb(232, 245, 233)
+    Note over REG,DAG: Phase 3: 后台执行 (并行于 SSE 推送)
+    REG->>REG: semaphore.acquire()
+    REG->>TE: state = RUNNING
+    REG->>EB: publish(StatusEvent: RUNNING)
+    EB-->>C: SSE: {type: "status", state: "running"}
+
+    REG->>O: orchestrator.analyze(request)
+
+    O->>EB: publish_stage("intent_resolved", {kind, confidence})
+    EB-->>C: SSE: {type: "stage", name: "intent_resolved", seq: 2}
+
+    O->>EB: publish_stage("dag_planned", {task_count})
+    EB-->>C: SSE: {type: "stage", name: "dag_planned", seq: 3}
+
+    O->>DAG: execute(tasks)
+
+    loop 每个 DAG 任务完成
+        DAG->>EB: publish(DagTaskEvent: {tool, status, duration})
+        EB-->>C: SSE: {type: "dag_task", tool: "...", seq: N}
+    end
+
+    DAG->>EB: publish_stage("report_generating")
+    EB-->>C: SSE: {type: "stage", name: "report_generating", seq: N+1}
+
+    DAG-->>O: aggregated_result
+    O-->>REG: AnalysisResult
+    end
+
+    %% ===== Phase 4: 完成与清理 =====
+    rect rgb(255, 243, 224)
+    Note over REG,C: Phase 4: 任务完成
+    REG->>TE: state = OK, cache result
+    REG->>PG: flush trace_run (await DB barrier)
+    REG->>REG: run finalizer (chat_messages write)
+    REG->>EB: publish(StatusEvent: DONE, result_summary)
+    EB-->>C: SSE: {type: "status", state: "done", seq: final}
+    REG->>EB: close(trace_id)
+    Note over C: 客户端收到 done 事件, 关闭 SSE 连接
+    end
+
+    %% ===== 异常路径 =====
+    alt 执行超时 (hard_timeout)
+        REG->>TE: state = ERROR (RUNNER_STALLED)
+        REG->>EB: publish(StatusEvent: ERROR)
+        EB-->>C: SSE: {type: "status", state: "error"}
+    end
+
+    %% ===== 心跳 (SSE 空闲时) =====
+    Note over API,C: 每 15s 无事件时发送 HeartbeatEvent
+    loop 空闲期间
+        API-->>C: SSE: {type: "heartbeat", seq: N}
+    end

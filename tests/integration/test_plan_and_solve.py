@@ -34,6 +34,50 @@ from core.orchestrator.signal import IntentKind, QuerySignal
 # ============================================================
 
 
+def _make_mock_provider() -> MagicMock:
+    """创建满足 ModuleProvider Protocol 的 mock provider。"""
+    from modules.p2p.provider import P2PModuleProvider
+
+    real = P2PModuleProvider()
+    provider = MagicMock()
+    provider.get_entity_types.return_value = real.get_entity_types()
+    provider.get_analysis_keywords.return_value = real.get_analysis_keywords()
+    provider.get_analysis_type_descriptions.return_value = real.get_analysis_type_descriptions()
+    provider.get_role_descriptions.return_value = real.get_role_descriptions()
+    provider.get_lookup_rules.return_value = real.get_lookup_rules()
+    provider.get_dag_templates.return_value = real.get_dag_templates()
+    provider.get_generic_dag_templates.return_value = real.get_generic_dag_templates()
+    provider.get_reference_patterns.return_value = real.get_reference_patterns()
+    provider.get_planning_prompt_template.return_value = real.get_planning_prompt_template()
+    provider.format_tools_for_planning.side_effect = real.format_tools_for_planning
+    provider.trim_to_token_budget.side_effect = real.trim_to_token_budget
+    provider.build_memory_content.side_effect = real.build_memory_content
+    provider.build_memory_metadata.side_effect = real.build_memory_metadata
+
+    # 构建 mock 工具列表，使 ToolRegistry 可注册（需要 .name 属性）
+    _tool_names = [
+        "query_purchase_orders", "query_receipts", "query_invoices",
+        "query_payments", "query_vendor_master",
+        "run_three_way_match", "run_price_variance_analysis",
+        "run_payment_compliance_check", "calculate_supplier_kpis",
+        "calculate_spend_analysis", "detect_duplicate_invoices",
+        "analyze_receipt_anomalies", "analyze_vendor_concentration",
+        "analyze_discount_utilization", "calculate_po_cycle_time",
+        "generate_summary_report",
+    ]
+    mock_tools = []
+    for tn in _tool_names:
+        t = MagicMock()
+        t.name = tn
+        t.__name__ = tn
+        mock_tools.append(t)
+    provider.get_tools.return_value = mock_tools
+
+    provider.get_graphiti_client.return_value = None
+    provider.is_query_backend_available.return_value = False
+    return provider
+
+
 @pytest.fixture()
 def settings() -> Settings:
     """启用 PS 的测试 Settings（默认值即 enabled=True）。"""
@@ -168,7 +212,7 @@ class TestPlanAndSolveRouting:
     async def test_ps_disabled_falls_through_to_react(
         self, settings_ps_disabled: Settings
     ) -> None:
-        orch = Orchestrator(settings=settings_ps_disabled)
+        orch = Orchestrator(settings=settings_ps_disabled, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
         # planner 永远不应被调用
         planner = _install_mock_planner(orch, _plannable_plan())
@@ -185,7 +229,7 @@ class TestPlanAndSolveRouting:
 
     @pytest.mark.asyncio
     async def test_recall_skips_plan_and_solve(self, settings: Settings) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
         planner = _install_mock_planner(orch, _plannable_plan())
 
@@ -204,7 +248,7 @@ class TestPlanAndSolveRouting:
         self, settings: Settings
     ) -> None:
         # 默认 l3_dag_min_confidence=0.5；confidence=0.3 属于 low_confidence
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
         planner = _install_mock_planner(orch, _plannable_plan())
 
@@ -223,7 +267,7 @@ class TestPlanAndSolveRouting:
         self, settings: Settings
     ) -> None:
         """DATA_LOOKUP 快捷路径 miss 后应尝试 PS。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         _install_mock_agent(orch)
         planner = _install_mock_planner(orch, _plannable_plan())
         executor = _install_mock_dag_executor_success(orch, "# PS Data Lookup Report")
@@ -256,7 +300,7 @@ class TestPlanAndSolveFallback:
     ) -> None:
         # 把超时设为 0.01s 触发 timeout
         settings.plan_and_solve.planning_timeout_sec = 0  # 立即超时
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
 
         # 让 planner.plan 无限等待触发 wait_for 超时
@@ -282,7 +326,7 @@ class TestPlanAndSolveFallback:
     async def test_not_plannable_falls_back_to_react(
         self, settings: Settings
     ) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
         _install_mock_planner(orch, None)  # plannable=False
 
@@ -299,7 +343,7 @@ class TestPlanAndSolveFallback:
     async def test_validation_failure_falls_back_to_react(
         self, settings: Settings
     ) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         agent = _install_mock_agent(orch)
 
         # 构造一个 plannable=True 但缺少报告节点的非法计划
@@ -337,7 +381,7 @@ class TestPlanAndSolveSuccess:
     async def test_success_uses_dag_executor_and_marks_route_type(
         self, settings: Settings
     ) -> None:
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         _install_mock_agent(orch)
         planner = _install_mock_planner(orch, _plannable_plan())
         executor = _install_mock_dag_executor_success(orch)
@@ -369,7 +413,7 @@ class TestPlanAndSolveSuccess:
         self, settings: Settings
     ) -> None:
         """明确的 analysis_type（非 COMPREHENSIVE）→ 走静态 DAG，不走 PS。"""
-        orch = Orchestrator(settings=settings)
+        orch = Orchestrator(settings=settings, provider=_make_mock_provider())
         _install_mock_agent(orch)
         planner = _install_mock_planner(orch, _plannable_plan())
         executor = _install_mock_dag_executor_success(orch, "# Static DAG")

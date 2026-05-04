@@ -1,8 +1,9 @@
 """Graphiti loader — writes structured nodes via Cypher, free text via episodes.
 
 Architecture:
-- **Structured nodes**: Cypher ``MERGE`` directly into Neo4j (no LLM, no embedding)
-- **Edges**: Cypher ``MERGE`` (already implemented in ``create_edges``)
+- **Structured nodes**: Batch Cypher ``UNWIND`` + ``MERGE`` directly into Neo4j
+  (no LLM, no embedding)
+- **Edges**: Batch Cypher ``UNWIND`` + ``MERGE``
 - **Free text**: ``graphiti.add_episode()`` for LLM entity extraction (optional)
 
 This avoids the performance cost of routing structured data through Graphiti's
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid as _uuid
 from core.logging_utils import get_logger
 from itertools import islice
 from typing import Any
@@ -21,6 +24,8 @@ from core.etl.client import GraphitiClient, EpisodeData
 from core.etl.models import GraphitiEdge, GraphitiNode, LoadResult, TextRecord
 
 _logger = get_logger(__name__)
+
+_NODE_BATCH_SIZE = 500
 
 
 def _batched(iterable: list, n: int) -> list[list]:
@@ -55,7 +60,7 @@ class GraphitiLoader:
         self._max_concurrency = max(1, max_concurrency)
 
     # ------------------------------------------------------------------
-    # Structured nodes → Cypher MERGE (no LLM)
+    # Structured nodes → Batch Cypher UNWIND + MERGE (no LLM)
     # ------------------------------------------------------------------
 
     async def load(
@@ -63,50 +68,100 @@ class GraphitiLoader:
         nodes: list[GraphitiNode],
         edges: list[GraphitiEdge],
     ) -> LoadResult:
-        """Write structured nodes directly to Neo4j via Cypher MERGE.
+        """Write structured nodes directly to Neo4j via batch Cypher UNWIND.
 
         No LLM or embedding calls — just direct graph writes.
+        Nodes are batched into chunks and written via a single UNWIND
+        statement per chunk, reducing N round-trips to ceil(N/batch_size).
         """
         if not nodes:
             return LoadResult()
 
-        sem = asyncio.Semaphore(self._max_concurrency)
+        t0 = time.monotonic()
         loaded = 0
         failed = 0
 
-        async def _write_node(node: GraphitiNode) -> bool:
+        for chunk in _batched(nodes, _NODE_BATCH_SIZE):
+            try:
+                await self._merge_nodes_batch(chunk)
+                loaded += len(chunk)
+            except Exception:
+                _logger.warning(
+                    "Batch node write failed (%d nodes), falling back to individual",
+                    len(chunk),
+                    exc_info=True,
+                )
+                ok, fail = await self._merge_nodes_individually(chunk)
+                loaded += ok
+                failed += fail
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        _logger.info(
+            "Loader: %d/%d nodes written (batch UNWIND), %d failed, %.0fms",
+            loaded, len(nodes), failed, duration_ms,
+        )
+        return LoadResult(loaded=loaded, failed=failed)
+
+    async def _merge_nodes_batch(self, nodes: list[GraphitiNode]) -> None:
+        """MERGE a batch of entity nodes into Neo4j via UNWIND."""
+        node_params = [self._node_to_params(n) for n in nodes]
+        cypher = (
+            "UNWIND $nodes AS n "
+            "MERGE (e:Entity {name: n.name, group_id: n.group_id}) "
+            "SET e += n.props, "
+            "    e.entity_type = n.entity_type, "
+            "    e.entity_id = n.entity_id, "
+            "    e.uuid = coalesce(e.uuid, n.uuid), "
+            "    e.summary = n.summary, "
+            "    e.created_at = coalesce(e.created_at, datetime()) "
+            "RETURN count(e) AS cnt"
+        )
+        await self._client.execute_cypher(cypher, {"nodes": node_params})
+
+    async def _merge_nodes_individually(
+        self, nodes: list[GraphitiNode],
+    ) -> tuple[int, int]:
+        """Fallback: write nodes one by one if batch UNWIND fails."""
+        sem = asyncio.Semaphore(self._max_concurrency)
+        ok = 0
+        fail = 0
+
+        async def _write_one(node: GraphitiNode) -> bool:
             async with sem:
                 try:
-                    await self._merge_node_cypher(node)
+                    params = self._node_to_params(node)
+                    cypher = (
+                        "MERGE (e:Entity {name: $name, group_id: $group_id}) "
+                        "SET e += $props, "
+                        "    e.entity_type = $entity_type, "
+                        "    e.entity_id = $entity_id, "
+                        "    e.uuid = coalesce(e.uuid, $uuid), "
+                        "    e.summary = $summary, "
+                        "    e.created_at = coalesce(e.created_at, datetime()) "
+                        "RETURN e.name AS name"
+                    )
+                    await self._client.execute_cypher(cypher, params)
                     return True
                 except Exception:
                     _logger.warning(
                         "Failed to write node %s:%s",
-                        node.entity_type,
-                        node.entity_id,
+                        node.entity_type, node.entity_id,
                         exc_info=True,
                     )
                     return False
 
-        results = await asyncio.gather(*[_write_node(n) for n in nodes])
-        loaded = sum(1 for ok in results if ok)
-        failed = len(nodes) - loaded
+        results = await asyncio.gather(*[_write_one(n) for n in nodes])
+        ok = sum(1 for r in results if r)
+        fail = len(nodes) - ok
+        return ok, fail
 
-        _logger.info(
-            "Loader: %d/%d nodes written via Cypher (no LLM), %d failed",
-            loaded, len(nodes), failed,
-        )
-        return LoadResult(loaded=loaded, failed=failed)
-
-    async def _merge_node_cypher(self, node: GraphitiNode) -> None:
-        """MERGE a single entity node into Neo4j."""
-        # Build properties dict (flatten, stringify for Neo4j)
-        props = {}
+    @staticmethod
+    def _node_to_params(node: GraphitiNode) -> dict[str, Any]:
+        """Convert a GraphitiNode to Cypher parameter dict."""
+        props: dict[str, Any] = {}
         for k, v in node.properties.items():
             if v is not None:
                 props[k] = str(v) if not isinstance(v, (int, float, bool)) else v
-
-        # Add temporal properties
         if node.valid_from:
             props["valid_from"] = str(node.valid_from)
         if node.valid_to:
@@ -114,39 +169,21 @@ class GraphitiLoader:
         if node.last_updated:
             props["last_updated"] = str(node.last_updated)
 
-        # Entity name for Graphiti compatibility (Entity nodes use 'name' field)
         entity_name = f"{node.entity_type} {node.entity_id}"
-
-        # Build a summary from key properties for Graphiti compatibility
-        summary_parts = [f"{node.entity_type} {node.entity_id}"]
+        summary_parts = [entity_name]
         for k, v in list(node.properties.items())[:3]:
             if v is not None:
                 summary_parts.append(f"{k}={v}")
-        summary = ", ".join(summary_parts)
 
-        cypher = (
-            "MERGE (n:Entity {name: $name, group_id: $group_id}) "
-            "SET n += $props, "
-            "    n.entity_type = $entity_type, "
-            "    n.entity_id = $entity_id, "
-            "    n.uuid = coalesce(n.uuid, $uuid), "
-            "    n.summary = $summary, "
-            "    n.created_at = coalesce(n.created_at, datetime()) "
-            "RETURN n.name AS name"
-        )
-
-        import uuid as _uuid
-
-        params = {
+        return {
             "name": entity_name,
-            "group_id": "",  # default Graphiti group
+            "group_id": "",
             "uuid": str(_uuid.uuid4()),
-            "summary": summary,
+            "summary": ", ".join(summary_parts),
             "props": props,
             "entity_type": node.entity_type,
             "entity_id": str(node.entity_id),
         }
-        await self._client.execute_cypher(cypher, params)
 
     # ------------------------------------------------------------------
     # Edges → Cypher MERGE (no LLM)

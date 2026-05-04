@@ -1,0 +1,244 @@
+// ERP Agent - Query Tools + Ontology Reasoning Architecture
+// Render: dot -Tpng -Gdpi=150 arch_query_tools.dot -o arch_query_tools.png
+digraph eragent_query_tools {
+    rankdir=TB;
+    nodesep=0.35;
+    ranksep=0.55;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent — 查询工具 + 本体推理架构"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ── ① 调用方 (顶层) ─────────────────────────────────────────
+    subgraph cluster_callers {
+        label="① 调用方"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFEF7"; color="#D4B886";
+
+        dag_exec [label="DAGExecutor\n(并行 gather 调用工具)",
+                  shape=box, fontsize=11, fillcolor="#E8F5E9", color="#6FA87C"];
+        p2p_agent [label="P2PAgent (ReAct)\n(LLM tool_call 循环)",
+                   shape=box, fontsize=11, fillcolor="#F1F8E9", color="#8EB56E"];
+    }
+
+    // ── ② 工具注入层 ───────────────────────────────────────────────
+    subgraph cluster_inject {
+        label="② 工具注入层 (_inject.py)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E3F0FF"; color="#7FA7D4";
+
+        inject [label="_inject.py\n注入 Repository +\nGraphitiClient + QueryBackend",
+                shape=box, fontsize=11, fillcolor="#BBDEFB"];
+    }
+
+    // ── ③ PG 工具组 (15 tools) ──────────────────────────────────
+    subgraph cluster_pg_tools {
+        label="③ PG 工具组 (modules/p2p/tools/pg/ — 15 个)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF8E1"; color="#FFB74D";
+
+        subgraph cluster_pg_query {
+            label="query.py — 精确查询 (6)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            pg_q1 [label="query_purchase_orders", shape=box, fontsize=9];
+            pg_q2 [label="query_receipts", shape=box, fontsize=9];
+            pg_q3 [label="query_invoices", shape=box, fontsize=9];
+            pg_q4 [label="query_payments", shape=box, fontsize=9];
+            pg_q5 [label="query_vendor_master", shape=box, fontsize=9];
+            pg_q6 [label="query_supplier_profile", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_pg_analysis {
+            label="analysis.py — 分析计算 (5)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            pg_a1 [label="run_three_way_match", shape=box, fontsize=9];
+            pg_a2 [label="run_price_variance_analysis", shape=box, fontsize=9];
+            pg_a3 [label="run_payment_compliance_check", shape=box, fontsize=9];
+            pg_a4 [label="calculate_supplier_kpis", shape=box, fontsize=9];
+            pg_a5 [label="calculate_spend_analysis", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_pg_advanced {
+            label="advanced.py — 高级分析 (6)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            pg_d1 [label="detect_duplicate_invoices", shape=box, fontsize=9];
+            pg_d2 [label="analyze_receipt_anomalies", shape=box, fontsize=9];
+            pg_d3 [label="analyze_discount_utilization", shape=box, fontsize=9];
+            pg_d4 [label="analyze_vendor_concentration", shape=box, fontsize=9];
+            pg_d5 [label="calculate_po_cycle_time", shape=box, fontsize=9];
+            pg_d6 [label="find_contract_coverage", shape=box, fontsize=9];
+        }
+    }
+
+    // ── ④ Graph 工具组 (12 tools) ──────────────────────────────
+    subgraph cluster_graph_tools {
+        label="④ Graph 工具组 (modules/p2p/tools/graph/ — 12 个)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF8E1"; color="#FFB74D";
+
+        subgraph cluster_graph_search {
+            label="search.py (1)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            g_s1 [label="search_knowledge_graph", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_graph_entity {
+            label="entity.py (3)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            g_e1 [label="get_entity_detail", shape=box, fontsize=9];
+            g_e2 [label="query_entity_relationships", shape=box, fontsize=9];
+            g_e3 [label="query_entity_timeline", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_graph_traversal {
+            label="traversal.py (3)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            g_t1 [label="trace_procurement_chain", shape=box, fontsize=9];
+            g_t2 [label="find_path_between", shape=box, fontsize=9];
+            g_t3 [label="find_competing_suppliers", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_graph_anomaly {
+            label="anomaly.py (2)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            g_a1 [label="detect_graph_anomalies", shape=box, fontsize=9];
+            g_a2 [label="query_risk_impact", shape=box, fontsize=9];
+        }
+
+        subgraph cluster_graph_comparison {
+            label="comparison.py (1)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#FFF9E8"; color="#FFCC80";
+            g_c1 [label="compare_entities", shape=box, fontsize=9];
+        }
+    }
+
+    // ── ⑤ Chat 工具 (1 tool) ───────────────────────────────────
+    subgraph cluster_chat_tool {
+        label="⑤ Chat 工具 (chat_history.py — 1 个)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF8E1"; color="#FFB74D";
+        chat_t1 [label="search_my_chat_history", shape=box, fontsize=9];
+    }
+
+    // ── ⑥ QueryBackend 协议 + 实现 ──────────────────────────────
+    subgraph cluster_query_backend {
+        label="⑥ QueryBackend 协议层"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF8E1"; color="#FFB74D";
+
+        qb_protocol [label="QueryBackend Protocol\n(core/etl/query_backend.py)",
+                     shape=box, fontsize=11, fillcolor="#FFECB3"];
+
+        qb_pg [label="PostgreSQLBackend\n直接 SQL via Repository",
+               shape=box, fontsize=10, fillcolor="#FFF9C4"];
+        qb_neo4j [label="Neo4jStructuredBackend\nCypher via GraphitiClient",
+                  shape=box, fontsize=10, fillcolor="#FFF9C4"];
+        qb_hybrid [label="Hybrid 模式\n图优先 → SQL 降级",
+                   shape=box, fontsize=10, fillcolor="#FFE082"];
+    }
+
+    // ── ⑦ 本体推理层 ──────────────────────────────────────────────
+    subgraph cluster_ontology {
+        label="⑦ 本体推理层 (Ontology)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#F1F8E9"; color="#8EB56E";
+
+        owl_loader [label="OWL Loader\n(core/ontology/)",
+                    shape=box, fontsize=10, fillcolor="#DCEDC8"];
+        swrl_rules [label="SWRL 规则引擎\n(p2p.owl)",
+                    shape=box, fontsize=10, fillcolor="#DCEDC8"];
+
+        subgraph cluster_biz_rules {
+            label="业务规则 (modules/p2p/rules/)"; penwidth=1.0;
+            style="rounded,filled"; fillcolor="#E8F5E9"; color="#A5D6A7";
+            rule_twm [label="ThreeWayMatch\n三路匹配规则", shape=box, fontsize=9];
+            rule_pv  [label="PriceVariance\n价格差异规则", shape=box, fontsize=9];
+            rule_pc  [label="PaymentCompliance\n付款合规规则", shape=box, fontsize=9];
+            rule_sp  [label="SupplierPerformance\n供应商绩效规则", shape=box, fontsize=9];
+        }
+    }
+
+    // ── ⑧ 数据存储 ──────────────────────────────────────────────
+    subgraph cluster_storage {
+        label="⑧ 数据存储"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+
+        db_pg [label="PostgreSQL\n(EBS 镜像 20 张表)",
+               shape=cylinder, fontsize=10, fillcolor="#D1C4E9"];
+        db_neo4j [label="Neo4j\n(15 节点类型 + 19 边类型)",
+                  shape=cylinder, fontsize=10, fillcolor="#D1C4E9"];
+        db_chroma [label="Chroma\n(向量存储)",
+                   shape=cylinder, fontsize=10, fillcolor="#D1C4E9"];
+    }
+
+    // ── 图例 ────────────────────────────────────────────────────
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999";
+        rankdir=LR;
+
+        lg_dag [label="DAG 执行", shape=box, fontsize=8,
+                fillcolor="#E8F5E9", color="#6FA87C"];
+        lg_react [label="ReAct 执行", shape=box, fontsize=8,
+                  fillcolor="#F1F8E9", color="#8EB56E"];
+        lg_abs [label="数据源抽象", shape=box, fontsize=8,
+                fillcolor="#FFF8E1", color="#FFB74D"];
+        lg_ext [label="外部存储", shape=box, fontsize=8,
+                fillcolor="#EDE7F6", color="#B8A9D1"];
+
+        lg_a [label="", shape=plain, width=0]; lg_b [label="", shape=plain, width=0];
+        lg_c [label="", shape=plain, width=0]; lg_d [label="", shape=plain, width=0];
+        lg_a -> lg_b [label="调用", color="#D32F2F", penwidth=2.0];
+        lg_c -> lg_d [label="数据流", color="#444444"];
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //                       边
+    // ─────────────────────────────────────────────────────────────
+
+    // ① → ② 调用方 → 注入层
+    dag_exec  -> inject [color="#D32F2F", penwidth=2.0, label="调用工具"];
+    p2p_agent -> inject [color="#D32F2F", penwidth=2.0, label="tool_call"];
+
+    // ② → ③④⑤ 注入层 → 工具组
+    inject -> pg_q1  [color="#444444", lhead="cluster_pg_tools"];
+    inject -> g_s1   [color="#444444", lhead="cluster_graph_tools"];
+    inject -> chat_t1 [color="#444444"];
+
+    // PG 工具 → QueryBackend
+    pg_q1 -> qb_protocol [color="#444444"];
+    pg_q2 -> qb_protocol [color="#444444", style="dashed"];
+    pg_q3 -> qb_protocol [color="#444444", style="dashed"];
+    pg_a1 -> qb_protocol [color="#444444"];
+    pg_d1 -> qb_protocol [color="#444444", style="dashed"];
+
+    // Graph 工具 → QueryBackend
+    g_s1  -> qb_protocol [color="#444444"];
+    g_e1  -> qb_protocol [color="#444444", style="dashed"];
+    g_t1  -> qb_protocol [color="#444444", style="dashed"];
+    g_a1  -> qb_protocol [color="#444444", style="dashed"];
+
+    // QueryBackend Protocol → 实现
+    qb_protocol -> qb_pg    [color="#444444", label="postgresql"];
+    qb_protocol -> qb_neo4j [color="#444444", label="graphiti"];
+    qb_protocol -> qb_hybrid [color="#444444", label="hybrid\n(默认)"];
+
+    // PG 分析工具 → 本体规则
+    pg_a1 -> rule_twm [color="#8EB56E", penwidth=1.5, label="SWRL\n推理"];
+    pg_a2 -> rule_pv  [color="#8EB56E", penwidth=1.5, label="SWRL\n推理"];
+    pg_a3 -> rule_pc  [color="#8EB56E", penwidth=1.5, label="SWRL\n推理"];
+    pg_a4 -> rule_sp  [color="#8EB56E", penwidth=1.5, label="KPI\n计算"];
+
+    // 本体内部
+    owl_loader -> swrl_rules [color="#444444", label="加载"];
+    swrl_rules -> rule_twm  [color="#444444", style="dashed"];
+    swrl_rules -> rule_pv   [color="#444444", style="dashed"];
+    swrl_rules -> rule_pc   [color="#444444", style="dashed"];
+
+    // Chat 工具 → 存储
+    chat_t1 -> db_pg [color="#444444", label="会话记录"];
+
+    // QueryBackend → 存储
+    qb_pg    -> db_pg    [color="#B8A9D1", penwidth=1.5, label="SQL"];
+    qb_neo4j -> db_neo4j [color="#B8A9D1", penwidth=1.5, label="Cypher"];
+    qb_hybrid -> db_pg    [color="#B8A9D1", style="dashed", label="降级"];
+    qb_hybrid -> db_neo4j [color="#B8A9D1", penwidth=1.5, label="优先"];
+
+    // Graph 向量搜索 → Chroma
+    g_s1 -> db_chroma [color="#B8A9D1", penwidth=1.5, label="向量检索"];
+
+}

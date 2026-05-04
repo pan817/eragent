@@ -1,0 +1,204 @@
+// ERP Agent - Async Analysis Path Architecture
+// Render: dot -Tpng -Gdpi=150 arch_async.dot -o arch_async.png
+//         dot -Tsvg arch_async.dot -o arch_async.svg
+digraph eragent_async {
+    rankdir=TB;
+    nodesep=0.35;
+    ranksep=0.55;
+    graph [fontname="Helvetica", fontsize=14, labelloc="t",
+           label="eragent — 异步分析路径架构\n(POST /analyze/async + SSE 事件流)"];
+    node  [fontname="Helvetica", fontsize=10, style="rounded,filled",
+           fillcolor="white", color="#555555"];
+    edge  [fontname="Helvetica", fontsize=9, color="#444444"];
+
+    // ══════════════════════════════════════════════════════════════
+    // ① 客户端 (三条并行连接)
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_client {
+        label="① 客户端 (三条并行连接)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFEF7"; color="#D4B886";
+        c_submit [label="POST /analyze/async\n提交分析任务\n← 202 + trace_id",
+                  shape=box, fontsize=11];
+        c_sse    [label="GET /analyze/tasks/{trace_id}/events\nSSE 事件流 (实时推送)",
+                  shape=box, fontsize=11];
+        c_poll   [label="GET /analyze/tasks\n轮询任务状态",
+                  shape=box, fontsize=11];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ② API 层 (analyze_async 路由)
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_api {
+        label="② API 层 (api/routes/analyze_async.py)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#E3F0FF"; color="#7FA7D4";
+        a_submit [label="handle_submit()\n校验 → 提交任务\n返回 202 + trace_id",
+                  shape=cds, fontsize=10];
+        a_sse    [label="handle_events()\nStreamingResponse\nSSE text/event-stream",
+                  shape=cds, fontsize=10, fillcolor="#BBDEFB"];
+        a_poll   [label="handle_status()\n查询 TaskEntry 状态",
+                  shape=cds, fontsize=10];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ③ 异步基础设施 (TaskRegistry + EventBus)
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_async_infra {
+        label="③ 异步基础设施 (core/tasks)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFF3D6"; color="#C9A96E";
+
+        subgraph cluster_task_registry {
+            label="TaskRegistry"; penwidth=1.0;
+            style="rounded"; fillcolor="#FFE0B2"; color="#C9A96E";
+            tr_submit [label="submit()\n生成 trace_id\n入队等待执行",
+                       shape=box, fontsize=10];
+            tr_entry  [label="TaskEntry\n状态机:\nPENDING → RUNNING\n→ DONE / FAILED",
+                       shape=box, fontsize=10, fillcolor="#FFF8E1"];
+            tr_runner [label="后台 Runner\n并发控制 + 超时 + sweep",
+                       shape=box, fontsize=10];
+        }
+
+        subgraph cluster_event_bus {
+            label="EventBusProtocol"; penwidth=1.0;
+            style="rounded"; fillcolor="#FFF9E0"; color="#C9A96E";
+            eb_iface   [label="EventBusProtocol\npublish() / subscribe()",
+                        shape=box, fontsize=11, fillcolor="#FFF59D"];
+            eb_memory  [label="MemoryEventBus\n(单 worker)\nasyncio.Queue",
+                        shape=box, fontsize=9];
+            eb_redis   [label="RedisEventBus\n(多 worker)\nPub/Sub + Ring Buffer",
+                        shape=box, fontsize=9];
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ④ 编排层 (Orchestrator)
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_orchestrator {
+        label="④ 编排层 (Orchestrator)"; penwidth=1.5;
+        style="rounded,filled"; fillcolor="#FFFADD"; color="#C9A96E";
+        o_analyze [label="Orchestrator.analyze()\n同步/异步共用实现\n路由 → DAG/ReAct → 报告",
+                   shape=box, fontsize=11, fillcolor="#FFF4B8"];
+        o_publish [label="publish_stage()\n在关键节点发布事件",
+                   shape=box, fontsize=10];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ⑤ 事件类型
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_events {
+        label="⑤ 事件类型 (core/tasks/schemas)"; penwidth=1.0;
+        style="rounded,filled"; fillcolor="#E8F5E9"; color="#81C784";
+        ev_status    [label="StatusEvent\n任务状态变更", shape=note, fontsize=9];
+        ev_stage     [label="StageEvent\n阶段推进", shape=note, fontsize=9];
+        ev_tool      [label="ToolEvent\n工具调用", shape=note, fontsize=9];
+        ev_dag       [label="DagTaskEvent\nDAG 子任务", shape=note, fontsize=9];
+        ev_report    [label="ReportEvent\n报告生成", shape=note, fontsize=9];
+        ev_heartbeat [label="HeartbeatEvent\n心跳保活", shape=note, fontsize=9];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ⑥ 启动装配 (lifespan)
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_lifespan {
+        label="⑥ 启动装配 (lifespan)"; fontsize=9;
+        style="rounded,dashed"; color="#AAAAAA"; fillcolor="#FAFAFA";
+        ls_check [label="检查 event_backend\n与 workers 配置一致性\n(fail-fast)",
+                  shape=box, fontsize=8];
+        ls_bus   [label="创建 EventBus\n(Memory / Redis)",
+                  shape=box, fontsize=8];
+        ls_reg   [label="创建 TaskRegistry\n+ recover_on_startup",
+                  shape=box, fontsize=8];
+        ls_inject [label="注入 app.state\n(供路由使用)",
+                   shape=box, fontsize=8];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // ⑦ 外部系统
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_external {
+        label="⑦ 外部系统"; fontsize=10;
+        style="rounded,filled"; fillcolor="#EDE7F6"; color="#B8A9D1";
+        ext_pg    [label="PostgreSQL\n(任务状态 + trace\n+ 会话记录)",
+                   shape=cylinder, fontsize=9];
+        ext_redis [label="Redis\n(多 worker 必选\nPub/Sub 通道)",
+                   shape=cylinder, fontsize=9];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 图例
+    // ══════════════════════════════════════════════════════════════
+    subgraph cluster_legend {
+        label="图例"; fontsize=9;
+        style="rounded,dashed"; color="#999999"; fillcolor="#FFFFFF";
+        rank=same;
+        lg_a [label="", shape=plain, width=0.01];
+        lg_b [label="", shape=plain, width=0.01];
+        lg_c [label="", shape=plain, width=0.01];
+        lg_d [label="", shape=plain, width=0.01];
+        lg_e [label="", shape=plain, width=0.01];
+        lg_f [label="", shape=plain, width=0.01];
+        lg_a -> lg_b [label="提交请求 (solid red)", color="#D32F2F", penwidth=2.0];
+        lg_c -> lg_d [label="SSE 事件流 (blue dashed)", color="#1976D2", style="dashed", penwidth=1.5];
+        lg_e -> lg_f [label="轮询 (gray)", color="#9E9E9E", penwidth=1.5];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //                          边
+    // ══════════════════════════════════════════════════════════════
+
+    // --- 客户端 → API: 三种连接样式 ---
+    // 提交: 实线红色
+    c_submit -> a_submit [color="#D32F2F", penwidth=2.0, weight=10];
+    // SSE: 蓝色虚线
+    c_sse -> a_sse [color="#1976D2", style="dashed", penwidth=1.5, weight=10];
+    // 轮询: 灰色
+    c_poll -> a_poll [color="#9E9E9E", penwidth=1.5, weight=10];
+
+    // --- API → 异步基础设施 ---
+    a_submit -> tr_submit [color="#D32F2F", penwidth=2.0, label="submit()",
+                           weight=8];
+    a_poll -> tr_entry [color="#9E9E9E", penwidth=1.5, label="get(trace_id)"];
+    a_sse -> eb_iface [color="#1976D2", style="dashed", penwidth=1.5,
+                       label="subscribe(trace_id)"];
+
+    // --- TaskRegistry 内部流转 ---
+    tr_submit -> tr_entry [color="#444444", label="创建 TaskEntry\nPENDING"];
+    tr_submit -> tr_runner [color="#1976D2", style="dashed", label="入队"];
+    tr_runner -> tr_entry [color="#444444", style="dashed", label="更新状态\nRUNNING→DONE/FAILED"];
+
+    // --- Runner → Orchestrator ---
+    tr_runner -> o_analyze [color="#D32F2F", penwidth=2.0, weight=8,
+                            label="调用 analyze()"];
+
+    // --- Orchestrator 发布事件 ---
+    o_analyze -> o_publish [color="#444444", weight=5];
+    o_publish -> eb_iface [color="#1976D2", style="dashed", penwidth=1.5,
+                           label="publish(event)", weight=5];
+
+    // --- EventBus 后端实现 ---
+    eb_iface -> eb_memory [color="#1976D2", style="dashed", label="单进程"];
+    eb_iface -> eb_redis [color="#1976D2", style="dashed", label="多 worker"];
+
+    // --- EventBus → SSE 推送 ---
+    eb_iface -> a_sse [color="#1976D2", style="dashed", penwidth=1.5,
+                       label="yield 事件", dir="back"];
+
+    // --- 事件类型关联 ---
+    o_publish -> ev_status [color="#81C784", style="dotted", arrowhead="none"];
+    o_publish -> ev_stage [color="#81C784", style="dotted", arrowhead="none"];
+    o_publish -> ev_tool [color="#81C784", style="dotted", arrowhead="none"];
+    o_publish -> ev_dag [color="#81C784", style="dotted", arrowhead="none"];
+    o_publish -> ev_report [color="#81C784", style="dotted", arrowhead="none"];
+    o_publish -> ev_heartbeat [color="#81C784", style="dotted", arrowhead="none"];
+
+    // --- 启动装配流程 ---
+    ls_check -> ls_bus [color="#AAAAAA", style="dashed"];
+    ls_bus -> ls_reg [color="#AAAAAA", style="dashed"];
+    ls_reg -> ls_inject [color="#AAAAAA", style="dashed"];
+    ls_inject -> eb_iface [color="#AAAAAA", style="dashed", label="注入 app.state"];
+    ls_inject -> tr_submit [color="#AAAAAA", style="dashed", label="注入 app.state"];
+
+    // --- 外部系统连接 ---
+    eb_redis -> ext_redis [color="#1976D2", style="dashed", label="Pub/Sub"];
+    tr_entry -> ext_pg [color="#444444", style="dashed", label="持久化状态"];
+    o_analyze -> ext_pg [color="#888888", style="dotted", label="trace + chat\n持久化"];
+}

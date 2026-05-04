@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -51,11 +52,17 @@ def format_memory_injection(
         "[相关实体历史画像]",
     )
 
-    # analysis_insight — 趋势参考
-    _append_section(
+    # analysis_insight — 趋势参考（标注时间，提示 LLM 以当前数据为准）
+    _append_insight_section(
         sections,
         memories.get("analysis_insight", []),
-        "[历史趋势参考]",
+    )
+
+    # session_recap — 历史会话回顾
+    _append_section(
+        sections,
+        memories.get("session_recap", []),
+        "[相关历史会话回顾]",
     )
 
     # user_preference — 输出偏好
@@ -85,4 +92,30 @@ def _append_section(
         if content:
             lines.append(f"- {content}")
     if len(lines) > 1:  # header + at least one item
+        sections.append("\n".join(lines))
+
+
+def _append_insight_section(
+    sections: list[str],
+    items: list[dict[str, Any]],
+) -> None:
+    """格式化 analysis_insight，标注时间以提示 LLM 区分历史推测与当前事实。"""
+    if not items:
+        return
+    lines = ["[历史趋势参考 — 仅供参考，以本次查询的实际数据为准]"]
+    from core.time_utils import now_cn
+    now = now_cn()
+    for m in items:
+        content = m.get("content", "")
+        if not content:
+            continue
+        created_at = m.get("created_at")
+        if isinstance(created_at, datetime):
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            days_ago = (now - created_at).days
+            lines.append(f"- ({days_ago}天前) {content}")
+        else:
+            lines.append(f"- {content}")
+    if len(lines) > 1:
         sections.append("\n".join(lines))

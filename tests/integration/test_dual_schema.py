@@ -8,7 +8,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,11 +37,15 @@ from modules.p2p.schemas.new_erp.models import (
 # ---------------------------------------------------------------------------
 
 def _parse_date(s: str) -> date:
-    return date.fromisoformat(s)
+    return date.fromisoformat(s[:10])
+
+
+def _parse_datetime(s: str) -> datetime:
+    return datetime.fromisoformat(s)
 
 
 def _parse_date_opt(s: str | None) -> date | None:
-    return date.fromisoformat(s) if s else None
+    return date.fromisoformat(s[:10]) if s else None
 
 
 def _seed_new_erp(session: Session, seed: int = 0, count: int = 500) -> None:
@@ -69,7 +73,7 @@ def _seed_new_erp(session: Session, seed: int = 0, count: int = 500) -> None:
             vendor_id=h["vendor_id"],
             vendor_name=h["vendor_name"],
             status=h["status"],
-            creation_date=_parse_date(h["creation_date"]),
+            creation_date=_parse_datetime(h["creation_date"]),
             total_amount=h["total_amount"],
             currency=h["currency"],
         ))
@@ -109,7 +113,7 @@ def _seed_new_erp(session: Session, seed: int = 0, count: int = 500) -> None:
             quantity=t["quantity"],
             accepted_quantity=t["accepted_quantity"],
             rejected_quantity=t["rejected_quantity"],
-            transaction_date=_parse_date(t["transaction_date"]),
+            transaction_date=_parse_datetime(t["transaction_date"]),
             vendor_id=t["vendor_id"],
         ))
 
@@ -121,7 +125,7 @@ def _seed_new_erp(session: Session, seed: int = 0, count: int = 500) -> None:
             vendor_id=inv["vendor_id"],
             vendor_name=inv["vendor_name"],
             invoice_amount=inv["invoice_amount"],
-            invoice_date=_parse_date(inv["invoice_date"]),
+            invoice_date=_parse_datetime(inv["invoice_date"]),
             due_date=_parse_date(inv["due_date"]),
             discount_due_date=_parse_date_opt(inv.get("discount_due_date")),
             approval_status=inv["approval_status"],
@@ -135,7 +139,7 @@ def _seed_new_erp(session: Session, seed: int = 0, count: int = 500) -> None:
             invoice_num=p["invoice_num"],
             vendor_id=p["vendor_id"],
             amount=p["amount"],
-            check_date=_parse_date(p["check_date"]),
+            check_date=_parse_datetime(p["check_date"]),
             payment_method_code=p["payment_method_code"],
         ))
 
@@ -154,7 +158,9 @@ def dual_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    init_database(engine, seed=0, count=500)
+    from modules.p2p.mock_data.generator import MockDataGenerator
+
+    init_database(engine, seed=0, count=500, data_generator_factory=MockDataGenerator)
     sf = get_session_factory(engine)
     with sf() as session:
         _seed_new_erp(session, seed=0, count=500)

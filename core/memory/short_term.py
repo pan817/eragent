@@ -175,7 +175,7 @@ class ShortTermMemory:
                 # 集中裁剪：所有路径的短期记忆都经过此产出点
                 context_summary = last_ai if last_ai else ""
                 if context_summary and self._settings.memory.short_term_context_trim_enabled:
-                    from modules.p2p.prompts import trim_to_token_budget
+                    from core.text_utils import trim_to_token_budget
                     max_tokens = int(
                         self._settings.llm.context_window
                         * self._settings.memory.short_term_context_max_tokens_pct

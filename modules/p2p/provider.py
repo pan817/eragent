@@ -118,3 +118,49 @@ class P2PModuleProvider:
         from modules.p2p.prompts import format_tools_for_planning
 
         return format_tools_for_planning(tools)
+
+    def get_analysis_keywords(self) -> set[str]:
+        from modules.p2p.intent_rules import ANALYSIS_KEYWORDS
+
+        return ANALYSIS_KEYWORDS
+
+    def get_analysis_type_descriptions(self) -> list[tuple[str, str]]:
+        from modules.p2p.intent_rules import ANALYSIS_TYPE_DESCRIPTIONS
+
+        return ANALYSIS_TYPE_DESCRIPTIONS
+
+    def get_role_descriptions(self) -> dict[str, str]:
+        from modules.p2p.intent_rules import ROLE_DESCRIPTIONS
+
+        return ROLE_DESCRIPTIONS
+
+    def get_lookup_rules(self) -> dict[str, Any]:
+        from modules.p2p.intent_rules import (
+            LOOKUP_EXCLUSION_WORDS,
+            LOOKUP_GRAPH_INTENT_WORDS,
+            LOOKUP_HIGH_CONFIDENCE_KEYWORDS,
+        )
+
+        return {
+            "high_confidence_keywords": LOOKUP_HIGH_CONFIDENCE_KEYWORDS,
+            "exclusion_words": LOOKUP_EXCLUSION_WORDS,
+            "graph_intent_words": LOOKUP_GRAPH_INTENT_WORDS,
+        }
+
+    def get_generic_dag_templates(self) -> dict[str, list[dict[str, Any]]]:
+        from modules.p2p.dag_templates import get_generic_template_map
+
+        return get_generic_template_map()
+
+    def get_graphiti_client(self) -> Any | None:
+        from modules.p2p.tools._inject import _get_graphiti_client
+
+        try:
+            return _get_graphiti_client()
+        except RuntimeError:
+            return None
+
+    def is_query_backend_available(self) -> bool:
+        from modules.p2p.tools._inject import _query_backend
+
+        return _query_backend is not None

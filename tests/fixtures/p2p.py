@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
 
 from modules.p2p.repository import P2PRepository
 from modules.p2p.settings import P2PSettings
+
+def _d(offset: int) -> str:
+    """Return date string relative to today. offset < 0 = past."""
+    return (date.today() + timedelta(days=offset)).isoformat()
 
 
 @pytest.fixture()
@@ -35,7 +40,7 @@ def mock_po_data() -> list[dict[str, Any]]:
             "po_quantity": 500.0,
             "unit_price": 200.0,
             "contract_price": 200.0,
-            "required_date": "2026-03-15",
+            "required_date": _d(-20),
             "material_code": "MAT-001",
             "material_name": "轴承",
             "line_number": "1",
@@ -49,7 +54,7 @@ def mock_po_data() -> list[dict[str, Any]]:
             "po_quantity": 200.0,
             "unit_price": 250.0,
             "contract_price": 250.0,
-            "required_date": "2026-03-20",
+            "required_date": _d(-15),
             "material_code": "MAT-002",
             "material_name": "齿轮",
             "line_number": "1",
@@ -63,7 +68,7 @@ def mock_po_data() -> list[dict[str, Any]]:
             "po_quantity": 1000.0,
             "unit_price": 200.0,
             "contract_price": 200.0,
-            "required_date": "2026-03-25",
+            "required_date": _d(-10),
             "material_code": "MAT-003",
             "material_name": "芯片",
             "line_number": "1",
@@ -77,7 +82,7 @@ def mock_po_data() -> list[dict[str, Any]]:
             "po_quantity": 400.0,
             "unit_price": 200.0,
             "contract_price": 195.0,
-            "required_date": "2026-03-28",
+            "required_date": _d(-7),
             "material_code": "MAT-004",
             "material_name": "电容",
             "line_number": "1",
@@ -91,7 +96,7 @@ def mock_po_data() -> list[dict[str, Any]]:
             "po_quantity": 3000.0,
             "unit_price": 200.0,
             "contract_price": 180.0,
-            "required_date": "2026-04-01",
+            "required_date": _d(-3),
             "material_code": "MAT-005",
             "material_name": "钢材",
             "line_number": "1",
@@ -103,11 +108,11 @@ def mock_po_data() -> list[dict[str, Any]]:
 def mock_gr_data() -> list[dict[str, Any]]:
     """返回测试用收货数据。"""
     return [
-        {"po_number": "PO-001", "gr_number": "GR-001", "gr_quantity": 480.0, "receipt_date": "2026-03-14", "quality_passed": True},
-        {"po_number": "PO-002", "gr_number": "GR-002", "gr_quantity": 200.0, "receipt_date": "2026-03-19", "quality_passed": True},
-        {"po_number": "PO-003", "gr_number": "GR-003", "gr_quantity": 850.0, "receipt_date": "2026-03-24", "quality_passed": False},
-        {"po_number": "PO-004", "gr_number": "GR-004", "gr_quantity": 400.0, "receipt_date": "2026-03-27", "quality_passed": True},
-        {"po_number": "PO-005", "gr_number": "GR-005", "gr_quantity": 3000.0, "receipt_date": "2026-03-31", "quality_passed": True},
+        {"po_number": "PO-001", "gr_number": "GR-001", "gr_quantity": 480.0, "receipt_date": _d(-21), "quality_passed": True},
+        {"po_number": "PO-002", "gr_number": "GR-002", "gr_quantity": 200.0, "receipt_date": _d(-16), "quality_passed": True},
+        {"po_number": "PO-003", "gr_number": "GR-003", "gr_quantity": 850.0, "receipt_date": _d(-11), "quality_passed": False},
+        {"po_number": "PO-004", "gr_number": "GR-004", "gr_quantity": 400.0, "receipt_date": _d(-8), "quality_passed": True},
+        {"po_number": "PO-005", "gr_number": "GR-005", "gr_quantity": 3000.0, "receipt_date": _d(-4), "quality_passed": True},
     ]
 
 
@@ -115,11 +120,11 @@ def mock_gr_data() -> list[dict[str, Any]]:
 def mock_invoice_data() -> list[dict[str, Any]]:
     """返回测试用发票数据（含金额偏差）。"""
     return [
-        {"po_number": "PO-001", "invoice_num": "INV-001", "invoice_amount": 112000.00, "vendor_name": "测试供应商A", "due_date": "2026-04-01"},
-        {"po_number": "PO-002", "invoice_num": "INV-002", "invoice_amount": 50000.00, "vendor_name": "测试供应商A", "due_date": "2026-04-05"},
-        {"po_number": "PO-003", "invoice_num": "INV-003", "invoice_amount": 195000.00, "vendor_name": "测试供应商B", "due_date": "2026-04-10"},
-        {"po_number": "PO-004", "invoice_num": "INV-004", "invoice_amount": 80000.00, "vendor_name": "测试供应商B", "due_date": "2026-04-15"},
-        {"po_number": "PO-005", "invoice_num": "INV-005", "invoice_amount": 700000.00, "vendor_name": "测试供应商C", "due_date": "2026-04-20"},
+        {"po_number": "PO-001", "invoice_num": "INV-001", "invoice_amount": 112000.00, "vendor_name": "测试供应商A", "due_date": _d(-5)},
+        {"po_number": "PO-002", "invoice_num": "INV-002", "invoice_amount": 50000.00, "vendor_name": "测试供应商A", "due_date": _d(-1)},
+        {"po_number": "PO-003", "invoice_num": "INV-003", "invoice_amount": 195000.00, "vendor_name": "测试供应商B", "due_date": _d(5)},
+        {"po_number": "PO-004", "invoice_num": "INV-004", "invoice_amount": 80000.00, "vendor_name": "测试供应商B", "due_date": _d(10)},
+        {"po_number": "PO-005", "invoice_num": "INV-005", "invoice_amount": 700000.00, "vendor_name": "测试供应商C", "due_date": _d(15)},
     ]
 
 
@@ -127,8 +132,8 @@ def mock_invoice_data() -> list[dict[str, Any]]:
 def mock_payment_data() -> list[dict[str, Any]]:
     """返回测试用付款数据（含逾期和提前付款）。"""
     return [
-        {"check_number": "PAY-001", "invoice_num": "INV-001", "check_date": "2026-04-11", "amount": 112000.00},
-        {"check_number": "PAY-002", "invoice_num": "INV-002", "check_date": "2026-04-04", "amount": 50000.00},
-        {"check_number": "PAY-003", "invoice_num": "INV-003", "check_date": "2026-03-26", "amount": 195000.00},
-        {"check_number": "PAY-004", "invoice_num": "INV-004", "check_date": "2026-04-20", "amount": 76000.00},
+        {"check_number": "PAY-001", "invoice_num": "INV-001", "check_date": _d(5), "amount": 112000.00},
+        {"check_number": "PAY-002", "invoice_num": "INV-002", "check_date": _d(-2), "amount": 50000.00},
+        {"check_number": "PAY-003", "invoice_num": "INV-003", "check_date": _d(-10), "amount": 195000.00},
+        {"check_number": "PAY-004", "invoice_num": "INV-004", "check_date": _d(15), "amount": 76000.00},
     ]
