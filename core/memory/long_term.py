@@ -39,6 +39,17 @@ def get_counters() -> dict[str, int]:
         return dict(_counters)
 
 
+def _is_within_cutoff(created_at: datetime | None, cutoff: datetime) -> bool:
+    """比较 created_at 与 cutoff，兼容 naive/aware datetime。"""
+    if created_at is None:
+        return False
+    if created_at.tzinfo is None and cutoff.tzinfo is not None:
+        created_at = created_at.replace(tzinfo=cutoff.tzinfo)
+    elif created_at.tzinfo is not None and cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=created_at.tzinfo)
+    return created_at >= cutoff
+
+
 # ---------------------------------------------------------------------------
 # VectorStore 懒重试代理：解决单例永久降级问题
 # ---------------------------------------------------------------------------
