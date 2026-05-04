@@ -18,6 +18,12 @@ _logger = get_logger(__name__)
 # order_by 合法枚举值
 _VALID_ORDER_BY = frozenset({"date_desc", "date_asc", "amount_desc", "amount_asc"})
 
+# recommended_output_mode 白名单
+_VALID_OUTPUT_MODES = frozenset({"detailed", "brief", "table", "chat"})
+
+# recommended_days 钳位上限
+_MAX_RECOMMENDED_DAYS = 365
+
 # 实体字段白名单
 _ENTITY_FIELDS = frozenset({
     "po_number", "vendor_id", "invoice_num",
@@ -75,6 +81,23 @@ _UNIFIED_PROMPT = """\
 - limit: 数量限制（"一个"→1，"前5条"→5），未指定填 null
 - order_by: date_desc / date_asc / amount_desc / amount_asc，未指定填 null
 
+## 默认参数推断（当用户未显式指定时）
+当 days 为 null（用户未指定时间范围）时，根据查询语义推断 recommended_days：
+- 有明确实体编号（PO-xxx/SUP-xxx/INV-xxx/PAY-xxx/RCV-xxx）→ 0（不限时间，精确查找）
+- data_lookup + 有 limit/order_by（"查最新N个"）→ 0（按排序取 Top-N，不限时间）
+- 供应商绩效/趋势分析 → 180（需跨季度数据）
+- 三路匹配/价格差异/付款合规 → 90（需覆盖完整季度）
+- 一般性分析/综合分析 → 90（默认覆盖一个季度）
+- 用户未指定时间但提及具体供应商名称/物料描述等非编号关键词 → 180（模糊查询需宽窗口）
+- 无法判断 → null（交给后端使用配置默认值）
+
+根据查询性质和分析师角色推断 recommended_output_mode（仅推荐，后端可能覆盖）：
+- data_lookup（事实查询/单据检索）→ "chat"
+- analyst_role 含 management → "brief"
+- 简单单实体分析 → "brief"
+- 复杂多维度分析/综合分析 → "detailed"
+- 无法判断 → null（交给后端按 intent_kind 映射）
+
 ## confidence 锚点
 - >0.9: 核心名词直接命中，无歧义
 - 0.7-0.9: 语义强相关需推断
@@ -82,15 +105,16 @@ _UNIFIED_PROMPT = """\
 - <0.5: 极度模糊
 
 ## 输出格式（纯 JSON，不要 markdown 代码块，第一个字符必须是 {{）
-{{"intent_kind":"<枚举值>","type":"<analysis_type或空串>","confidence":0.0,"is_cross_entity":false,"resolved_query":"<消解后查询>","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+{{"intent_kind":"<枚举值>","type":"<analysis_type或空串>","confidence":0.0,"is_cross_entity":false,"resolved_query":"<消解后查询>","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":null,"recommended_output_mode":null}}
 
 ## 示例
-- "查询最新的一个PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"查询最新的一个PO","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc"}}
-- "这个支付单对应的PO"（上下文: check_number=PAY-001）→ {{"intent_kind":"data_lookup","type":"","confidence":0.85,"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的采购订单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null}}
-- "分析最近30天SUP-001的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"is_cross_entity":false,"resolved_query":"分析最近30天SUP-001的价格差异","missing_params":[],"po_number":null,"vendor_id":"SUP-001","invoice_num":null,"check_number":null,"receipt_number":null,"days":30,"limit":null,"order_by":null}}
-- "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"is_cross_entity":false,"resolved_query":"做一下三路匹配","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
-- "有没有该付钱还没付的账单" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"is_cross_entity":false,"resolved_query":"有没有该付钱还没付的账单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
-- "上次我们分析的那家供应商，还有异常发票吗" → {{"intent_kind":"recall","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"上次我们分析的那家供应商，还有异常发票吗","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null}}
+- "查询最新的一个PO" → {{"intent_kind":"data_lookup","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"查询最新的一个PO","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":1,"order_by":"date_desc","recommended_days":0,"recommended_output_mode":"chat"}}
+- "这个支付单对应的PO"（上下文: check_number=PAY-001）→ {{"intent_kind":"data_lookup","type":"","confidence":0.85,"is_cross_entity":true,"resolved_query":"支付单 PAY-001 对应的采购订单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":"PAY-001","receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":0,"recommended_output_mode":"chat"}}
+- "分析最近30天SUP-001的价格差异" → {{"intent_kind":"analysis","type":"price_variance","confidence":0.95,"is_cross_entity":false,"resolved_query":"分析最近30天SUP-001的价格差异","missing_params":[],"po_number":null,"vendor_id":"SUP-001","invoice_num":null,"check_number":null,"receipt_number":null,"days":30,"limit":null,"order_by":null,"recommended_days":null,"recommended_output_mode":"detailed"}}
+- "做一下三路匹配" → {{"intent_kind":"analysis","type":"three_way_match","confidence":0.85,"is_cross_entity":false,"resolved_query":"做一下三路匹配","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":90,"recommended_output_mode":"detailed"}}
+- "有没有该付钱还没付的账单" → {{"intent_kind":"analysis","type":"payment_compliance","confidence":0.85,"is_cross_entity":false,"resolved_query":"有没有该付钱还没付的账单","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":90,"recommended_output_mode":"detailed"}}
+- "上次我们分析的那家供应商，还有异常发票吗" → {{"intent_kind":"recall","type":"","confidence":0.9,"is_cross_entity":false,"resolved_query":"上次我们分析的那家供应商，还有异常发票吗","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":null,"recommended_output_mode":null}}
+- "分析华为供应商的绩效" → {{"intent_kind":"analysis","type":"supplier_performance","confidence":0.9,"is_cross_entity":false,"resolved_query":"分析华为供应商的绩效","missing_params":[],"po_number":null,"vendor_id":null,"invoice_num":null,"check_number":null,"receipt_number":null,"days":null,"limit":null,"order_by":null,"recommended_days":180,"recommended_output_mode":"detailed"}}
 
 用户查询：{query}"""
 
@@ -172,6 +196,27 @@ def _parse_unified_response(content: str, raw_query: str) -> QuerySignal:
     if order_by and isinstance(order_by, str) and order_by in _VALID_ORDER_BY:
         entities["order_by"] = order_by
 
+    # recommended_days: 钳位到 [0, _MAX_RECOMMENDED_DAYS]
+    recommended_days: int | None = None
+    rec_days_raw = data.get("recommended_days")
+    if rec_days_raw is not None:
+        try:
+            rd = int(rec_days_raw)
+            if rd < 0:
+                recommended_days = None
+            elif rd > _MAX_RECOMMENDED_DAYS:
+                recommended_days = _MAX_RECOMMENDED_DAYS
+            else:
+                recommended_days = rd
+        except (TypeError, ValueError):
+            pass
+
+    # recommended_output_mode: 白名单校验
+    recommended_output_mode: str | None = None
+    rec_mode_raw = data.get("recommended_output_mode")
+    if rec_mode_raw and isinstance(rec_mode_raw, str) and rec_mode_raw in _VALID_OUTPUT_MODES:
+        recommended_output_mode = rec_mode_raw
+
     # is_cross_entity
     is_cross = bool(data.get("is_cross_entity", False))
 
@@ -212,6 +257,8 @@ def _parse_unified_response(content: str, raw_query: str) -> QuerySignal:
         reasoning=f"unified LLM: {ik_raw}/{analysis_type} conf={confidence:.2f}",
         is_cross_entity=is_cross,
         resolved_query=resolved,
+        recommended_days=recommended_days,
+        recommended_output_mode=recommended_output_mode,
     )
 
 

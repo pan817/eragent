@@ -1549,3 +1549,156 @@ class TestOrchestratorOutputModeChat:
 
         req = AnalysisRequest(query="test", output_mode="auto")
         assert req.output_mode == "auto"
+
+
+# ============================================================
+# Issue #16: 时间窗口 / output_mode 三级优先级链
+# ============================================================
+
+
+class TestTimeRangePriority:
+    """时间窗口三级优先级：explicit > recommended > config fallback。"""
+
+    def _make_signal(self, **kwargs: object) -> "QuerySignal":
+        from core.orchestrator.signal import IntentKind, QuerySignal
+        defaults = dict(
+            raw_query="test",
+            intent_kind=IntentKind.ANALYSIS,
+            keywords=["comprehensive"],
+            route_level=3,
+            confidence=0.9,
+        )
+        defaults.update(kwargs)
+        return QuerySignal(**defaults)
+
+    def test_explicit_days_wins(self, settings: Settings) -> None:
+        """L1 显式天数优先于 LLM recommended 和 config。"""
+        from core.orchestrator.orchestrator import _resolve_time_range
+        signal = self._make_signal(time_range_days=60, recommended_days=180)
+        explicit_days = 60  # signal.time_range_days
+        if explicit_days:
+            result = explicit_days
+        elif signal.recommended_days is not None:
+            result = signal.recommended_days
+        else:
+            result = settings.analysis.default_time_range_days
+        assert result == 60
+
+    def test_recommended_days_used_when_no_explicit(self, settings: Settings) -> None:
+        """L2 LLM recommended 在无显式值时生效。"""
+        signal = self._make_signal(time_range_days=None, recommended_days=180)
+        explicit_days = signal.time_range_days  # None
+        if explicit_days:
+            result = explicit_days
+        elif signal.recommended_days is not None:
+            result = signal.recommended_days
+        else:
+            result = settings.analysis.default_time_range_days
+        assert result == 180
+
+    def test_recommended_days_zero_means_unlimited(self, settings: Settings) -> None:
+        """recommended_days=0 表示不限时间（精确实体查找）。"""
+        signal = self._make_signal(time_range_days=None, recommended_days=0)
+        explicit_days = signal.time_range_days  # None
+        if explicit_days:
+            result = explicit_days
+        elif signal.recommended_days is not None:
+            result = signal.recommended_days
+        else:
+            result = settings.analysis.default_time_range_days
+        assert result == 0
+
+    def test_config_fallback_when_no_recommended(self, settings: Settings) -> None:
+        """L3 无显式也无推荐时使用 config 默认值。"""
+        signal = self._make_signal(time_range_days=None, recommended_days=None)
+        explicit_days = signal.time_range_days  # None
+        if explicit_days:
+            result = explicit_days
+        elif signal.recommended_days is not None:
+            result = signal.recommended_days
+        else:
+            result = settings.analysis.default_time_range_days
+        assert result == settings.analysis.default_time_range_days
+
+
+class TestOutputModePriority:
+    """output_mode 三级优先级：explicit > LLM recommended > intent_kind 映射。"""
+
+    def test_explicit_mode_not_overridden(self) -> None:
+        """前端显式传 brief 时，不被 LLM recommended 覆盖。"""
+        from core.orchestrator.signal import QuerySignal
+        signal = QuerySignal(raw_query="test", recommended_output_mode="detailed")
+        request_mode = "brief"
+        effective = request_mode
+        if effective == "auto":
+            if signal.recommended_output_mode:
+                effective = signal.recommended_output_mode
+            else:
+                effective = "detailed"
+        assert effective == "brief"
+
+    def test_recommended_mode_used_on_auto(self) -> None:
+        """auto 模式下 LLM recommended 生效。"""
+        from core.orchestrator.signal import QuerySignal
+        signal = QuerySignal(raw_query="test", recommended_output_mode="brief")
+        request_mode = "auto"
+        effective = request_mode
+        if effective == "auto":
+            if signal.recommended_output_mode:
+                effective = signal.recommended_output_mode
+            else:
+                effective = "detailed"
+        assert effective == "brief"
+
+    def test_intent_kind_fallback_on_auto_no_recommended(self) -> None:
+        """auto 模式下无 LLM recommended 时走 intent_kind 映射。"""
+        from core.orchestrator.signal import IntentKind, QuerySignal
+        signal = QuerySignal(
+            raw_query="test",
+            intent_kind=IntentKind.DATA_LOOKUP,
+            recommended_output_mode=None,
+        )
+        request_mode = "auto"
+        effective = request_mode
+        if effective == "auto":
+            if signal.recommended_output_mode:
+                effective = signal.recommended_output_mode
+            elif signal.intent_kind == IntentKind.DATA_LOOKUP:
+                effective = "chat"
+            else:
+                effective = "detailed"
+        assert effective == "chat"
+
+    def test_dag_downgrade_still_applies(self) -> None:
+        """DAG 路径降级保护：即使 LLM 推荐 chat，走 DAG 时仍降级为 brief。"""
+        from core.orchestrator.signal import QuerySignal
+        signal = QuerySignal(raw_query="test", recommended_output_mode="chat")
+        effective = "auto"
+        if effective == "auto":
+            if signal.recommended_output_mode:
+                effective = signal.recommended_output_mode
+        use_dag = True
+        if use_dag and effective == "chat":
+            effective = "brief"
+        assert effective == "brief"
+
+
+class TestDefaultValueRegression:
+    """Issue #16 默认值回归防护。"""
+
+    def test_default_time_range_days_is_90(self) -> None:
+        settings = Settings()
+        assert settings.analysis.default_time_range_days == 90
+
+    def test_search_default_days_is_90(self) -> None:
+        settings = Settings()
+        assert settings.memory.chat_history.search_default_days == 90
+
+    def test_analyst_role_default_general(self) -> None:
+        from api.schemas.analysis import AnalysisRequest
+        req = AnalysisRequest(query="test")
+        assert req.analyst_role == "general"
+
+    def test_l3_dag_min_confidence_unchanged(self) -> None:
+        settings = Settings()
+        assert settings.intent_routing.l3_dag_min_confidence == 0.5

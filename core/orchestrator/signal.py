@@ -81,3 +81,11 @@ class QuerySignal:
 
     resolved_query: str = ""
     """指代消解后的查询文本。空字符串表示未消解（与 raw_query 相同）。"""
+
+    recommended_days: int | None = None
+    """LLM 根据查询语义推荐的时间窗口（天）。
+    仅在用户未显式指定时间范围时生效。0 = 不限时间。None = LLM 未给出推荐。"""
+
+    recommended_output_mode: str | None = None
+    """LLM 根据查询性质和 analyst_role 推荐的输出模式。
+    仅在 output_mode="auto" 时生效。None = LLM 未给出推荐。"""

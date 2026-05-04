@@ -260,7 +260,7 @@ class MockDataSettings(BaseSettings):
 class AnalysisSettings(BaseSettings):
     """分析任务配置。"""
 
-    default_time_range_days: int = 30  # TECH-DEBT(#16): 30 days may be too narrow for recent POs
+    default_time_range_days: int = 90
     max_time_range_days: int = 365
     # Agent + LLM 首次冷启动可能数十秒，5s 过短，调到 60s
     response_timeout_seconds: float = 900.0  # 需覆盖 LLM 含重试最坏情况(240s×3=720s) + 编排开销
@@ -529,7 +529,7 @@ class ChatHistorySettings(BaseSettings):
     search_timeout_seconds: float = 0.2
     search_default_limit: int = 5
     search_max_limit: int = 10
-    search_default_days: int = 30
+    search_default_days: int = 90
     search_max_days: int = 365
     dead_letter_retry_max: int = 3
     dead_letter_backoff_seconds: int = 60

@@ -99,24 +99,15 @@
 - **建议修复**：在 `_build_tail` 中增加 `amount_field` 参数，各查询方法传入各自的金额节点属性名（如 `po.total_amount`、`n.invoice_amount`）。需注意 RETURN 子句中属性是否可直接引用（`properties(n)` 是 map，不能直接 `ORDER BY properties(n).amount`，需在 RETURN 中显式暴露金额字段）。
 - **发现日期**：2026-04-21
 
-### 16. 默认参数值全面审查（时间区间/角色/输出模式等）
-- **问题**：多个默认参数值在实际场景中不合理，已发现 `default_time_range_days=30` 导致刚创建的 PO 因 mock 数据时间戳在 30 天窗口之外而查询不到。此外以下默认值尚未经过业务场景验证：
-  - `AnalysisSettings.default_time_range_days = 30`：对时间跨度大的业务数据过于窄小，且当实体编号明确时仍叠加时间窗口可能过滤掉目标数据（当前已有 `days=0` 短路逻辑，但仅覆盖"有明确实体编号"场景，无编号但有供应商名称等模糊查询仍受 30 天限制）。
-  - `AnalysisRequest.analyst_role = "general"`：是否应根据用户登录角色自动填充而非硬编码。
-  - `AnalysisRequest.output_mode = "auto"`：auto 策略当前 data_lookup→chat、其余→detailed，是否需要按 analyst_role 区分（如 management 偏好 brief）。
-  - `MemorySettings.chat_history.search_default_days = 30`：跨会话历史搜索窗口是否过短。
-  - `IntentRoutingSettings.l3_dag_min_confidence = 0.75`：阈值合理性需结合线上日志统计评估。
-- **影响**：用户查询最新数据时可能得到"无结果"的误导性空响应；不同角色用户得到同质化输出；记忆检索遗漏早期重要上下文。
-- **涉及文件**：
-  - [config/settings.py:263](../config/settings.py#L263)（`default_time_range_days`）
-  - [config/settings.py:532](../config/settings.py#L532)（`search_default_days`）
-  - [api/schemas/analysis.py:55-70](../api/schemas/analysis.py#L55)（`analyst_role` / `output_mode`）
-  - [core/orchestrator/orchestrator.py:617-628](../core/orchestrator/orchestrator.py#L617)（时间窗口解析逻辑）
-- **建议修复**：
-  1. 将 `default_time_range_days` 从 30 调为 90（或按数据源配置化），确保常规查询覆盖更宽时间范围。
-  2. 对"无实体编号但有供应商名称/模糊描述"的场景也考虑放宽时间窗口（当前仅 entity_keys 命中时 days=0）。
-  3. 逐项评估上述默认值，结合线上路由命中率日志和用户反馈调整。
-  4. 新增集成测试覆盖"当前日期数据可查"场景，防止默认值回归。
+### 16. 默认参数值全面审查（时间区间/角色/输出模式等）— ✅ 已修复
+- **状态**：已修复（2026-05-04）
+- **修复方案**：LLM 统一默认值推断，详见 [docs/issues/issue_16_default_params.md](issue_16_default_params.md)
+- **变更摘要**：
+  1. `default_time_range_days` 30→90，`search_default_days` 30→90
+  2. Unified Router LLM 新增 `recommended_days` / `recommended_output_mode` 语义推断
+  3. Orchestrator 时间窗口逻辑从 4 层 if/elif 简化为三级优先级链（explicit > LLM recommended > config fallback）
+  4. output_mode auto 分支支持 LLM recommended，感知 analyst_role
+  5. 新增 23 个测试覆盖解析、优先级链、回归防护
 - **发现日期**：2026-05-02
 
 ### 17. 测试用例体系重构 — 全量通过但实际查询失败的系统性覆盖缺陷（部分修复）

@@ -198,6 +198,74 @@ class TestQuerySignal:
 # ============================================================
 
 
+class TestParseRecommendedFields:
+    """_parse_unified_response 对 recommended_days / recommended_output_mode 的解析测试。"""
+
+    def _parse(self, json_str: str, query: str = "test") -> QuerySignal:
+        from core.orchestrator.unified_router import _parse_unified_response
+        return _parse_unified_response(json_str, query)
+
+    def _base_json(self, **overrides: object) -> str:
+        import json
+        base = {
+            "intent_kind": "analysis", "type": "three_way_match",
+            "confidence": 0.9, "is_cross_entity": False,
+            "resolved_query": "test", "missing_params": [],
+            "po_number": None, "vendor_id": None, "invoice_num": None,
+            "check_number": None, "receipt_number": None,
+            "days": None, "limit": None, "order_by": None,
+            "recommended_days": None, "recommended_output_mode": None,
+        }
+        base.update(overrides)
+        return json.dumps(base)
+
+    def test_recommended_days_normal(self) -> None:
+        signal = self._parse(self._base_json(recommended_days=90))
+        assert signal.recommended_days == 90
+
+    def test_recommended_days_zero(self) -> None:
+        signal = self._parse(self._base_json(recommended_days=0))
+        assert signal.recommended_days == 0
+
+    def test_recommended_days_null(self) -> None:
+        signal = self._parse(self._base_json(recommended_days=None))
+        assert signal.recommended_days is None
+
+    def test_recommended_days_negative_ignored(self) -> None:
+        signal = self._parse(self._base_json(recommended_days=-10))
+        assert signal.recommended_days is None
+
+    def test_recommended_days_clamped_to_365(self) -> None:
+        signal = self._parse(self._base_json(recommended_days=9999))
+        assert signal.recommended_days == 365
+
+    def test_recommended_days_non_int_ignored(self) -> None:
+        signal = self._parse(self._base_json(recommended_days="abc"))
+        assert signal.recommended_days is None
+
+    def test_recommended_output_mode_valid(self) -> None:
+        for mode in ("detailed", "brief", "table", "chat"):
+            signal = self._parse(self._base_json(recommended_output_mode=mode))
+            assert signal.recommended_output_mode == mode
+
+    def test_recommended_output_mode_invalid_ignored(self) -> None:
+        signal = self._parse(self._base_json(recommended_output_mode="verbose"))
+        assert signal.recommended_output_mode is None
+
+    def test_recommended_output_mode_null(self) -> None:
+        signal = self._parse(self._base_json(recommended_output_mode=None))
+        assert signal.recommended_output_mode is None
+
+    def test_recommended_output_mode_auto_not_in_whitelist(self) -> None:
+        signal = self._parse(self._base_json(recommended_output_mode="auto"))
+        assert signal.recommended_output_mode is None
+
+    def test_fallback_signal_has_none_defaults(self) -> None:
+        signal = self._parse("invalid json!!!", "test query")
+        assert signal.recommended_days is None
+        assert signal.recommended_output_mode is None
+
+
 class TestAnalystRoleInjection:
     """analyst_role 角色注入测试。"""
 

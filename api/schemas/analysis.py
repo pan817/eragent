@@ -55,7 +55,7 @@ class AnalysisRequest(BaseModel):
     analyst_role: str = Field(
         default="general",
         pattern="^(general|procurement|finance|supply_chain|audit|management)$",
-        description="分析师角色，用于 L3 LLM 分类时提供角色偏好先验",
+        description="分析师角色，用于 L3 LLM 分类时提供角色偏好先验。建议前端从用户登录态自动填充",
     )
     output_mode: str = Field(
         default="auto",

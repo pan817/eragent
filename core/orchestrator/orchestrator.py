@@ -593,7 +593,10 @@ class Orchestrator:
 
             # 3. 合并参数（统一 LLM 已提取所有参数到 signal.entities）
             parsed_params = signal.entities.copy()
-            # time_range 优先级: time_range > time_range_days > signal 提取 > 实体判断 > config 默认
+            # time_range 三级优先级:
+            #   L1 explicit: request.time_range > request.time_range_days > signal.time_range_days
+            #   L2 LLM recommended: signal.recommended_days (语义推断，含 0=不限时间)
+            #   L3 config fallback: settings.analysis.default_time_range_days
             resolved_days = _resolve_time_range(request.time_range)
             explicit_days = (
                 resolved_days
@@ -602,25 +605,10 @@ class Orchestrator:
             )
             if explicit_days:
                 time_range_days: int = explicit_days
+            elif signal.recommended_days is not None:
+                time_range_days = signal.recommended_days
             else:
-                # 有明确实体时不加默认时间窗口（days=0），避免过滤掉目标数据
-                _entity_keys = {"po_number", "vendor_id", "invoice_num",
-                                "check_number", "receipt_number"}
-                has_specific_entity = any(
-                    signal.entities.get(k) for k in _entity_keys
-                )
-                # DATA_LOOKUP + 有 limit/order_by 约束（"查最新N个"）：
-                # 用户意图是按排序取 Top-N，不应加默认时间窗限制
-                _is_lookup = signal.intent_kind == _IntentKind.DATA_LOOKUP
-                has_ranking_constraint = bool(
-                    signal.entities.get("limit") or signal.entities.get("order_by")
-                )
-                if has_specific_entity:
-                    time_range_days = 0
-                elif _is_lookup and has_ranking_constraint:
-                    time_range_days = 0
-                else:
-                    time_range_days = self._settings.analysis.default_time_range_days
+                time_range_days = self._settings.analysis.default_time_range_days
             parsed_params["days"] = time_range_days
 
             # 如果统一 LLM 完成了指代消解，用 resolved_query 替换 enhanced_query
@@ -823,21 +811,26 @@ class Orchestrator:
             )
 
             # ── output_mode 自适应解析 ──────────────────────────────────────────
-            # 解析顺序：
-            #   1) 显式 detailed/brief/table/chat → 严格尊重，不做任何覆盖
-            #   2) auto（默认）→ 按 intent_kind 解析：
-            #         data_lookup → chat（事实查询，自然简洁直答）
-            #         其他       → detailed（保持原有报告体验）
-            #   3) DAG 路径降级保护：解析后若是 chat，强制升 brief
-            #         （ReportAgent prompt 主体是"报告生成器"，与 chat 冲突；
-            #          这一保护对显式 chat 也生效，避免 DAG 路径行为漂移）
+            # 三级优先级:
+            #   L1) 显式 detailed/brief/table/chat → 严格尊重，不做任何覆盖
+            #   L2) auto + LLM recommended → 采用 signal.recommended_output_mode
+            #   L3) auto 兜底 → 按 intent_kind 映射（data_lookup→chat, 其他→detailed）
+            # DAG 路径降级保护：解析后若是 chat，强制升 brief
+            #   （ReportAgent prompt 主体是"报告生成器"，与 chat 冲突；
+            #    这一保护对显式 chat 也生效，避免 DAG 路径行为漂移）
             from core.observability.tracing import record_span
 
             with record_span("orchestrator", "resolve_output_mode") as om_attrs:
                 om_attrs["requested"] = request.output_mode
                 effective_output_mode = request.output_mode
                 if effective_output_mode == "auto":
-                    if is_data_lookup:
+                    if signal.recommended_output_mode:
+                        effective_output_mode = signal.recommended_output_mode
+                        _logger.info(
+                            "output_mode auto → '%s' (LLM recommended)",
+                            effective_output_mode,
+                        )
+                    elif is_data_lookup:
                         effective_output_mode = "chat"
                         _logger.info("output_mode auto → 'chat' (intent=data_lookup)")
                     else:
