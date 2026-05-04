@@ -32,6 +32,7 @@ def _apply_order_and_limit(
     *,
     date_col: Any,
     amount_col: Any | None,
+    max_limit: int = 0,
 ) -> Any:
     if order_by == "date_desc":
         stmt = stmt.order_by(date_col.desc())
@@ -42,8 +43,12 @@ def _apply_order_and_limit(
     elif order_by == "amount_asc" and amount_col is not None:
         stmt = stmt.order_by(amount_col.asc())
 
-    if limit > 0:
-        stmt = stmt.limit(limit)
+    if max_limit > 0:
+        effective = min(limit, max_limit) if limit > 0 else max_limit
+    else:
+        effective = limit
+    if effective > 0:
+        stmt = stmt.limit(effective)
 
     return stmt
 

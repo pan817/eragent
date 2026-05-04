@@ -82,9 +82,7 @@ def build_chat_model(
         temperature=llm_cfg.temperature,
         max_tokens=max_tokens,
         timeout=llm_cfg.timeout,
-        # 显式开启流式能力。ChatOpenAI 即使 streaming=True，ainvoke 仍会
-        # 一次性返回完整响应；只有调用方走 astream / astream_events 时才会
-        # 真正触发 SSE 流式拉取。这里放宽开关，具体是否流式由调用方决定。
+        max_retries=llm_cfg.max_retries,
         streaming=llm_cfg.streaming_enabled,
     )
     if not llm_cfg.use_system_proxy:

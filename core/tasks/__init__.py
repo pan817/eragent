@@ -5,9 +5,7 @@
 """
 
 from core.tasks.events import (
-    EventBus,
     EventBusProtocol,
-    MemoryEventBus,
     get_event_bus,
     init_event_bus,
     shutdown_event_bus,
@@ -29,9 +27,7 @@ from core.tasks.schemas import TERMINAL_STATES
 __all__ = [
     "AnalysisTaskAck",
     "AnalysisTaskSnapshot",
-    "EventBus",
     "EventBusProtocol",
-    "MemoryEventBus",
     "TERMINAL_STATES",
     "TaskEntry",
     "TaskRegistry",

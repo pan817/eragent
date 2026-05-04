@@ -21,12 +21,19 @@ from core.time_utils import now_cn
 
 _logger = get_logger(__name__)
 
-# 常量
-_MAX_EMPTY_SESSIONS = 3
-_MAX_MESSAGES_PER_SESSION = 500
-_MAX_CONTENT_BYTES = 32 * 1024  # 32KB
 _TITLE_AUTO_LENGTH = 24
 _PREVIEW_LENGTH = 60
+
+
+def _chat_limits() -> tuple[int, int, int]:
+    """Return (max_empty_sessions, max_messages_per_session, max_content_bytes)."""
+    from config.settings import get_settings
+    s = get_settings().memory
+    return (
+        s.chat_max_empty_sessions,
+        s.chat_max_messages_per_session,
+        s.chat_max_content_bytes,
+    )
 
 
 def _now() -> datetime:
@@ -112,7 +119,8 @@ class ChatRepository:
                 .order_by(chat_sessions_table.c.created_at)
             ).fetchall()
 
-            if len(empty) >= _MAX_EMPTY_SESSIONS:
+            max_empty, _, _ = _chat_limits()
+            if len(empty) >= max_empty:
                 row = empty[0]
                 return self._row_to_session(row)
 
@@ -389,20 +397,21 @@ class ChatRepository:
             if row is None:
                 return None
 
+            _, max_msgs, max_bytes = _chat_limits()
             current_count = row.message_count
-            if current_count + len(messages) > _MAX_MESSAGES_PER_SESSION:
+            if current_count + len(messages) > max_msgs:
                 raise ValueError(
                     f"SESSION_FULL: 当前 {current_count} 条，"
-                    f"追加 {len(messages)} 条后超过上限 {_MAX_MESSAGES_PER_SESSION}"
+                    f"追加 {len(messages)} 条后超过上限 {max_msgs}"
                 )
 
             now = _now()
             created_msgs = []
             for i, msg in enumerate(messages):
                 content = msg["content"]
-                if len(content.encode("utf-8")) > _MAX_CONTENT_BYTES:
+                if len(content.encode("utf-8")) > max_bytes:
                     raise ValueError(
-                        f"CONTENT_TOO_LARGE: 消息内容超过 {_MAX_CONTENT_BYTES // 1024}KB"
+                        f"CONTENT_TOO_LARGE: 消息内容超过 {max_bytes // 1024}KB"
                     )
                 mid = _new_id()
                 ts = now + timedelta(microseconds=i)
@@ -505,9 +514,10 @@ class ChatRepository:
             # 无有效字段，直接返回当前消息
             return self._get_message(session_id, message_id)
 
-        if "content" in values and len(values["content"].encode("utf-8")) > _MAX_CONTENT_BYTES:
+        _, _, max_bytes = _chat_limits()
+        if "content" in values and len(values["content"].encode("utf-8")) > max_bytes:
             raise ValueError(
-                f"CONTENT_TOO_LARGE: 消息内容超过 {_MAX_CONTENT_BYTES // 1024}KB"
+                f"CONTENT_TOO_LARGE: 消息内容超过 {max_bytes // 1024}KB"
             )
 
         with self._sf() as s:

@@ -107,6 +107,7 @@ mock_data:
 analysis:
   default_time_range_days: 30    # 默认分析时间范围（天）
   max_time_range_days: 365       # 单次查询最大时间范围（天）
+  dag_max_tasks: 12              # 单个 DAG 计划最大任务数
   response_timeout_seconds: 900.0  # 整体超时；需覆盖 LLM 含重试(720s) + 编排开销
   db_io_timeout_seconds: 30.0    # 数据库 I/O 单次操作硬超时（秒）
 
@@ -136,6 +137,7 @@ agent_runtime:
   max_short_term_sessions: 1024       # 进程内最大并发 session 数（LRU 淘汰）
   retry_backoff_base_seconds: 1.0     # 重试退避基数（秒），实际等待 base * 2^attempt
   retry_backoff_max_seconds: 30.0     # 退避上限（秒）
+  tool_retry_max_attempts: 2          # 工具调用失败自动重试次数（ToolRetryMiddleware）
 
 observability:
   max_io_text: 2000                   # trace 中 input/output 文本截断长度
@@ -164,13 +166,8 @@ async_analysis:
   trace_flush_barrier_timeout: 10.0   # publish_done 前等 trace_runs commit 的秒数
   orphan_pending_chat_max_age_sec: 1800  # sweep 纠偏超龄 pending chat_messages 的阈值
 
-  # SSE 事件总线后端。
-  # - memory：进程内 asyncio.Queue，仅适用于 workers=1 的单进程部署
-  # - redis：Redis Pub/Sub + 环形缓冲，支持 uvicorn --workers>1 多进程共享事件
-  # 多 worker 部署必须使用 redis，否则 POST 落到 worker A 的任务事件无法
-  # 送达订阅落在 worker B 的 SSE 连接，前端只能看到心跳（详见 docs/issues/async_analyze_backend_issue.md）
-  event_backend: "memory"
-  redis_url: "redis://localhost:6379/0"  # 仅 event_backend=redis 时需要
+  # SSE 事件总线 Redis 配置（Pub/Sub + 环形缓冲）
+  redis_url: "redis://localhost:6379/0"
   redis_key_prefix: "eragent:events"     # Redis key 前缀，多实例隔离用
 
 p2p:
@@ -211,6 +208,7 @@ p2p:
   tool_output:
     max_items: 200                    # 列表型返回最多保留的条目数（0 关闭）
     max_chars: 30000                  # 单次 tool 返回 JSON 字符数硬上限（0 关闭）
+    query_max_rows: 5000              # SQL/Cypher 查询返回行数硬上限（limit=0 或超限时强制截断）
 
 report:
   # ReportAgent LLM 输出硬上限（token）；覆盖 llm_fast.max_tokens。
@@ -268,6 +266,10 @@ memory:
       correction: 2
       domain_fact: 3
       session_recap: 3
+  chat:
+    max_messages_per_session: 500   # 单会话消息条数上限
+    max_content_bytes: 32768        # 单条消息内容字节上限（32KB）
+    max_empty_sessions: 3           # 每用户空会话复用上限
   react:
     trim_enabled: true              # ReAct 循环内 LLM 输入裁剪总开关
     keep_recent_rounds: 2           # 保留最近几轮完整对话（含工具结果）

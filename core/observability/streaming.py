@@ -28,6 +28,7 @@ def _publish_to_event_bus(trace_id: str, payload: dict[str, Any]) -> None:
             "trace_id": trace_id,
             "ts": now_cn().isoformat(),
             "seq": seq,
+            "replay_safe": True,
         }
         bus.publish(trace_id, payload)
     except Exception:  # noqa: BLE001

@@ -24,6 +24,17 @@ class TestModelFactory:
             build_chat_model(settings.llm)
             mock_chat.assert_called_once()
 
+    def test_max_retries_passed_to_chat_openai(self) -> None:
+        """build_chat_model 应将 max_retries 传递给 ChatOpenAI。"""
+        settings = Settings()
+        settings.llm.max_retries = 5
+        with patch("core.llm.model_factory.ChatOpenAI") as mock_chat:
+            from core.llm.model_factory import build_chat_model
+
+            build_chat_model(settings.llm)
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs["max_retries"] == 5
+
     def test_build_model_default_disables_system_proxy(self) -> None:
         """默认 use_system_proxy=False：应注入 trust_env=False 的 httpx 客户端。"""
         settings = Settings()
@@ -538,3 +549,100 @@ class TestBuildMemoryMetadata:
     def test_none_anomalies(self) -> None:
         meta = self._fn("q", "t", None, {}, 30)
         assert meta["anomaly_count"] == 0
+
+
+class TestIsTransientToolError:
+    """_is_transient_tool_error 瞬时错误判定测试。"""
+
+    def setup_method(self) -> None:
+        from modules.p2p.agent import _is_transient_tool_error
+        self._fn = _is_transient_tool_error
+
+    def test_timeout_error(self) -> None:
+        assert self._fn(TimeoutError("timed out")) is True
+
+    def test_connection_error(self) -> None:
+        assert self._fn(ConnectionError("refused")) is True
+
+    def test_os_error(self) -> None:
+        assert self._fn(OSError("network unreachable")) is True
+
+    def test_sqlalchemy_operational_error(self) -> None:
+        from sqlalchemy.exc import OperationalError
+        exc = OperationalError("SELECT 1", {}, Exception("connection lost"))
+        assert self._fn(exc) is True
+
+    def test_sqlalchemy_interface_error(self) -> None:
+        from sqlalchemy.exc import InterfaceError
+        exc = InterfaceError("SELECT 1", {}, Exception("closed"))
+        assert self._fn(exc) is True
+
+    def test_value_error_not_retried(self) -> None:
+        assert self._fn(ValueError("bad param")) is False
+
+    def test_key_error_not_retried(self) -> None:
+        assert self._fn(KeyError("missing")) is False
+
+    def test_runtime_error_not_retried(self) -> None:
+        assert self._fn(RuntimeError("logic error")) is False
+
+    def test_class_name_fallback_timeout(self) -> None:
+        class CustomTimeoutError(Exception):
+            pass
+        assert self._fn(CustomTimeoutError("custom")) is True
+
+    def test_class_name_fallback_connection(self) -> None:
+        class CustomConnectionError(Exception):
+            pass
+        assert self._fn(CustomConnectionError("custom")) is True
+
+
+class TestToolRetryMiddlewareIntegration:
+    """ToolRetryMiddleware 集成到 P2PAgent 的验证。"""
+
+    def test_agent_build_includes_tool_retry_middleware(self) -> None:
+        """_get_or_build_agent 构造的 middleware 列表应包含 ToolRetryMiddleware。"""
+        from langchain.agents.middleware import ToolRetryMiddleware
+
+        settings = Settings()
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+
+        with (
+            patch("core.llm.model_factory.build_chat_model"),
+            patch("modules.p2p.agent.create_agent") as mock_create,
+        ):
+            mock_create.return_value = MagicMock()
+            agent._get_or_build_agent()
+
+        call_kwargs = mock_create.call_args.kwargs
+        middleware_list = call_kwargs["middleware"]
+        middleware_types = [type(m).__name__ for m in middleware_list]
+        assert "ToolRetryMiddleware" in middleware_types
+
+    def test_tool_retry_uses_config_values(self) -> None:
+        """ToolRetryMiddleware 应使用 agent_runtime 配置值。"""
+        from langchain.agents.middleware import ToolRetryMiddleware
+
+        settings = Settings()
+        settings.agent_runtime.tool_retry_max_attempts = 4
+        settings.agent_runtime.retry_backoff_base_seconds = 2.0
+        settings.agent_runtime.retry_backoff_max_seconds = 15.0
+        with patch("modules.p2p.agent.get_settings", return_value=settings):
+            from modules.p2p.agent import P2PAgent
+            agent = P2PAgent(settings=settings)
+
+        with (
+            patch("core.llm.model_factory.build_chat_model"),
+            patch("modules.p2p.agent.create_agent") as mock_create,
+        ):
+            mock_create.return_value = MagicMock()
+            agent._get_or_build_agent()
+
+        call_kwargs = mock_create.call_args.kwargs
+        middleware_list = call_kwargs["middleware"]
+        retry_mw = next(m for m in middleware_list if isinstance(m, ToolRetryMiddleware))
+        assert retry_mw.max_retries == 4
+        assert retry_mw.initial_delay == 2.0
+        assert retry_mw.max_delay == 15.0

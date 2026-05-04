@@ -49,12 +49,43 @@ class TestGetToolLogger:
 # ---------------------------------------------------------------------------
 
 
-def _make_tool_output_cfg(max_items: int = 200, max_chars: int = 100) -> MagicMock:
+def _make_tool_output_cfg(
+    max_items: int = 200, max_chars: int = 100, query_max_rows: int = 5000,
+) -> MagicMock:
     """Create a mock P2PSettings with tool_output config."""
     mock_settings = MagicMock()
     mock_settings.tool_output.max_items = max_items
     mock_settings.tool_output.max_chars = max_chars
+    mock_settings.tool_output.query_max_rows = query_max_rows
     return mock_settings
+
+
+class TestClampQueryLimit:
+
+    def test_limit_zero_returns_max_rows(self) -> None:
+        from modules.p2p.tools._output import _clamp_query_limit
+        mock = _make_tool_output_cfg(query_max_rows=5000)
+        with patch("modules.p2p.settings.get_p2p_settings", return_value=mock):
+            assert _clamp_query_limit(0) == 5000
+
+    def test_limit_within_max(self) -> None:
+        from modules.p2p.tools._output import _clamp_query_limit
+        mock = _make_tool_output_cfg(query_max_rows=5000)
+        with patch("modules.p2p.settings.get_p2p_settings", return_value=mock):
+            assert _clamp_query_limit(100) == 100
+
+    def test_limit_exceeds_max(self) -> None:
+        from modules.p2p.tools._output import _clamp_query_limit
+        mock = _make_tool_output_cfg(query_max_rows=5000)
+        with patch("modules.p2p.settings.get_p2p_settings", return_value=mock):
+            assert _clamp_query_limit(10000) == 5000
+
+    def test_max_rows_zero_disables_clamp(self) -> None:
+        from modules.p2p.tools._output import _clamp_query_limit
+        mock = _make_tool_output_cfg(query_max_rows=0)
+        with patch("modules.p2p.settings.get_p2p_settings", return_value=mock):
+            assert _clamp_query_limit(0) == 0
+            assert _clamp_query_limit(99999) == 99999
 
 
 class TestClipAndDump:

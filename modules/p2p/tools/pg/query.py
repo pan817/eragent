@@ -10,7 +10,7 @@ from __future__ import annotations
 from langchain.tools import tool
 
 from modules.p2p.tools._inject import _get_query_backend
-from modules.p2p.tools._output import _clip_and_dump
+from modules.p2p.tools._output import _clamp_query_limit, _clip_and_dump
 
 
 @tool
@@ -45,7 +45,7 @@ async def query_purchase_orders(
         status=status,
         po_number=po_number,
         days=days,
-        limit=limit,
+        limit=_clamp_query_limit(limit),
         order_by=order_by,
     )
     return _clip_and_dump(pos)
@@ -80,7 +80,7 @@ async def query_receipts(
         po_number=po_number,
         vendor_id=vendor_id,
         days=days,
-        limit=limit,
+        limit=_clamp_query_limit(limit),
         order_by=order_by,
     )
     return _clip_and_dump(receipts)
@@ -121,7 +121,7 @@ async def query_invoices(
         status=status,
         invoice_num=invoice_num,
         days=days,
-        limit=limit,
+        limit=_clamp_query_limit(limit),
         order_by=order_by,
     )
     return _clip_and_dump(invoices)
@@ -159,7 +159,7 @@ async def query_payments(
         vendor_id=vendor_id,
         check_number=check_number,
         days=days,
-        limit=limit,
+        limit=_clamp_query_limit(limit),
         order_by=order_by,
     )
     return _clip_and_dump(payments)

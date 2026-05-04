@@ -185,6 +185,8 @@ async def test_b01_single_text_turn_streams_all_chunks(
 
     # ephemeral=True
     assert all(event_bus.ephemeral_flags), "所有 chunk 必须 ephemeral=True"
+    # replay_safe=False
+    assert all(c["replay_safe"] is False for c in chunks), "chunk 必须 replay_safe=False"
 
     # accumulated delta 拼接 == 完整文本
     accumulated = "".join(c["delta"] for c in chunks)

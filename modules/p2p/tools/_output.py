@@ -17,6 +17,18 @@ def _get_tool_logger() -> Any:
     return _tool_logger
 
 
+def _clamp_query_limit(limit: int) -> int:
+    """Clamp caller-provided limit to ``query_max_rows`` from tool_output config."""
+    from modules.p2p.settings import get_p2p_settings
+
+    max_rows = get_p2p_settings().tool_output.query_max_rows
+    if max_rows <= 0:
+        return limit
+    if limit <= 0:
+        return max_rows
+    return min(limit, max_rows)
+
+
 def _clip_and_dump(obj: Any) -> str:
     """把 tool 返回的 Python 对象裁剪后序列化为 JSON 字符串。
 

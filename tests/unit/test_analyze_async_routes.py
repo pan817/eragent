@@ -24,7 +24,7 @@ from api.schemas.analysis import (
 )
 from core.chat import ChatRepository, init_chat_repository
 from core.observability.store import init_trace_store, shutdown_trace_store
-from core.tasks.events import init_event_bus, shutdown_event_bus
+from core.tasks.events import shutdown_event_bus
 from core.tasks.registry import init_task_registry, shutdown_task_registry
 
 
@@ -70,7 +70,16 @@ async def app_env(db_session_factory, monkeypatch):
         async_module, "_get_orchestrator", lambda: fake, raising=True
     )
     init_trace_store(db_session_factory)
-    bus = init_event_bus()
+    fakeredis_mod = pytest.importorskip("fakeredis")
+    from fakeredis import aioredis as fake_aioredis
+    from core.tasks.events_redis import RedisEventBus
+
+    server = fakeredis_mod.FakeServer()
+    bus = RedisEventBus(redis_url="redis://fake", key_prefix="t:route")
+    bus._sync = fakeredis_mod.FakeRedis(server=server, decode_responses=True)
+    bus._async = fake_aioredis.FakeRedis(server=server, decode_responses=True)
+    from core.tasks import events as events_mod
+    events_mod._bus = bus  # noqa: SLF001
     registry = init_task_registry(
         event_bus=bus,
         session_factory=db_session_factory,

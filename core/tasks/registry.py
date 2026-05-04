@@ -98,6 +98,20 @@ class TaskRegistry:
         # 孤儿 pending chat_messages 纠偏阈值：finalizer 是第一道闸，
         # _mark_stale_as_aborted(启动/关闭) 是第二道闸，本周期性 sweep 是第三道闸，
         # 覆盖"进程存活但 finalizer 全链路失败"的极端尾部场景。默认 30 分钟。
+        stall_ceiling = runner_hard_timeout_seconds + runner_stall_grace_seconds
+        if orphan_pending_chat_max_age_sec < stall_ceiling:
+            safe_value = int(stall_ceiling * 2)
+            _logger.warning(
+                "orphan_pending_chat_max_age_sec(%d) < runner_hard_timeout(%.0f) "
+                "+ stall_grace(%.0f) = %.0f; auto-corrected to %d to avoid "
+                "killing chat_messages of still-running tasks",
+                orphan_pending_chat_max_age_sec,
+                runner_hard_timeout_seconds,
+                runner_stall_grace_seconds,
+                stall_ceiling,
+                safe_value,
+            )
+            orphan_pending_chat_max_age_sec = safe_value
         self._orphan_pending_chat_max_age = orphan_pending_chat_max_age_sec
         self._stalled_count = 0
         self._max_concurrent_tasks = max_concurrent_tasks
@@ -106,6 +120,19 @@ class TaskRegistry:
         self._lock = asyncio.Lock()
         self._sweeper: asyncio.Task[Any] | None = None
         self._closed = False
+        _logger.info(
+            "TaskRegistry initialized: max_concurrent=%d, "
+            "result_cache_ttl=%ds, sweep_interval=%ds, "
+            "runner_hard_timeout=%.0fs, stall_grace=%.0fs, "
+            "orphan_pending_max_age=%ds (stall_ceiling=%.0fs)",
+            max_concurrent_tasks,
+            result_cache_ttl_sec,
+            sweep_interval_sec,
+            runner_hard_timeout_seconds,
+            runner_stall_grace_seconds,
+            orphan_pending_chat_max_age_sec,
+            stall_ceiling,
+        )
 
     # ------------------------------------------------------------------
     # 启停
@@ -419,6 +446,7 @@ class TaskRegistry:
                 "trace_id": entry.trace_id,
                 "ts": now_cn().isoformat(),
                 "seq": seq,
+                "replay_safe": True,
                 "state": state.value,
             },
         )
@@ -430,6 +458,7 @@ class TaskRegistry:
             "trace_id": entry.trace_id,
             "ts": now_cn().isoformat(),
             "seq": seq,
+            "replay_safe": True,
             "status": entry.state.value,
             "duration_ms": entry.duration_ms,
         }

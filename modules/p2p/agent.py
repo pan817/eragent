@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolRetryMiddleware
 
 from api.schemas.domain import (
     AnalysisResult,
@@ -33,6 +34,25 @@ from core.llm.model_factory import build_chat_model
 from modules.p2p.prompts import build_system_prompt, format_long_term_memory, get_tool_strategy_prompt
 
 _logger = get_logger(__name__)
+
+
+def _is_transient_tool_error(exc: Exception) -> bool:
+    """仅对数据库连接/超时/网络类瞬时错误重试，业务逻辑错误直接失败。"""
+    try:
+        from sqlalchemy.exc import OperationalError, InterfaceError
+    except ImportError:
+        OperationalError = type(None)  # type: ignore[assignment,misc]
+        InterfaceError = type(None)  # type: ignore[assignment,misc]
+
+    if isinstance(exc, (OperationalError, InterfaceError)):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    cls_name = type(exc).__name__
+    if "Timeout" in cls_name or "Connect" in cls_name or "Connection" in cls_name:
+        return True
+    return False
+
 
 # 从 anomalies 中聚合的实体类型上限（供应商/PO 号各最多保留这么多个，避免 metadata 过大）
 _MAX_ENTITIES_PER_TYPE = 10
@@ -390,13 +410,22 @@ class P2PAgent:
                 keep_recent_rounds=mem_cfg.react_keep_recent_rounds,
                 tool_content_max_chars=mem_cfg.react_tool_content_max_chars,
             )
-            # MemoryMiddleware 在前（外层裁剪），TimingMiddleware 在后（内层记录裁剪后 token）
+            runtime_cfg = self._settings.agent_runtime
+            tool_retry = ToolRetryMiddleware(
+                max_retries=runtime_cfg.tool_retry_max_attempts,
+                retry_on=_is_transient_tool_error,
+                on_failure="continue",
+                backoff_factor=2.0,
+                initial_delay=runtime_cfg.retry_backoff_base_seconds,
+                max_delay=runtime_cfg.retry_backoff_max_seconds,
+                jitter=True,
+            )
             agent_kwargs: dict[str, Any] = dict(
                 model=model,
                 tools=tools,
                 system_prompt=system_prompt,
                 name="p2p_agent",
-                middleware=[memory_middleware, self.timing_middleware],
+                middleware=[memory_middleware, tool_retry, self.timing_middleware],
             )
             if self._checkpointer is not None:
                 agent_kwargs["checkpointer"] = self._checkpointer
@@ -511,6 +540,7 @@ class P2PAgent:
                         "trace_id": trace_id,
                         "ts": now_cn().isoformat(),
                         "seq": 0,
+                        "replay_safe": False,
                         "node": node,
                         "message_id": message_id,
                         "delta": "",

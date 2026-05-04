@@ -2,11 +2,11 @@
 
 验证 ``node="agent_final"`` 的 ChunkEvent 能正确流过：
 
-1. P2PAgent 发布 → MemoryEventBus（ephemeral=True，不入 buffer）
+1. P2PAgent 发布 → RedisEventBus（ephemeral=True，不入 buffer）
 2. SSE 端点透传 → HTTP `data:` 行
 3. 客户端按 ChunkEvent 协议解析（type / node / message_id / index / eos）
 
-不跑真实 LLM，用 FakeOrchestrator 直接调用 EventBus.publish 模拟 ReAct 推送。
+不跑真实 LLM，用 FakeOrchestrator 直接调用 RedisEventBus.publish 模拟 ReAct 推送。
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ class _ChunkPublishingOrchestrator:
                     "trace_id": trace_id or "",
                     "ts": "2026-04-16T16:00:00+08:00",
                     "seq": 0,
+                    "replay_safe": False,
                     "node": "agent_final",
                     "message_id": msg_id,
                     "delta": delta,
@@ -75,6 +76,7 @@ class _ChunkPublishingOrchestrator:
                 "trace_id": trace_id or "",
                 "ts": "2026-04-16T16:00:01+08:00",
                 "seq": 0,
+                "replay_safe": False,
                 "node": "agent_final",
                 "message_id": msg_id,
                 "delta": "",
@@ -185,6 +187,8 @@ async def test_react_chunks_delivered_via_sse(streaming_app) -> None:
     assert all(c["node"] == "agent_final" for c in chunk_events)
     # 全部 seq=0
     assert all(c["seq"] == 0 for c in chunk_events)
+    # chunk 事件 replay_safe=False
+    assert all(c["replay_safe"] is False for c in chunk_events)
     # message_id 一致（绑定同一个气泡）
     msg_ids = {c["message_id"] for c in chunk_events}
     assert len(msg_ids) == 1, f"message_id 应唯一: {msg_ids}"

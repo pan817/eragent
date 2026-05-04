@@ -42,44 +42,32 @@
 - **建议修复**：把 `api/schemas/analysis.py` 下沉到 `core/schemas/analysis.py`，作为业务数据契约的归属。`api/schemas/` 仅保留与 HTTP 协议强相关的 wrapper（如分页 envelope、错误响应格式），并 re-export `core.schemas` 中的核心模型，对外 API 兼容性不变。
 - **发现日期**：2026-04-16（pyreverse 扫描 [packages_toplevel.png](architecture/packages_toplevel.png) 时定位）
 
-### 3. EventBus ephemeral 事件缺乏类型区分
-- **问题**：`core/tasks/events.py` 的 `publish()` 方法通过 `ephemeral` 布尔标志区分"可丢弃的高频事件"（LLM chunk）和"必须送达的状态事件"（done/error），但在类型层面无区分（都是 `dict`），消费方无法从事件结构上判断是否可安全回放。
-- **影响**：依赖 `Last-Event-ID` 回放的 SSE 客户端可能漏掉 ephemeral 事件后误认为数据丢失；未来新增事件类型时，开发者需翻源码确认是否 ephemeral。
-- **涉及文件**：
-  - [core/tasks/events.py](../core/tasks/events.py)
-  - [core/tasks/events_redis.py](../core/tasks/events_redis.py)
-  - [api/routes/analyze_async.py](../api/routes/analyze_async.py)
-- **建议修复**：引入 `EphemeralEvent` / `PersistentEvent` 类型标记或在事件 payload 中增加 `replay_safe: bool` 字段，让消费方无需了解内部实现即可判断回放安全性。
-- **发现日期**：2026-04-18（重构分析时发现）
+### ~~3. EventBus ephemeral 事件缺乏类型区分~~ ✅ 已修复
+- **修复方案**：所有事件 payload 增加 `replay_safe: bool` 字段。持久化事件（status / done / stage / tool / model / dag_task）为 `True`；临时高频事件（chunk）为 `False`。消费方无需了解 EventBus 内部实现即可判断回放安全性。
+- **修复日期**：2026-05-04
+- **涉及文件**：`core/tasks/events.py`、`core/tasks/stream_utils.py`、`core/tasks/registry.py`、`core/observability/streaming.py`、`api/routes/analyze_async.py`、`modules/p2p/agent.py`、`modules/p2p/report_agent.py`
 
-### 4. TaskRegistry 多级 TTL 清理协调风险
-- **问题**：`core/tasks/registry.py` 存在三套独立的清理机制——`result_cache_ttl_sec`（600s，entry 从内存淘汰）、`orphan_pending_chat_max_age_sec`（1800s，pending 状态 chat_messages 标记 error）、启动/关闭时的 `_mark_stale_as_aborted()`——三者的 TTL 窗口和触发时机互不感知。
-- **影响**：极端情况下（worker 崩溃 + sweep 间隔过长），chat_messages 可能在 pending 状态停留超过 30 分钟无人回收；entry 过期淘汰后 orphan 清理器找不到对应 entry，跳过清理。
-- **涉及文件**：
-  - [core/tasks/registry.py](../core/tasks/registry.py)
-- **建议修复**：统一 TTL 层级关系（entry TTL ≥ orphan TTL），在 sweep 中增加"entry 已淘汰但 chat_messages 仍 pending"的兜底检查；或将三套清理逻辑收敛到一个 `cleanup()` 方法中统一调度。
-- **发现日期**：2026-04-18（重构分析时发现）
+### ~~4. TaskRegistry 多级 TTL 清理协调风险~~ ✅ 已修复
+- **修复分析**：经代码审计，原描述中"entry 过期淘汰后 orphan 清理器找不到对应 entry"为虚惊——`_sweep_orphan_pending_chat_messages()` 直接查询 DB（`chat_messages_table.c.status == "pending"`），不依赖内存 `_entries`。三套清理机制的触发时机和职责实际上互补正确（finalizer→启动 recover→周期 sweep）。
+- **修复内容**：在 `TaskRegistry.__init__` 中增加 TTL 约束运行时校验（`orphan_pending_chat_max_age_sec >= runner_hard_timeout + stall_grace`），不满足时自动修正为 `stall_ceiling * 2` + WARNING 日志；启动时 INFO 日志打印所有 TTL 参数及层级关系，便于生产排查。
+- **涉及文件**：`core/tasks/registry.py`、`tests/unit/test_task_registry.py`
+- **发现日期**：2026-04-18
+- **修复日期**：2026-05-04
 
-### 5. LLM 调用缺少统一超时与重试策略
-- **问题**：当前 LLM 调用（主模型 + fast 模型）未统一配置超时和重试策略，部分调用点依赖框架默认值，存在无限等待或无退避重试的风险。
-- **影响**：LLM 服务抖动时可能导致请求堆积、线程/协程耗尽，进而引发雪崩。
+### 5. LLM / 工具调用缺少统一超时与重试策略（部分修复）
+- **问题**：当前 LLM 调用（主模型 + fast 模型）未统一配置重试策略，工具调用无自动重试。
+- **已修复部分**（2026-05-04）：
+  - `build_chat_model` 注入 `max_retries`，所有 LLM 调用点继承配置驱动的 openai SDK 自动重试。
+  - 引入 `ToolRetryMiddleware`（LangChain 内置），28 个工具调用的瞬时错误（DB 连接/超时/网络）自动重试+指数退避+jitter。
+  - 新增 `agent_runtime.tool_retry_max_attempts` 配置项。
+- **遗留问题**：`ModelRetryMiddleware` 未引入（需先重构 `agent.py:829` 手动重试循环，避免双层重试），建议独立条目跟踪。
 - **涉及文件**：
   - [core/llm/model_factory.py](../core/llm/model_factory.py)
-  - [modules/p2p/model_factory.py](../modules/p2p/model_factory.py)
-  - [core/orchestrator/router/__init__.py](../core/orchestrator/router/__init__.py)（L3 LLM 调用）
-  - [modules/p2p/report_agent.py](../modules/p2p/report_agent.py)
-- **建议修复**：在 `model_factory` 层统一注入 `timeout`、`max_retries`、退避策略配置项（从 `config.yaml` 读取），所有 LLM 调用点继承统一配置。
+  - [modules/p2p/agent.py](../modules/p2p/agent.py)
+  - [config/config.yaml](../config/config.yaml)
+  - [config/settings.py](../config/settings.py)
 - **发现日期**：2026-04-18
 
-### 6. 资源上限未全面配置
-- **问题**：并发分析任务数、单次查询返回数据量等关键资源缺少硬上限配置，依赖隐式默认值或无限制。
-- **影响**：高并发场景下可能导致内存耗尽、数据库连接池打满、响应超时。
-- **涉及文件**：
-  - [core/tasks/registry.py](../core/tasks/registry.py)（并发任务数）
-  - [modules/p2p/repository.py](../modules/p2p/repository.py)（查询返回量）
-  - [core/memory/long_term.py](../core/memory/long_term.py)（记忆存储条数）
-- **建议修复**：在 `config.yaml` 中增加 `limits` 配置段，统一管理各类资源上限；代码中读取配置并做硬性截断。
-- **发现日期**：2026-04-18
 
 ### 7. FastAPI 缺少优雅停机处理
 - **问题**：FastAPI shutdown 时未等待进行中的分析任务完成或超时取消，直接退出可能丢弃正在处理的请求。
@@ -142,18 +130,26 @@
   - Alembic 迁移 0015。
 - **遗留**：Repository 测试增加默认参数用例、工具测试断言非空、端到端默认路径测试层尚未实施。
 
-### 19. admin_metrics.py 静默吞异常（chat_index_status indexer 分支）
-- **问题**：`api/routes/admin_metrics.py:90` 的 `except Exception: pass` 在获取 chat indexer queue depth 时静默吞异常，违反 CLAUDE.md "不接受 `except: pass` 静默吞异常" 规约。与已修复的 #14 属同类问题。
-- **影响**：chat indexer 初始化异常（如模块导入失败）会被静默忽略，运维无法从日志发现问题。实际风险较低（仅影响诊断端点的一个字段），但违反工程规约。
-- **涉及文件**：
-  - [api/routes/admin_metrics.py:90](../api/routes/admin_metrics.py#L90)
-- **建议修复**：将 `except Exception: pass` 改为 `except Exception as exc: _logger.debug("chat indexer queue check failed: %s", exc)`（使用 DEBUG 级别因为是非关键诊断分支）。
-- **优先级**：P3
-- **发现日期**：2026-05-03
-
 ---
 
 ## 已修复
+
+### 19. admin_metrics.py 静默吞异常（chat_index_status indexer 分支）（已修复）
+- **问题**：`api/routes/admin_metrics.py:90` 的 `except Exception: pass` 静默吞异常。
+- **修复方案**：改为 `except Exception as exc: _logger.debug("chat indexer queue check failed: %s", exc)`。已在 #14 修复时一并处理。
+- **发现日期**：2026-05-03
+- **修复日期**：2026-05-03
+
+### 6. 资源上限未全面配置（已修复）
+- **问题**：P2P 查询工具 limit 参数无硬上限（LLM 可传 0 或极大值），Chat 会话限制和 DAG 任务数上限硬编码不可配置。
+- **修复方案**：
+  - `p2p.tool_output.query_max_rows: 5000`：PG 工具层调用 backend 前 clamp limit，双 repository（oracle_ebs / new_erp）和 Neo4j backend 的 `_apply_order_and_limit` / `_order_and_limit` 增加 `max_limit` 参数。
+  - `memory.chat_max_messages_per_session / chat_max_content_bytes / chat_max_empty_sessions`：Chat Repository 硬编码常量改为从 `MemorySettings` 读取。
+  - `analysis.dag_max_tasks: 12`：DAG Validator 硬编码常量改为从 `AnalysisSettings` 读取。
+  - 并发任务数（`async_analysis.max_concurrent_tasks`）和长期记忆上限（`memory.long_term_max_per_user`）已在之前的迭代中配置化，无需改动。
+- **涉及文件**：`modules/p2p/settings.py`、`modules/p2p/tools/pg/query.py`、`modules/p2p/tools/_output.py`、`modules/p2p/schemas/oracle_ebs/repository.py`、`modules/p2p/schemas/new_erp/repository.py`、`core/etl/query_backend.py`、`core/chat/repository.py`、`core/orchestrator/dag/validator.py`、`config/settings.py`、`config/config.yaml`
+- **发现日期**：2026-04-18
+- **修复日期**：2026-05-04
 
 ### 18. core → modules 直接依赖（已修复）
 - **问题**：`core/` 层存在 4 处直接 import `modules.p2p.*`，绕过 `ModuleProvider` Protocol 抽象。

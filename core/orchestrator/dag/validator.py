@@ -11,11 +11,12 @@ from typing import Any
 
 from core.orchestrator.dag.registry import ToolRegistry
 
-# 报告工具名（由 ReportAgent 处理，不注册到 ToolRegistry）
 _REPORT_TOOLS = {"generate_summary_report", "generate_chart"}
 
-# 最大任务数
-_MAX_TASKS = 12
+
+def _dag_max_tasks() -> int:
+    from config.settings import get_settings
+    return get_settings().analysis.dag_max_tasks
 
 
 class DAGValidator:
@@ -27,11 +28,13 @@ class DAGValidator:
     def validate(self, tasks: list[dict[str, Any]]) -> tuple[bool, str | None]:
         """全量校验，返回 (是否通过, 错误原因)。"""
 
+        max_tasks = _dag_max_tasks()
+
         # 1. 基础结构
         if not tasks:
             return False, "任务列表不能为空"
-        if len(tasks) > _MAX_TASKS:
-            return False, f"任务数量 {len(tasks)} 超过上限 {_MAX_TASKS}"
+        if len(tasks) > max_tasks:
+            return False, f"任务数量 {len(tasks)} 超过上限 {max_tasks}"
 
         task_ids = [t.get("task_id") for t in tasks]
         if len(task_ids) != len(set(task_ids)):

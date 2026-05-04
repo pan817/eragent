@@ -111,7 +111,11 @@ class Neo4jStructuredBackend:
             params["status_val"] = status
 
     @staticmethod
-    def _order_and_limit(kwargs: dict[str, Any], order_field: str = "n.valid_from") -> str:
+    def _order_and_limit(
+        kwargs: dict[str, Any],
+        order_field: str = "n.valid_from",
+        max_limit: int = 0,
+    ) -> str:
         """Build ``ORDER BY ... LIMIT ...`` fragment (no leading space).
 
         # TECH-DEBT(#9): amount_desc/amount_asc 静默降级为日期排序
@@ -128,7 +132,11 @@ class Neo4jStructuredBackend:
                 limit = int(limit)
             except (ValueError, TypeError):
                 limit = 0
-        limit_clause = f" LIMIT {limit}" if limit > 0 else ""
+        if max_limit > 0:
+            effective = min(limit, max_limit) if limit > 0 else max_limit
+        else:
+            effective = limit
+        limit_clause = f" LIMIT {effective}" if effective > 0 else ""
         return f"{order_clause}{limit_clause}"
 
     # ── Query methods ────────────────────────────────────────

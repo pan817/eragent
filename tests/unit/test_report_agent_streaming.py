@@ -15,8 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import pytest as _pytest_top
+
 from config.settings import Settings
-from core.tasks.events import MemoryEventBus
+from core.tasks.events_redis import RedisEventBus
 
 
 @pytest.fixture()
@@ -62,11 +64,17 @@ class _FakeStreamingLLM:
 
 
 @pytest.fixture()
-def event_bus() -> MemoryEventBus:
-    # 每个用例独立一个 bus，避免事件泄漏
-    from core.tasks import events as events_mod
+def event_bus():
+    fakeredis = _pytest_top.importorskip("fakeredis")
+    from fakeredis import aioredis as fake_aioredis
 
-    bus = MemoryEventBus(buffer_size=100)
+    from core.tasks import events as events_mod
+    from core.tasks.events_redis import RedisEventBus
+
+    server = fakeredis.FakeServer()
+    bus = RedisEventBus(redis_url="redis://fake", key_prefix="t:rpt", buffer_size=100)
+    bus._sync = fakeredis.FakeRedis(server=server, decode_responses=True)
+    bus._async = fake_aioredis.FakeRedis(server=server, decode_responses=True)
     events_mod._bus = bus  # noqa: SLF001
     try:
         yield bus
@@ -126,7 +134,7 @@ class TestExtractChunkText:
 
 @pytest.mark.asyncio
 async def test_astream_raises_empty_response_when_no_text_collected(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """astream 跑完一片空白时抛 EMPTY_RESPONSE，不静默返回空串。"""
     from modules.p2p.errors import ReportGenerationError
@@ -147,7 +155,7 @@ async def test_astream_raises_empty_response_when_no_text_collected(
 
 @pytest.mark.asyncio
 async def test_astream_uses_reasoning_content_when_content_empty(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """Qwen3 bug 场景：所有文本都落在 reasoning_content，仍能完整累加。"""
     from modules.p2p.report_agent import ReportAgent
@@ -216,7 +224,7 @@ class TestStripThinkTags:
 
 @pytest.mark.asyncio
 async def test_astream_suppresses_think_tags_in_stream(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """Phase 2: <think> 标签在流式过程中被 suppress，前端不会看到推理内容。"""
     from modules.p2p.report_agent import ReportAgent
@@ -262,7 +270,7 @@ async def test_astream_suppresses_think_tags_in_stream(
 
 @pytest.mark.asyncio
 async def test_astream_think_tag_split_across_chunks(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """<think> 标签被拆散在多个 chunk 边界上仍能正确 suppress。"""
     from modules.p2p.report_agent import ReportAgent
@@ -288,7 +296,7 @@ async def test_astream_think_tag_split_across_chunks(
 
 @pytest.mark.asyncio
 async def test_astream_no_think_tags_passes_through(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """无 <think> 标签时所有内容正常透传，不受状态机影响。"""
     from modules.p2p.report_agent import ReportAgent
@@ -309,7 +317,7 @@ async def test_astream_no_think_tags_passes_through(
 
 @pytest.mark.asyncio
 async def test_astream_with_publish_accumulates_and_publishes(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """_astream_with_publish 应按 chunk 产出 + 按 micro-batch 推送事件。"""
     from modules.p2p.report_agent import ReportAgent
@@ -355,6 +363,8 @@ async def test_astream_with_publish_accumulates_and_publishes(
     assert indices == sorted(indices)
     # chunk 的 seq 应固定 0
     assert all(ev["seq"] == 0 for ev in received)
+    # chunk 事件 replay_safe=False
+    assert all(ev["replay_safe"] is False for ev in received)
     # delta 拼接 == 完整内容
     reconstructed = "".join(ev["delta"] for ev in received)
     assert reconstructed == content
@@ -362,7 +372,7 @@ async def test_astream_with_publish_accumulates_and_publishes(
 
 @pytest.mark.asyncio
 async def test_astream_with_publish_uses_ephemeral(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """chunk 事件必须走 ephemeral=True，不进环形缓冲。"""
     from modules.p2p.report_agent import ReportAgent
@@ -383,7 +393,7 @@ async def test_astream_with_publish_uses_ephemeral(
 
 @pytest.mark.asyncio
 async def test_generate_streaming_branch_when_context_injected(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """contextvars 注入 trace_id + message_id 时，generate 走流式分支。"""
     from core.observability.tracing import _TraceContext, _current_trace
@@ -427,7 +437,7 @@ async def test_generate_streaming_branch_when_context_injected(
 
 @pytest.mark.asyncio
 async def test_generate_fallback_to_ainvoke_without_context(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """contextvars 未注入时 generate 走原 ainvoke 分支。"""
     from modules.p2p.report_agent import ReportAgent
@@ -446,7 +456,7 @@ async def test_generate_fallback_to_ainvoke_without_context(
 
 @pytest.mark.asyncio
 async def test_generate_streams_with_trace_id_only_uses_trace_as_message_id(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """没有 assistant_message_id 时，流式仍启用，用 trace_id 作为 message_id。"""
     from core.observability.tracing import _TraceContext, _current_trace
@@ -473,7 +483,7 @@ async def test_generate_streams_with_trace_id_only_uses_trace_as_message_id(
 
 @pytest.mark.asyncio
 async def test_generate_streaming_disabled_by_config(
-    settings: Settings, event_bus: MemoryEventBus
+    settings: Settings, event_bus: RedisEventBus
 ) -> None:
     """llm_fast.streaming_enabled=False 时强制走 ainvoke。"""
     from core.observability.tracing import _TraceContext, _current_trace

@@ -11,7 +11,6 @@ from sqlalchemy import select
 from api.schemas.analysis import AnalysisRequest, AnalysisResult, AnalysisStatus, AnalysisType
 from core.chat.tables import chat_messages_table, chat_sessions_table
 from core.observability.tables import TraceRun
-from core.tasks.events import EventBus
 from core.tasks.registry import TaskEntry, TaskRegistry
 from core.tasks.schemas import TaskState
 from core.time_utils import now_cn
@@ -35,8 +34,17 @@ def _ok_result(trace_id: str) -> AnalysisResult:
 
 
 @pytest.fixture()
-def bus() -> EventBus:
-    return EventBus()
+def bus():
+    fakeredis = pytest.importorskip("fakeredis")
+    from fakeredis import aioredis as fake_aioredis
+
+    from core.tasks.events_redis import RedisEventBus
+
+    server = fakeredis.FakeServer()
+    b = RedisEventBus(redis_url="redis://fake", key_prefix="t:reg")
+    b._sync = fakeredis.FakeRedis(server=server, decode_responses=True)
+    b._async = fake_aioredis.FakeRedis(server=server, decode_responses=True)
+    return b
 
 
 @pytest.fixture()
@@ -71,8 +79,10 @@ async def test_submit_runs_runner_and_reaches_ok(registry, bus) -> None:
     assert entry_ref and entry_ref[0] is entry
 
     # 事件总线应当收到 queued / running / done，SSE 订阅可重放
-    seqs = [e["type"] for e in bus.buffered("t-ok")]
+    buffered = bus.buffered("t-ok")
+    seqs = [e["type"] for e in buffered]
     assert "status" in seqs and "done" in seqs
+    assert all(e["replay_safe"] is True for e in buffered)
     assert bus.is_closed("t-ok")
 
 
@@ -654,7 +664,9 @@ async def test_sweep_orphan_pending_chat_messages(bus, db_session_factory) -> No
         max_concurrent_tasks=2,
         result_cache_ttl_sec=60,
         sweep_interval_sec=60,
-        orphan_pending_chat_max_age_sec=1,  # 1 秒,几乎立即过期
+        runner_hard_timeout_seconds=0.2,
+        runner_stall_grace_seconds=0.1,
+        orphan_pending_chat_max_age_sec=1,  # 1 秒,几乎立即过期（>= 0.2+0.1）
     )
 
     # 建一条 session 及两条消息:一条超龄 pending、一条新 pending
@@ -689,3 +701,56 @@ async def test_sweep_orphan_pending_chat_messages(bus, db_session_factory) -> No
         assert old is not None and old.status == "error"
         assert "重新发起" in old.content
         assert new is not None and new.status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# TTL 约束校验：orphan_pending_chat_max_age_sec 必须 >= stall_ceiling
+# ---------------------------------------------------------------------------
+
+
+def test_ttl_constraint_auto_corrects_when_orphan_age_too_small(
+    bus, db_session_factory,
+) -> None:
+    """orphan_pending_chat_max_age_sec < runner_hard_timeout + stall_grace 时
+    自动修正为 stall_ceiling * 2，防止误杀正在运行的任务的 chat_messages。"""
+    reg = TaskRegistry(
+        event_bus=bus,
+        session_factory=db_session_factory,
+        max_concurrent_tasks=2,
+        result_cache_ttl_sec=60,
+        sweep_interval_sec=60,
+        runner_hard_timeout_seconds=600.0,
+        runner_stall_grace_seconds=60.0,
+        orphan_pending_chat_max_age_sec=500,  # < 600+60=660
+    )
+    assert reg._orphan_pending_chat_max_age == 1320  # (600+60)*2
+
+
+def test_ttl_constraint_keeps_valid_value(bus, db_session_factory) -> None:
+    """orphan_pending_chat_max_age_sec >= stall_ceiling 时保持原值。"""
+    reg = TaskRegistry(
+        event_bus=bus,
+        session_factory=db_session_factory,
+        max_concurrent_tasks=2,
+        result_cache_ttl_sec=60,
+        sweep_interval_sec=60,
+        runner_hard_timeout_seconds=100.0,
+        runner_stall_grace_seconds=20.0,
+        orphan_pending_chat_max_age_sec=200,  # >= 100+20=120
+    )
+    assert reg._orphan_pending_chat_max_age == 200
+
+
+def test_ttl_constraint_boundary_equal_is_valid(bus, db_session_factory) -> None:
+    """orphan_pending_chat_max_age_sec == stall_ceiling 时不触发修正。"""
+    reg = TaskRegistry(
+        event_bus=bus,
+        session_factory=db_session_factory,
+        max_concurrent_tasks=2,
+        result_cache_ttl_sec=60,
+        sweep_interval_sec=60,
+        runner_hard_timeout_seconds=50.0,
+        runner_stall_grace_seconds=10.0,
+        orphan_pending_chat_max_age_sec=60,  # == 50+10
+    )
+    assert reg._orphan_pending_chat_max_age == 60

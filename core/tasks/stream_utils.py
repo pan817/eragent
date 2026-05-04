@@ -216,6 +216,7 @@ def publish_chunk_event(
             "trace_id": trace_id,
             "ts": now_cn().isoformat(),
             "seq": 0,
+            "replay_safe": False,
             "node": node,
             "message_id": message_id,
             "delta": delta,

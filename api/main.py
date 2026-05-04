@@ -56,34 +56,6 @@ def _mask_redis_url(url: str) -> str:
     return url
 
 
-def _check_event_backend_matches_workers(event_backend: str) -> None:
-    """检查 event_backend 与实际 worker 数量是否匹配；不匹配直接 fail-fast。
-
-    多 worker 部署下 memory backend 会导致 POST 与 SSE 可能落在不同 worker
-    进程，订阅方永远收不到发布方的事件（前端 Issue 1 的根因，详见
-    docs/issues/async_analyze_backend_issue.md）。
-
-    2026-04 生产复盘决定升级为 RuntimeError：WARNING 容易被忽略，
-    一旦用户点击"异步分析"就会表现为"界面转圈 15 分钟后失败"，
-    比服务启动不起来更糟糕。压测等临时场景请显式设置
-    ASYNC_ANALYSIS_EVENT_BACKEND=redis 再配合 workers>1 使用。
-    """
-    import os
-
-    workers_env = os.environ.get("WEB_CONCURRENCY") or os.environ.get("WORKERS")
-    try:
-        workers = int(workers_env) if workers_env else 1
-    except ValueError:
-        workers = 1
-    if workers > 1 and event_backend == "memory":
-        raise RuntimeError(
-            f"async_analysis.event_backend=memory 与 workers={workers} 不兼容: "
-            "多 worker 下 SSE 事件无法跨进程送达,前端将只能收到心跳事件。"
-            "请在 config.yaml 设置 async_analysis.event_backend=redis 并提供 redis_url,"
-            "或把 workers 降回 1。详见 docs/issues/async_analyze_backend_issue.md"
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """应用生命周期管理。
@@ -168,17 +140,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 初始化异步分析基础设施：EventBus + TaskRegistry
     async_cfg = settings.async_analysis
-    _check_event_backend_matches_workers(async_cfg.event_backend)
     bus = init_event_bus(
         buffer_size=async_cfg.event_buffer_size,
-        backend=async_cfg.event_backend,
         redis_url=async_cfg.redis_url,
         redis_key_prefix=async_cfg.redis_key_prefix,
     )
-    # Redis 后端启动时 fail-fast：连不通 / 认证失败就别让服务起来接流量，
+    # 启动时 fail-fast：连不通 / 认证失败就别让服务起来接流量，
     # 否则会退化成每个 POST /analyze/async 都在 submit 里跑第一条 Redis 命令失败 → 500。
     # 配错 redis_url（比如 `redis://pwd@host` 而不是 `redis://:pwd@host`）是最常见的翻车点。
-    if async_cfg.event_backend == "redis" and hasattr(bus, "ping"):
+    if hasattr(bus, "ping"):
         try:
             bus.ping()
             _logger.info(
@@ -207,8 +177,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     registry.recover_on_startup()
     registry.start_background()
     _logger.info(
-        "task registry ready: backend=%s max_concurrent=%d",
-        async_cfg.event_backend, async_cfg.max_concurrent_tasks,
+        "task registry ready: redis=%s max_concurrent=%d",
+        _mask_redis_url(async_cfg.redis_url), async_cfg.max_concurrent_tasks,
     )
     # 初始化 Graphiti ETL（可选，受 graphiti_etl.enabled 控制）
     etl_scheduler = None

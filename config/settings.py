@@ -262,6 +262,7 @@ class AnalysisSettings(BaseSettings):
 
     default_time_range_days: int = 90
     max_time_range_days: int = 365
+    dag_max_tasks: int = 12
     # Agent + LLM 首次冷启动可能数十秒，5s 过短，调到 60s
     response_timeout_seconds: float = 900.0  # 需覆盖 LLM 含重试最坏情况(240s×3=720s) + 编排开销
     # 数据库 I/O 在线程池里执行，单次操作的硬超时
@@ -287,6 +288,8 @@ class AgentRuntimeSettings(BaseSettings):
     # 重试退避基数（秒），实际等待 base * 2**attempt
     retry_backoff_base_seconds: float = 1.0
     retry_backoff_max_seconds: float = 30.0
+    # 工具调用失败自动重试次数（ToolRetryMiddleware）
+    tool_retry_max_attempts: int = 2
 
     model_config = {"env_prefix": "AGENT_"}
 
@@ -372,22 +375,11 @@ class AsyncAnalysisSettings(BaseSettings):
     # 主动 cancel 协程 + 强制转终态 + publish done。这是对 wait_for 兜底失灵的纵深防御。
     runner_stall_grace_seconds: float = 60.0
 
-    # SSE 事件总线后端：memory=进程内（仅 workers=1）/ redis=跨进程（多 worker 必须）
-    event_backend: str = "memory"
+    # SSE 事件总线 Redis 连接配置
     redis_url: str = "redis://localhost:6379/0"
     redis_key_prefix: str = "eragent:events"
 
     model_config = {"env_prefix": "ASYNC_ANALYSIS_"}
-
-    @field_validator("event_backend")
-    @classmethod
-    def _validate_event_backend(cls, v: str) -> str:
-        if v not in {"memory", "redis"}:
-            raise ValueError(
-                f"async_analysis.event_backend 只支持 memory / redis，"
-                f"当前值: {v}"
-            )
-        return v
 
 
 class ReportSettings(BaseSettings):
@@ -606,6 +598,11 @@ class MemorySettings(BaseSettings):
     react_trim_enabled: bool = True          # 总开关
     react_keep_recent_rounds: int = 2        # 保留最近几轮完整对话
     react_tool_content_max_chars: int = 500  # 早期 ToolMessage 截断字符数（0=清空）
+
+    # Chat 会话限制
+    chat_max_messages_per_session: int = 500       # 单会话消息条数上限
+    chat_max_content_bytes: int = 32768            # 单条消息内容字节上限（32KB）
+    chat_max_empty_sessions: int = 3               # 每用户空会话复用上限
 
     # 子配置
     ttl: TTLSettings = Field(default_factory=TTLSettings)

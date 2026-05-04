@@ -1,8 +1,8 @@
 """RedisEventBus：基于 Redis Pub/Sub + 环形缓冲的跨进程事件总线。
 
-用于 ``uvicorn --workers>1`` 多 worker 部署场景：POST / SSE 请求可能落在
-不同 worker 进程，MemoryEventBus 的进程内队列无法跨进程共享；本实现通过
-Redis 让所有 worker 看到同一份事件流。
+支持单 worker 和 ``uvicorn --workers>1`` 多 worker 部署场景。
+POST / SSE 请求可能落在不同 worker 进程，本实现通过 Redis
+让所有 worker 看到同一份事件流。
 
 Redis key 布局（按 trace_id 维度）：
 - ``{prefix}:channel:{trace_id}`` —— Pub/Sub channel，负责实时事件广播
@@ -31,9 +31,8 @@ _logger = get_logger(__name__)
 # 到期后 Redis 自动清理，避免历史 trace 占用内存
 _CLOSED_TTL_SEC = 3600
 
-# 每 trace 的缓冲上限（与 MemoryEventBus 对齐）
+# 每 trace 的缓冲上限
 DEFAULT_BUFFER_SIZE = 200
-DEFAULT_SUBSCRIBER_QUEUE_SIZE = 200
 
 # 结束信号的控制消息载荷
 _CONTROL_CLOSE = "__control__close__"
@@ -57,15 +56,13 @@ class RedisEventBus:
         redis_url: str,
         key_prefix: str = "eragent:events",
         buffer_size: int = DEFAULT_BUFFER_SIZE,
-        subscriber_queue_size: int = DEFAULT_SUBSCRIBER_QUEUE_SIZE,
     ) -> None:
         self._redis_url = redis_url
         self._prefix = key_prefix.rstrip(":")
         self._buffer_size = buffer_size
-        self._subscriber_queue_size = subscriber_queue_size
         # 同时持有 sync / async 两个 client：
         # - 同步方法（next_seq / publish / close / drop）走 sync client，
-        #   让 EventBusProtocol 签名与 MemoryEventBus 对齐，所有调用点零改造；
+        #   与 EventBusProtocol 签名对齐，所有调用点零改造；
         # - 异步方法 subscribe 走 async client 用它的 pubsub。
         # 测试可直接赋值 _sync / _async 以注入 fakeredis。
         self._sync: Any = None
@@ -136,7 +133,7 @@ class RedisEventBus:
     ) -> None:
         """发布事件到所有订阅者 + 写入环形缓冲。
 
-        - 关闭后的 trace 不再发布（与 MemoryEventBus 语义对齐）
+        - 关闭后的 trace 不再发布
         - 用 pipeline 打包 RPUSH / LTRIM / PUBLISH，减少 RTT
         - 失败吞掉 + WARNING，不影响业务主流程
 

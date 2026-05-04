@@ -85,6 +85,7 @@ class ToolOutputSettings(BaseSettings):
 
     max_items: int = 200            # 列表型返回最多保留的条目数（0 关闭）
     max_chars: int = 30000          # 单次 tool 返回 JSON 字符数硬上限（0 关闭）
+    query_max_rows: int = 5000      # SQL/Cypher 查询返回行数硬上限（limit=0 或超限时强制截断）
 
     model_config = {"env_prefix": "P2P_TOOLS_"}
 
